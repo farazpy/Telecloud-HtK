@@ -163,8 +163,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.3.6
-  const APP_VERSION = "v1.3.6";
+  // App Version in Header - Incremented to v1.3.7
+  const APP_VERSION = "v1.3.7";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {

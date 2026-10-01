@@ -1,13 +1,16 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import mysql, { Pool } from 'mysql2/promise';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 
-// AI Studio Secrets Support
-const DB_HOST = process.env.DBHOST || process.env.DB_HOST || '127.0.0.1';
-const DB_PORT = Number(process.env.DBPORT || process.env.DB_PORT || 3306);
-const DB_USER = process.env.USERNAME || process.env.DBUSER || process.env.DB_USER || process.env.DB_USERNAME || 'root';
-const DB_PASSWORD = process.env.PASSWORD || process.env.DBPASSWORD || process.env.DB_PASSWORD || '';
+// AI Studio & Standard MySQL Environment Variables with strict precedence
+const DB_HOST = process.env.DB_HOST || process.env.DBHOST || '127.0.0.1';
+const DB_PORT = Number(process.env.DB_PORT || process.env.DBPORT || 3306);
+const DB_USER = process.env.DB_USER || process.env.DBUSER || process.env.DB_USERNAME || process.env.USERNAME || 'root';
+const DB_PASSWORD = process.env.DB_PASSWORD || process.env.DBPASSWORD || process.env.PASSWORD || '';
 const DB_NAME = process.env.DB_NAME || process.env.DBNAME || 'telecloud';
 
 let pool: Pool | null = null;
