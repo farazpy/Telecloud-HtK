@@ -162,9 +162,14 @@ async function forwardToPython(
   return { status: 503, data: { error: 'Telegram MTProto service unavailable' } };
 }
 
-function getShortLink(messageId: number | string): string {
+function getShortLink(messageId: number | string, req?: Request): string {
   const shortId = Number(messageId).toString(36).toUpperCase();
-  return `https://s3.htknetwork.in/${shortId}`;
+  if (req) {
+    const host = req.get('host') || 'localhost:3000';
+    const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
+    return `${protocol}://${host}/f/${shortId}`;
+  }
+  return `/f/${shortId}`;
 }
 
 // API Routes
@@ -438,7 +443,13 @@ app.get(['/api/user/files', '/api/v1/files'], async (req: Request, res: Response
     }
   }
   const dbFiles = await getUserFilesFromDb(tgId, workspaceId);
-  res.json({ files: dbFiles, total: dbFiles.length });
+  const formattedFiles = dbFiles.map(file => {
+    return {
+      ...file,
+      direct_link: getShortLink(file.message_id, req)
+    };
+  });
+  res.json({ files: formattedFiles, total: formattedFiles.length });
 });
 
 // Analytics and stats for dashboard (workspace-aware)
@@ -544,7 +555,7 @@ app.post('/api/files/rename', async (req: Request, res: Response): Promise<void>
     return;
   }
 
-  const directDownloadUrl = getShortLink(message_id);
+  const directDownloadUrl = getShortLink(message_id, req);
 
   const result = await renameFileInDb(tgId, message_id, new_file_name);
   if (result.success) {
@@ -677,7 +688,7 @@ app.get('/api/manifest', async (req: Request, res: Response): Promise<void> => {
     res.setHeader('Content-Disposition', 'attachment; filename="telecloud-playlist.m3u"');
     let m3u = '#EXTM3U\n';
     for (const f of selectedFiles) {
-      const link = getShortLink(f.message_id);
+      const link = getShortLink(f.message_id, req);
       m3u += `#EXTINF:-1,${f.file_name}\n${link}\n`;
     }
     res.send(m3u);
@@ -693,7 +704,7 @@ app.get('/api/manifest', async (req: Request, res: Response): Promise<void> => {
       file_name: f.file_name,
       file_size: size,
       mime_type: f.mime_type || 'application/octet-stream',
-      direct_link: getShortLink(f.message_id),
+      direct_link: getShortLink(f.message_id, req),
       created_at: f.created_at || f.date,
     };
   });
@@ -893,7 +904,7 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
     }
 
     const messageId = pyResult.data.message_id;
-    const directDownloadUrl = getShortLink(messageId);
+    const directDownloadUrl = getShortLink(messageId, req);
     const telegramChat = pyResult.data.chat_id || targetWs?.storage_chat || 'me';
 
     let telegramLink = 'https://t.me/me';
@@ -1115,6 +1126,135 @@ app.get('/api/download/:messageId/:filename?', async (req: Request, res: Respons
     }
 
     // Pipe the web readable stream to express response
+    const reader = pyRes.body.getReader();
+    const pump = async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(value);
+        }
+        res.end();
+      } catch (streamErr) {
+        console.error('[Stream Error]', streamErr);
+        res.end();
+      }
+    };
+    pump();
+  } catch (err: any) {
+    res.status(500).send(`Error downloading file: ${err.message}`);
+  }
+});
+
+// Direct Shortlink Slug Service (s3.htknetwork.in/f/{file_id})
+app.get('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
+  const { file_id } = req.params;
+  let messageId = file_id;
+  
+  if (!/^\d+$/.test(file_id)) {
+    // Convert from base36 to base10 messageId
+    const num = parseInt(file_id, 36);
+    if (!isNaN(num)) {
+      messageId = String(num);
+    }
+  }
+
+  try {
+    const file = await getFileByMessageId(messageId);
+    if (!file) {
+      res.status(404).send('File not found in database');
+      return;
+    }
+    
+    if (file.download_password) {
+      const providedPassword = req.query.password || req.headers['x-download-password'] || '';
+      if (providedPassword !== file.download_password) {
+        // Return a gorgeous HTML password prompt
+        res.setHeader('Content-Type', 'text/html');
+        res.status(403).send(`
+          <!DOCTYPE html>
+          <html lang="en" class="h-full">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Password Protected File - TeleCloud</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet">
+            <style>
+              body { font-family: 'Plus Jakarta Sans', sans-serif; }
+            </style>
+          </head>
+          <body class="bg-slate-950 text-slate-100 flex items-center justify-center min-h-full p-4">
+            <div class="max-w-md w-full p-8 rounded-3xl bg-slate-900 border border-slate-800 shadow-2xl space-y-6 text-center">
+              <div class="w-16 h-14 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center mx-auto border border-sky-500/20">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+              </div>
+              <div class="space-y-2">
+                <h1 class="text-xl font-extrabold text-white">Password Protected File</h1>
+                <p class="text-xs text-slate-400 truncate max-w-xs mx-auto">File: ${file.file_name}</p>
+                <p class="text-xs text-slate-500 font-medium">This secure file is encrypted in your personal cloud. Enter the access password to retrieve or stream this file.</p>
+              </div>
+              
+              <form method="GET" class="space-y-4">
+                <input type="password" name="password" required placeholder="Enter download password" 
+                  class="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm focus:outline-none focus:border-sky-500 text-center font-bold tracking-widest" />
+                <button type="submit" 
+                  class="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold text-sm transition active:scale-95">
+                  Decrypt & Download Stream
+                </button>
+              </form>
+              <div class="text-[10px] text-slate-600 font-mono uppercase tracking-wider">POWERED BY TELECLOUD ENGINE</div>
+            </div>
+          </body>
+          </html>
+        `);
+        return;
+      }
+    }
+
+    const pyUrl = `${PY_BASE}/stream/${messageId}`;
+    const headers: Record<string, string> = {};
+    if (req.headers.range) {
+      headers['Range'] = req.headers.range;
+    }
+
+    const pyRes = await fetch(pyUrl, {
+      method: 'GET',
+      headers,
+    });
+
+    if (!pyRes.ok && pyRes.status !== 206) {
+      const errText = await pyRes.text();
+      res.status(pyRes.status).send(errText);
+      return;
+    }
+
+    res.status(pyRes.status);
+    
+    const contentType = pyRes.headers.get('content-type');
+    const contentLength = pyRes.headers.get('content-length');
+    const contentRange = pyRes.headers.get('content-range');
+    const acceptRanges = pyRes.headers.get('accept-ranges');
+    const contentDisposition = pyRes.headers.get('content-disposition');
+
+    if (contentType) res.setHeader('Content-Type', contentType);
+    if (contentLength) res.setHeader('Content-Length', contentLength);
+    if (contentRange) res.setHeader('Content-Range', contentRange);
+    if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
+    
+    if (contentDisposition) {
+      res.setHeader('Content-Disposition', contentDisposition);
+    } else {
+      res.setHeader('Content-Disposition', `inline; filename="${file.file_name}"`);
+    }
+
+    if (!pyRes.body) {
+      res.end();
+      return;
+    }
+
     const reader = pyRes.body.getReader();
     const pump = async () => {
       try {

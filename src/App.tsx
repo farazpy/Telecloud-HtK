@@ -157,8 +157,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.2.7
-  const APP_VERSION = "v1.2.7";
+  // App Version in Header - Incremented to v1.3.1
+  const APP_VERSION = "v1.3.1";
 
   // Dark Mode Theme State (Defaulting strictly to Light Mode for initial/default experience)
   const [darkMode, setDarkMode] = useState<boolean>(() => {
@@ -1249,17 +1249,17 @@ export default function App() {
 
   const copyToClipboard = (text: string, id: string) => {
     let formattedText = text;
-    // Intercept and convert standard download links to s3.htknetwork.in
+    // Intercept and convert standard download links to same domain with /f/ slug
     if (text && (text.includes('/api/download/') || text.includes('localhost') || text.includes('run.app') || text.includes('htknetwork'))) {
       const match = text.match(/\/api\/download\/([0-9]+)/);
       if (match && match[1]) {
         const shortId = getFileShortId(match[1]);
-        formattedText = `https://s3.htknetwork.in/${shortId}`;
-      } else if (text.startsWith('http') && !text.includes('s3.htknetwork.in')) {
+        formattedText = `${window.location.origin}/f/${shortId}`;
+      } else if (text.startsWith('http') && !text.includes('/f/')) {
         // Fallback or generic convert if shortId is present as digits
         const numericId = text.replace(/[^0-9]/g, '');
         if (numericId && numericId.length >= 4) {
-          formattedText = `https://s3.htknetwork.in/${getFileShortId(numericId)}`;
+          formattedText = `${window.location.origin}/f/${getFileShortId(numericId)}`;
         }
       }
     }
@@ -1341,8 +1341,8 @@ export default function App() {
         a: "TeleCloud connects directly to Telegram's MTProto servers. Telegram permits unlimited file uploads within personal chats and private channels. TeleCloud operates as a highly optimized stream-indexer: it handles files, logs their byte maps to your personal MySQL database, and serves high-speed HTTP streams on demand."
       },
       {
-        q: "How does s3.htknetwork.in handle high-speed streaming?",
-        a: "When a user requests a file via s3.htknetwork.in, Nginx and our optimized download.php proxy handle the HTTP Range headers. It requests only the exact byte range requested by the browser from the Telegram MTProto engine. This means you can seek instantly through 4K videos or scrub large audio tracks with zero buffering."
+        q: "How does TeleCloud handle high-speed streaming?",
+        a: "When a user requests a file via our direct same-domain links, our optimized MTProto stream proxy handles the HTTP Range headers. It requests only the exact byte range requested by the browser from the Telegram MTProto engine. This means you can seek instantly through 4K videos or scrub large audio tracks with zero buffering."
       },
       {
         q: "Is my personal data securely encrypted?",
@@ -1418,14 +1418,14 @@ export default function App() {
                 <span>Enterprise Self-Hosted MTProto Storage</span>
               </div>
 
-              <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight leading-tight text-wrap-balance text-slate-900 dark:text-white">
+              <h1 className={`text-4xl sm:text-6xl font-extrabold tracking-tight leading-tight text-wrap-balance ${darkMode ? 'text-white' : 'text-slate-950'}`}>
                 Decentralized Unlimited Cloud Storage on{' '}
                 <span className="bg-gradient-to-r from-sky-400 via-indigo-400 to-purple-400 bg-clip-text text-transparent">
                   Your VPS.
                 </span>
               </h1>
 
-              <p className="text-base sm:text-lg leading-relaxed text-slate-600 dark:text-slate-300 max-w-2xl">
+              <p className={`text-base sm:text-lg leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-800'} max-w-2xl`}>
                 Store, index, and stream files of any size directly from your secure Telegram MTProto storage chats. TeleCloud indexes your library automatically in your private MySQL catalog and generates lightning-fast, seekable HTTP links instantly.
               </p>
 
@@ -1439,14 +1439,18 @@ export default function App() {
                 </button>
                 <a
                   href="#how-it-works"
-                  className="w-full sm:w-auto px-7 py-3.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-900 text-slate-700 dark:text-slate-300 font-bold text-sm transition text-center"
+                  className={`w-full sm:w-auto px-7 py-3.5 rounded-xl border font-bold text-sm transition text-center ${
+                    darkMode
+                      ? 'border-slate-800 hover:bg-slate-900 text-slate-300'
+                      : 'border-slate-300 hover:bg-slate-150 text-slate-800 bg-white/50'
+                  }`}
                 >
                   Explore Mechanism
                 </a>
               </div>
 
               {/* Unboxed Metadata Trust Badge */}
-              <div className="flex items-center gap-3 pt-2 text-xs text-slate-500 dark:text-slate-400 font-medium">
+              <div className={`flex items-center gap-3 pt-2 text-xs font-medium ${darkMode ? 'text-slate-400' : 'text-slate-700'}`}>
                 <ShieldCheck className="w-4 h-4 text-emerald-500" />
                 <span>Zero Email/Passwords</span>
                 <span>·</span>
@@ -1478,9 +1482,9 @@ export default function App() {
                       <div className="w-14 h-14 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center border border-sky-500/25 animate-bounce">
                         <UploadCloud className="w-6 h-6" />
                       </div>
-                      <div className="space-y-1">
-                        <p className="text-sm font-semibold">Test the MTProto Streaming Pipeline</p>
-                        <p className="text-xs text-slate-400">Click below to upload a simulated movie and see how the VPS indexes and streams it in real-time!</p>
+                      <div className="space-y-1.5">
+                        <p className="text-sm font-bold text-white">Test the MTProto Streaming Pipeline</p>
+                        <p className="text-xs text-slate-300 leading-relaxed max-w-xs mx-auto">Click below to upload a simulated movie and see how the VPS indexes and streams it in real-time!</p>
                       </div>
                     </div>
                   )}
@@ -1529,14 +1533,14 @@ export default function App() {
                           </div>
                           <div>
                             <p className="text-xs font-bold text-white">Stream URL Ready!</p>
-                            <p className="text-[10px] font-mono text-slate-500">s3.htknetwork.in/6JGOTC</p>
+                            <p className="text-[10px] font-mono text-slate-500">{window.location.host}/f/6JGOTC</p>
                           </div>
                         </div>
                         <span className="text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full">Active</span>
                       </div>
 
                       <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-2">
-                        <p className="text-[11px] font-mono text-slate-400 truncate">GET https://s3.htknetwork.in/6JGOTC</p>
+                        <p className="text-[11px] font-mono text-slate-400 truncate">GET {window.location.origin}/f/6JGOTC</p>
                         <p className="text-[10px] text-slate-500 leading-normal">
                           HTTP/1.1 200 OK<br/>
                           Accept-Ranges: bytes<br/>
@@ -1559,7 +1563,7 @@ export default function App() {
                         </button>
                         <button
                           onClick={() => {
-                            navigator.clipboard.writeText("https://s3.htknetwork.in/6JGOTC");
+                            navigator.clipboard.writeText(`${window.location.origin}/f/6JGOTC`);
                             alert("Copied simulated link to clipboard!");
                           }}
                           className="px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-1.5 active:scale-98"
@@ -1592,7 +1596,7 @@ export default function App() {
           <div id="how-it-works" className="space-y-12">
             <div className="text-center max-w-2xl mx-auto space-y-3">
               <span className="text-xs font-bold text-indigo-500 uppercase tracking-wider">The Mechanism</span>
-              <h2 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">How TeleCloud Streams Bytes</h2>
+              <h2 className={`text-3xl font-black tracking-tight ${darkMode ? 'text-white' : 'text-slate-950'}`}>How TeleCloud Streams Bytes</h2>
               <p className="text-sm text-slate-500 dark:text-slate-400">
                 A highly optimized direct connection between your private storage chats and your custom public domains.
               </p>
@@ -1601,7 +1605,7 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
               <div className="space-y-4 text-left p-2">
                 <span className="text-3xl font-extrabold text-sky-500/30 dark:text-sky-400/20 font-mono">01.</span>
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Secure Chunking & Handshake</h3>
+                <h3 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>Secure Chunking & Handshake</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
                   Upon uploading, the file is split into optimal MTProto-aligned memory blocks. These blocks are securely transmitted directly to your private Telegram cloud chat, bypassing local hard drive storage limits.
                 </p>
@@ -1609,7 +1613,7 @@ export default function App() {
 
               <div className="space-y-4 text-left p-2">
                 <span className="text-3xl font-extrabold text-indigo-500/30 dark:text-indigo-400/20 font-mono">02.</span>
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Relational DB Catalog Sync</h3>
+                <h3 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>Relational DB Catalog Sync</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
                   The local VPS MySQL database logs the file's mime type, file name, message ID, and assigns a short Alphanumeric Base-36 ID. This keeps your library catalog lightning-fast and search-optimized.
                 </p>
@@ -1617,9 +1621,9 @@ export default function App() {
 
               <div className="space-y-4 text-left p-2">
                 <span className="text-3xl font-extrabold text-purple-500/30 dark:text-purple-400/20 font-mono">03.</span>
-                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Nginx/PHP Range Streamer</h3>
+                <h3 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>Nginx/PHP Range Streamer</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
-                  When a direct link is accessed on s3.htknetwork.in, the server reads from MySQL, grabs the chunks on-the-fly, and proxies the stream with HTTP Range header support. You can seek and fast-forward instantly!
+                  When a direct link is accessed on TeleCloud, the server reads from MySQL, grabs the chunks on-the-fly, and proxies the stream with HTTP Range header support. You can seek and fast-forward instantly!
                 </p>
               </div>
             </div>
@@ -1629,7 +1633,7 @@ export default function App() {
           <div id="features" className="space-y-8">
             <div className="text-center max-w-2xl mx-auto space-y-2">
               <span className="text-xs font-bold text-sky-500 uppercase tracking-wider">Unmatched Performance</span>
-              <h2 className="text-3xl font-black text-slate-900 dark:text-white">Storage Reimagined</h2>
+              <h2 className={`text-3xl font-black ${darkMode ? 'text-white' : 'text-slate-950'}`}>Storage Reimagined</h2>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
@@ -1648,11 +1652,11 @@ export default function App() {
                 
                 <div className="flex gap-8 border-t border-slate-200/50 dark:border-slate-800/60 pt-4 relative z-10">
                   <div>
-                    <p className="text-3xl font-black font-mono tracking-tight text-slate-900 dark:text-white">0ms</p>
+                    <p className={`text-3xl font-black font-mono tracking-tight ${darkMode ? 'text-white' : 'text-slate-950'}`}>0ms</p>
                     <p className="text-[10px] uppercase font-mono tracking-wider text-slate-400">Connection Handshake</p>
                   </div>
                   <div>
-                    <p className="text-3xl font-black font-mono tracking-tight text-slate-900 dark:text-white">100%</p>
+                    <p className={`text-3xl font-black font-mono tracking-tight ${darkMode ? 'text-white' : 'text-slate-950'}`}>100%</p>
                     <p className="text-[10px] uppercase font-mono tracking-wider text-slate-400">HTML5 Range Compliant</p>
                   </div>
                 </div>
@@ -1698,7 +1702,7 @@ export default function App() {
                   </p>
                 </div>
                 <div className="flex items-baseline gap-2 pt-6">
-                  <span className="text-4xl font-extrabold tracking-tight text-slate-900 dark:text-white">$0.00</span>
+                  <span className={`text-4xl font-extrabold tracking-tight ${darkMode ? 'text-white' : 'text-slate-950'}`}>$0.00</span>
                   <span className="text-xs text-slate-400 font-medium">/ GB storage and streaming fees</span>
                 </div>
               </div>
@@ -1709,7 +1713,7 @@ export default function App() {
           <div id="faq" className="max-w-3xl mx-auto space-y-10">
             <div className="text-center space-y-2">
               <span className="text-xs font-bold text-indigo-500 uppercase tracking-wider">Support Catalog</span>
-              <h2 className="text-3xl font-black text-slate-900 dark:text-white font-display">Frequently Answered Queries</h2>
+              <h2 className={`text-3xl font-black ${darkMode ? 'text-white' : 'text-slate-950'} font-display`}>Frequently Answered Queries</h2>
             </div>
 
             <div className="space-y-4">
@@ -1728,7 +1732,7 @@ export default function App() {
                       onClick={() => setActiveFaq(isOpen ? null : index)}
                       className="w-full px-6 py-5 flex items-center justify-between text-left focus:outline-none"
                     >
-                      <span className="text-sm font-bold text-slate-900 dark:text-white">{faq.q}</span>
+                      <span className={`text-sm font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>{faq.q}</span>
                       <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${isOpen ? 'rotate-180 text-sky-500' : ''}`} />
                     </button>
                     {isOpen && (
@@ -1766,7 +1770,7 @@ export default function App() {
         <footer className={`border-t py-12 transition-colors duration-200 ${darkMode ? 'bg-slate-950/50 border-slate-900' : 'bg-slate-50 border-slate-200/50'}`}>
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-6">
             <div className="flex items-center space-x-2">
-              <span className="font-extrabold text-sm tracking-tight text-slate-900 dark:text-white">TeleCloud</span>
+              <span className={`font-extrabold text-sm tracking-tight ${darkMode ? 'text-white' : 'text-slate-950'}`}>TeleCloud</span>
               <span className="text-xs text-slate-400">© {new Date().getFullYear()} • Personal Decoupled Storage Systems</span>
             </div>
             
@@ -2419,7 +2423,7 @@ export default function App() {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <CheckCircle2 className="w-4 h-4 shrink-0" />
-                        <span className="text-xs font-bold text-slate-900 dark:text-white">File Uploaded Successfully!</span>
+                        <span className={`text-xs font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>File Uploaded Successfully!</span>
                       </div>
                       {overviewResult.has_password && (
                         <span className="text-[9px] uppercase font-mono font-bold bg-amber-500/20 text-amber-500 border border-amber-500/25 px-2 py-0.5 rounded-md shadow-2xs flex items-center gap-1">
