@@ -157,8 +157,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.3.1
-  const APP_VERSION = "v1.3.1";
+  // App Version in Header - Incremented to v1.3.2
+  const APP_VERSION = "v1.3.2";
 
   // Dark Mode Theme State (Defaulting strictly to Light Mode for initial/default experience)
   const [darkMode, setDarkMode] = useState<boolean>(() => {
@@ -1603,24 +1603,39 @@ export default function App() {
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-              <div className="space-y-4 text-left p-2">
-                <span className="text-3xl font-extrabold text-sky-500/30 dark:text-sky-400/20 font-mono">01.</span>
+              <div className="space-y-4 text-left p-2 group">
+                <div className="flex items-center justify-between">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-sky-400 to-cyan-500 text-white flex items-center justify-center shadow-lg shadow-sky-500/20 group-hover:scale-105 transition-transform duration-300">
+                    <ShieldCheck className="w-6 h-6" />
+                  </div>
+                  <span className="text-2xl font-black text-sky-500/30 dark:text-sky-400/20 font-mono">01.</span>
+                </div>
                 <h3 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>Secure Chunking & Handshake</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
                   Upon uploading, the file is split into optimal MTProto-aligned memory blocks. These blocks are securely transmitted directly to your private Telegram cloud chat, bypassing local hard drive storage limits.
                 </p>
               </div>
 
-              <div className="space-y-4 text-left p-2">
-                <span className="text-3xl font-extrabold text-indigo-500/30 dark:text-indigo-400/20 font-mono">02.</span>
+              <div className="space-y-4 text-left p-2 group">
+                <div className="flex items-center justify-between">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-indigo-500 to-purple-600 text-white flex items-center justify-center shadow-lg shadow-indigo-500/20 group-hover:scale-105 transition-transform duration-300">
+                    <Database className="w-6 h-6" />
+                  </div>
+                  <span className="text-2xl font-black text-indigo-500/30 dark:text-indigo-400/20 font-mono">02.</span>
+                </div>
                 <h3 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>Relational DB Catalog Sync</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
                   The local VPS MySQL database logs the file's mime type, file name, message ID, and assigns a short Alphanumeric Base-36 ID. This keeps your library catalog lightning-fast and search-optimized.
                 </p>
               </div>
 
-              <div className="space-y-4 text-left p-2">
-                <span className="text-3xl font-extrabold text-purple-500/30 dark:text-purple-400/20 font-mono">03.</span>
+              <div className="space-y-4 text-left p-2 group">
+                <div className="flex items-center justify-between">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-purple-500 to-pink-500 text-white flex items-center justify-center shadow-lg shadow-purple-500/20 group-hover:scale-105 transition-transform duration-300">
+                    <Radio className="w-6 h-6" />
+                  </div>
+                  <span className="text-2xl font-black text-purple-500/30 dark:text-purple-400/20 font-mono">03.</span>
+                </div>
                 <h3 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>Nginx/PHP Range Streamer</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
                   When a direct link is accessed on TeleCloud, the server reads from MySQL, grabs the chunks on-the-fly, and proxies the stream with HTTP Range header support. You can seek and fast-forward instantly!
@@ -1641,8 +1656,8 @@ export default function App() {
               {/* Marquee Box */}
               <div className={`md:col-span-8 p-8 rounded-3xl ${cardBg} flex flex-col justify-between space-y-6 text-left relative overflow-hidden`}>
                 <div className="space-y-3 relative z-10">
-                  <div className="w-10 h-10 rounded-xl bg-sky-500/10 text-sky-500 flex items-center justify-center">
-                    <Zap className="w-5 h-5" />
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-sky-400 to-cyan-500 text-white flex items-center justify-center shadow-lg shadow-sky-500/20">
+                    <Zap className="w-5 h-5 fill-sky-200" />
                   </div>
                   <h3 className="text-xl font-bold">Zero Buffering Seek Latency</h3>
                   <p className="text-sm text-slate-500 dark:text-slate-400 max-w-lg leading-normal">
@@ -1665,8 +1680,8 @@ export default function App() {
               {/* Box 2 */}
               <div className={`md:col-span-4 p-8 rounded-3xl ${cardBg} flex flex-col justify-between text-left`}>
                 <div className="space-y-3">
-                  <div className="w-10 h-10 rounded-xl bg-indigo-500/10 text-indigo-500 flex items-center justify-center">
-                    <Lock className="w-5 h-5" />
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-indigo-500 to-violet-600 text-white flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                    <Lock className="w-5 h-5 fill-indigo-200" />
                   </div>
                   <h3 className="text-lg font-bold">Encrypted Handshake</h3>
                   <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
@@ -1679,8 +1694,8 @@ export default function App() {
               {/* Box 3 */}
               <div className={`md:col-span-4 p-8 rounded-3xl ${cardBg} flex flex-col justify-between text-left`}>
                 <div className="space-y-3">
-                  <div className="w-10 h-10 rounded-xl bg-purple-500/10 text-purple-400 flex items-center justify-center">
-                    <Layers className="w-5 h-5" />
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-purple-500 to-fuchsia-600 text-white flex items-center justify-center shadow-lg shadow-purple-500/20">
+                    <Layers className="w-5 h-5 fill-purple-200" />
                   </div>
                   <h3 className="text-lg font-bold">Workspace Isolation</h3>
                   <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
@@ -1693,7 +1708,7 @@ export default function App() {
               {/* Box 4 - Big Stat */}
               <div className={`md:col-span-8 p-8 rounded-3xl ${cardBg} flex flex-col justify-between text-left relative overflow-hidden`}>
                 <div className="space-y-2">
-                  <div className="w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-500 flex items-center justify-center">
+                  <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-emerald-400 to-teal-500 text-white flex items-center justify-center shadow-lg shadow-emerald-500/20">
                     <Globe className="w-5 h-5" />
                   </div>
                   <h3 className="text-lg font-bold">No Bandwidth Penalties</h3>
