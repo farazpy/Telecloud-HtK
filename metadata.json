@@ -1,0 +1,8 @@
+{
+  "name": "HtK Network S3 - TeleCloud",
+  "description": "High-speed cloud file storage powered by Telegram MTProto and Telethon Python engine with direct access links.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
