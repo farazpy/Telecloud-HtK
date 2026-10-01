@@ -92,8 +92,17 @@ function ensurePythonDepsAndStart() {
       const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages'], {
         stdio: 'inherit',
       });
-      install.on('close', () => {
-        startPythonService();
+      install.on('close', (pipCode) => {
+        if (pipCode !== 0) {
+          const apt = spawn('apt-get', ['install', '-y', 'python3-aiohttp', 'python3-telethon'], {
+            stdio: 'inherit',
+          });
+          apt.on('close', () => {
+            startPythonService();
+          });
+        } else {
+          startPythonService();
+        }
       });
     } else {
       startPythonService();
@@ -124,6 +133,36 @@ ensurePythonDepsAndStart();
 
 process.on('exit', () => {
   if (pyProcess) pyProcess.kill();
+});
+
+// Contact & Support Form Submission Handler
+app.post('/api/contact', (req: Request, res: Response) => {
+  try {
+    const { name, email, category, subject, message } = req.body;
+    if (!name || !email || !message) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing required fields',
+        message: 'Name, email, and message are required.',
+      });
+    }
+
+    const ticketId = 'TC-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    console.log(`[Contact Form] Submission received from ${name} <${email}>: [${category || 'General'}] ${subject || '(No subject)'} -> Ticket #${ticketId}`);
+
+    return res.json({
+      success: true,
+      ticketId,
+      message: `Inquiry successfully registered under Ticket #${ticketId}. Our engineering & support desk will respond to ${email} promptly.`,
+      receivedAt: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to process contact submission',
+      message: err.message,
+    });
+  }
 });
 
 // Helper for proxying JSON requests to Python Telethon engine
@@ -162,14 +201,10 @@ async function forwardToPython(
   return { status: 503, data: { error: 'Telegram MTProto service unavailable' } };
 }
 
-function getShortLink(messageId: number | string, req?: Request): string {
+function getShortLink(messageId: number | string, _req?: Request): string {
   const shortId = Number(messageId).toString(36).toUpperCase();
-  if (req) {
-    const host = req.get('host') || 'localhost:3000';
-    const protocol = req.secure || req.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http';
-    return `${protocol}://${host}/f/${shortId}`;
-  }
-  return `/f/${shortId}`;
+  const domain = process.env.CUSTOM_DOMAIN || 's3.htknetwork.in';
+  return `https://${domain}/f/${shortId}`;
 }
 
 // API Routes
@@ -664,9 +699,8 @@ app.get('/api/manifest', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const host = req.get('host') || 'localhost:3000';
-  const proto = req.get('x-forwarded-proto') || req.protocol || 'http';
-  const appUrl = process.env.APP_URL || `${proto}://${host}`;
+  const domain = process.env.CUSTOM_DOMAIN || 's3.htknetwork.in';
+  const appUrl = process.env.APP_URL || `https://${domain}`;
 
   // Query files from DB or Python
   const statusRes = await forwardToPython('GET', '/status');

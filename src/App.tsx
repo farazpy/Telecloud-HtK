@@ -57,6 +57,12 @@ import {
   ExternalLink as LinkExternal
 } from 'lucide-react';
 import { ApiConsolePage } from './components/ApiConsolePage';
+import FeaturesPage from './pages/FeaturesPage';
+import BenefitsPage from './pages/BenefitsPage';
+import StreamingPage from './pages/StreamingPage';
+import SecurityPage from './pages/SecurityPage';
+import PricingPage from './pages/PricingPage';
+import ContactPage from './pages/ContactPage';
 
 interface TelegramUser {
   id: number;
@@ -157,8 +163,39 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.3.2
-  const APP_VERSION = "v1.3.2";
+  // App Version in Header - Incremented to v1.3.6
+  const APP_VERSION = "v1.3.6";
+
+  // Routing State for Public Marketing Pages & Deep Links
+  const [currentRoute, setCurrentRoute] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const path = window.location.pathname.toLowerCase();
+      if (['/features', '/benefits', '/architecture', '/streaming-cdn', '/streaming', '/security', '/pricing', '/contact'].includes(path)) {
+        return path;
+      }
+    }
+    return '/';
+  });
+
+  const navigate = (path: string) => {
+    setCurrentRoute(path);
+    if (typeof window !== 'undefined') {
+      window.history.pushState({}, '', path);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  };
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname.toLowerCase();
+      setCurrentRoute(path || '/');
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
   // Dark Mode Theme State (Defaulting strictly to Light Mode for initial/default experience)
   const [darkMode, setDarkMode] = useState<boolean>(() => {
@@ -1315,9 +1352,33 @@ export default function App() {
   const someFilteredSelected = filteredFiles.some((f) => selectedFileIds.includes(f.message_id)) && !allFilteredSelected;
 
   // ==========================================
+  // INITIAL HANDSHAKE & SESSION VERIFICATION GATE
+  // ==========================================
+  if (loadingStatus) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center font-sans transition-colors duration-200 ${containerBg}`}>
+        <div className="flex flex-col items-center space-y-4 p-8 rounded-3xl animate-in fade-in duration-300">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-sky-400 to-indigo-500 flex items-center justify-center shadow-xl shadow-sky-500/25">
+            <Radio className="w-6 h-6 text-white animate-pulse" />
+          </div>
+          <div className="space-y-1 text-center">
+            <span className="font-extrabold text-xl tracking-tight bg-gradient-to-r from-sky-400 to-indigo-500 bg-clip-text text-transparent">
+              TeleCloud
+            </span>
+            <div className="flex items-center justify-center space-x-2 text-xs text-slate-400 font-mono pt-1">
+              <div className="w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-full animate-spin" />
+              <span>Verifying session handshake...</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ==========================================
   // VIEW A: LANDING PAGE (UNAUTHENTICATED)
   // ==========================================
-  if (!connected && !loadingStatus) {
+  if (!connected) {
     const handleSimulate = () => {
       setSimStep('uploading');
       setSimProgress(0);
@@ -1359,25 +1420,65 @@ export default function App() {
           <div className={`absolute top-1/4 -right-32 w-[35rem] h-[35rem] rounded-full blur-[150px] ${darkMode ? 'bg-indigo-950/20' : 'bg-indigo-200/30'}`} />
         </div>
 
-        {/* Top Navigation Bar - Strict 3-Zone Contract */}
-        <header className={`sticky top-0 z-50 border-b backdrop-blur-xl transition-colors duration-200 ${darkMode ? 'bg-slate-950/85 border-slate-900 text-white shadow-md' : 'bg-white/80 border-slate-200/60 text-slate-900 shadow-xs'}`}>
+        {/* Top Navigation Bar - Responsive 3-Zone Contract with Full Slugs */}
+        <header className={`sticky top-0 z-50 border-b backdrop-blur-xl transition-colors duration-200 ${darkMode ? 'bg-slate-950/90 border-slate-900 text-white shadow-md' : 'bg-white/90 border-slate-200/80 text-slate-900 shadow-xs'}`}>
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-            {/* Zone 1: Single text wordmark */}
-            <div className="flex items-center space-x-2 shrink-0">
-              <span className={`font-black text-xl tracking-tight bg-gradient-to-r from-sky-400 to-indigo-500 bg-clip-text text-transparent`}>
-                TeleCloud
-              </span>
-              <span className="px-2 py-0.5 text-[10px] font-mono font-bold bg-sky-500/10 text-sky-400 border border-sky-500/25 rounded-md">
-                {APP_VERSION}
-              </span>
+            {/* Zone 1: Single text wordmark & Logo */}
+            <div className="flex items-center space-x-3 shrink-0">
+              <button
+                onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                className={`lg:hidden p-2 rounded-xl border transition ${
+                  darkMode ? 'bg-slate-900 border-slate-800 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-700'
+                }`}
+                aria-label="Toggle navigation menu"
+              >
+                {mobileMenuOpen ? <X className="w-4 h-4" /> : <Menu className="w-4 h-4" />}
+              </button>
+
+              <button
+                onClick={() => navigate('/')}
+                className="flex items-center space-x-2 text-left focus:outline-none group"
+              >
+                <span className="font-black text-xl tracking-tight bg-gradient-to-r from-sky-400 to-indigo-500 bg-clip-text text-transparent group-hover:opacity-90 transition">
+                  TeleCloud
+                </span>
+                <span className="px-2 py-0.5 text-[10px] font-mono font-bold bg-sky-500/10 text-sky-400 border border-sky-500/25 rounded-md">
+                  {APP_VERSION}
+                </span>
+              </button>
             </div>
 
-            {/* Zone 2: Navigation Links (unboxed inline text) */}
-            <nav className="hidden md:flex items-center gap-8 text-xs font-semibold tracking-wide uppercase text-slate-500 dark:text-slate-400">
-              <a href="#how-it-works" className="hover:text-sky-500 transition-colors">How it Works</a>
-              <a href="#simulator" className="hover:text-sky-500 transition-colors">Interactive Demo</a>
-              <a href="#features" className="hover:text-sky-500 transition-colors">Capabilities</a>
-              <a href="#faq" className="hover:text-sky-500 transition-colors">FAQ Support</a>
+            {/* Zone 2: Navigation Links (All 6 Pages with Active States) */}
+            <nav className="hidden lg:flex items-center gap-6 text-xs font-bold tracking-wide">
+              {[
+                { label: 'Home', path: '/' },
+                { label: 'Features', path: '/features' },
+                { label: 'Architecture & ROI', path: '/architecture' },
+                { label: 'Streaming CDN', path: '/streaming-cdn' },
+                { label: 'Security', path: '/security' },
+                { label: 'Pricing ($0)', path: '/pricing' },
+                { label: 'Contact', path: '/contact' },
+              ].map((link) => {
+                const isActive =
+                  currentRoute === link.path ||
+                  (link.path === '/architecture' && currentRoute === '/benefits') ||
+                  (link.path === '/streaming-cdn' && currentRoute === '/streaming');
+                return (
+                  <button
+                    key={link.path}
+                    onClick={() => navigate(link.path)}
+                    className={`transition-colors py-1 px-2.5 rounded-lg ${
+                      isActive
+                        ? 'text-sky-500 font-extrabold bg-sky-500/10'
+                        : darkMode
+                        ? 'text-slate-400 hover:text-white hover:bg-slate-900'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                    }`}
+                  >
+                    {link.label}
+                  </button>
+                );
+              })}
             </nav>
 
             {/* Zone 3: Primary Actions */}
@@ -1399,16 +1500,104 @@ export default function App() {
                 className="px-5 py-2.5 rounded-xl bg-slate-900 dark:bg-sky-500 hover:bg-slate-800 dark:hover:bg-sky-400 text-white dark:text-slate-950 font-bold text-xs shadow-lg transition duration-200 flex items-center space-x-2"
               >
                 <Smartphone className="w-4 h-4" />
-                <span>Connect Vault</span>
+                <span className="hidden sm:inline">Connect Vault</span>
+                <span className="sm:hidden">Login</span>
               </button>
             </div>
           </div>
+
+          {/* Mobile Navigation Dropdown Menu */}
+          {mobileMenuOpen && (
+            <div className={`lg:hidden border-t px-4 py-4 space-y-2 animate-in slide-in-from-top-2 duration-200 ${
+              darkMode ? 'bg-slate-950 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900 shadow-lg'
+            }`}>
+              {[
+                { label: 'Home Overview', path: '/' },
+                { label: 'Features Breakdown', path: '/features' },
+                { label: 'Architecture & Benefits', path: '/architecture' },
+                { label: 'Seekable Streaming CDN', path: '/streaming-cdn' },
+                { label: 'Security & Cryptography', path: '/security' },
+                { label: 'Pricing & TCO Comparison', path: '/pricing' },
+                { label: 'Contact Support & Help Desk', path: '/contact' },
+              ].map((link) => (
+                <button
+                  key={link.path}
+                  onClick={() => {
+                    navigate(link.path);
+                    setMobileMenuOpen(false);
+                  }}
+                  className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-between ${
+                    currentRoute === link.path
+                      ? 'bg-sky-500 text-white'
+                      : darkMode
+                      ? 'text-slate-300 hover:bg-slate-900'
+                      : 'text-slate-700 hover:bg-slate-100'
+                  }`}
+                >
+                  <span>{link.label}</span>
+                  <ChevronRight className="w-3.5 h-3.5 opacity-60" />
+                </button>
+              ))}
+            </div>
+          )}
         </header>
 
-        {/* Main Marketing Content */}
-        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-20 relative z-10 space-y-24">
+        {/* Main Marketing / Dedicated Pages Viewport */}
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-16 relative z-10">
           
-          {/* Section 1: Hero & Real-Time MTProto Simulator Side-by-Side */}
+          {/* Conditional Dedicated Page Router */}
+          {currentRoute === '/features' && (
+            <FeaturesPage
+              darkMode={darkMode}
+              onConnectClick={() => setShowAuthModal(true)}
+              navigate={navigate}
+            />
+          )}
+
+          {(currentRoute === '/benefits' || currentRoute === '/architecture') && (
+            <BenefitsPage
+              darkMode={darkMode}
+              onConnectClick={() => setShowAuthModal(true)}
+              navigate={navigate}
+            />
+          )}
+
+          {(currentRoute === '/streaming-cdn' || currentRoute === '/streaming') && (
+            <StreamingPage
+              darkMode={darkMode}
+              onConnectClick={() => setShowAuthModal(true)}
+              navigate={navigate}
+            />
+          )}
+
+          {currentRoute === '/security' && (
+            <SecurityPage
+              darkMode={darkMode}
+              onConnectClick={() => setShowAuthModal(true)}
+              navigate={navigate}
+            />
+          )}
+
+          {currentRoute === '/pricing' && (
+            <PricingPage
+              darkMode={darkMode}
+              onConnectClick={() => setShowAuthModal(true)}
+              navigate={navigate}
+            />
+          )}
+
+          {currentRoute === '/contact' && (
+            <ContactPage
+              darkMode={darkMode}
+              onConnectClick={() => setShowAuthModal(true)}
+              navigate={navigate}
+            />
+          )}
+
+          {/* Default Route: Homepage Marketing Experience */}
+          {currentRoute === '/' && (
+            <div className="space-y-24">
+              {/* Section 1: Hero & Real-Time MTProto Simulator Side-by-Side */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
             
             {/* Left Column: Hero Proposition */}
@@ -1778,21 +1967,30 @@ export default function App() {
               </button>
             </div>
           </div>
+        </div>
+      )}
 
         </main>
 
-        {/* Quiet Footer */}
-        <footer className={`border-t py-12 transition-colors duration-200 ${darkMode ? 'bg-slate-950/50 border-slate-900' : 'bg-slate-50 border-slate-200/50'}`}>
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-6">
-            <div className="flex items-center space-x-2">
-              <span className={`font-extrabold text-sm tracking-tight ${darkMode ? 'text-white' : 'text-slate-950'}`}>TeleCloud</span>
-              <span className="text-xs text-slate-400">© {new Date().getFullYear()} • Personal Decoupled Storage Systems</span>
-            </div>
-            
-            <div className="flex gap-6 text-xs text-slate-400">
-              <span className="hover:text-sky-500 cursor-pointer">Security Protocol</span>
-              <span className="hover:text-sky-500 cursor-pointer">API Agreement</span>
-              <span className="hover:text-sky-500 cursor-pointer">Terms of Service</span>
+        {/* Quiet Footer with Working Slugs */}
+        <footer className={`border-t py-12 transition-colors duration-200 ${darkMode ? 'bg-slate-950/80 border-slate-900' : 'bg-slate-50 border-slate-200/80'}`}>
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+            <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+              <div className="flex items-center space-x-3">
+                <button onClick={() => navigate('/')} className="flex items-center space-x-2">
+                  <span className="font-extrabold text-base tracking-tight bg-gradient-to-r from-sky-400 to-indigo-500 bg-clip-text text-transparent">TeleCloud</span>
+                </button>
+                <span className="text-xs text-slate-400">© {new Date().getFullYear()} • Decentralized MTProto Cloud Systems</span>
+              </div>
+              
+              <div className="flex flex-wrap items-center justify-center gap-6 text-xs font-semibold text-slate-500 dark:text-slate-400">
+                <button onClick={() => navigate('/features')} className="hover:text-sky-500 transition">Features</button>
+                <button onClick={() => navigate('/architecture')} className="hover:text-sky-500 transition">Architecture & ROI</button>
+                <button onClick={() => navigate('/streaming-cdn')} className="hover:text-sky-500 transition">Streaming CDN</button>
+                <button onClick={() => navigate('/security')} className="hover:text-sky-500 transition">Security</button>
+                <button onClick={() => navigate('/pricing')} className="hover:text-sky-500 transition">Pricing ($0)</button>
+                <button onClick={() => navigate('/contact')} className="hover:text-sky-500 transition">Contact Desk</button>
+              </div>
             </div>
           </div>
         </footer>
