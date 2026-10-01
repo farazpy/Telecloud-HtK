@@ -160,6 +160,9 @@ export async function initDb() {
     try {
       await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_name VARCHAR(255) DEFAULT NULL;`);
     } catch {}
+    try {
+      await pool.query(`ALTER TABLE user_files ADD COLUMN download_password VARCHAR(255) DEFAULT NULL;`);
+    } catch {}
 
     // Migration: By default have only Default Workspace, remove previous demo seeds
     try {
@@ -765,6 +768,7 @@ export async function saveFileToDb(fileData: {
   caption?: string;
   storage_chat?: string;
   direct_link?: string;
+  download_password?: string | null;
 }) {
   const tgId = String(fileData.telegram_id);
   const msgId = String(fileData.message_id);
@@ -775,14 +779,15 @@ export async function saveFileToDb(fileData: {
     try {
       await pool.query(
         `INSERT INTO user_files 
-          (telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+          (telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
          ON DUPLICATE KEY UPDATE
           workspace_id = COALESCE(VALUES(workspace_id), workspace_id),
           workspace_name = COALESCE(VALUES(workspace_name), workspace_name),
           file_name = VALUES(file_name),
           caption = VALUES(caption),
           direct_link = VALUES(direct_link),
+          download_password = VALUES(download_password),
           updated_at = NOW()`,
         [
           tgId,
@@ -796,6 +801,7 @@ export async function saveFileToDb(fileData: {
           fileData.caption || '',
           fileData.storage_chat || 'me',
           fileData.direct_link || '',
+          fileData.download_password || null,
         ]
       );
       return { success: true, mode: 'mysql' };
@@ -821,6 +827,7 @@ export async function saveFileToDb(fileData: {
     caption: fileData.caption || '',
     storage_chat: fileData.storage_chat || 'me',
     direct_link: fileData.direct_link || '',
+    download_password: fileData.download_password || null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
@@ -844,7 +851,7 @@ export async function getUserFilesFromDb(
   if (pool && isDbConnected) {
     try {
       let query = `
-        SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, created_at, updated_at
+        SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at
         FROM user_files
         WHERE telegram_id = ?
       `;
@@ -873,6 +880,25 @@ export async function getUserFilesFromDb(
     }
     return true;
   });
+}
+
+export async function getFileByMessageId(messageId: number | string) {
+  if (pool && isDbConnected) {
+    try {
+      const [rows]: any[] = await pool.query(
+        `SELECT id, telegram_id, message_id, file_name, file_size, mime_type, download_password, storage_chat, direct_link, created_at 
+         FROM user_files 
+         WHERE message_id = ? LIMIT 1`,
+        [String(messageId)]
+      );
+      if (rows && rows.length > 0) return rows[0];
+    } catch (e) {
+      console.error('[MySQL] getFileByMessageId error:', e);
+    }
+  }
+  const cache = getFallbackData();
+  const f = cache.files.find((file) => String(file.message_id) === String(messageId));
+  return f || null;
 }
 
 export async function renameFileInDb(

@@ -157,8 +157,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.2.2
-  const APP_VERSION = "v1.2.2";
+  // App Version in Header - Incremented to v1.2.7
+  const APP_VERSION = "v1.2.7";
 
   // Dark Mode Theme State (Defaulting strictly to Light Mode for initial/default experience)
   const [darkMode, setDarkMode] = useState<boolean>(() => {
@@ -183,6 +183,11 @@ export default function App() {
   }, [darkMode]);
 
   const toggleDarkMode = () => setDarkMode((prev) => !prev);
+
+  // Interactive Landing Page states
+  const [activeFaq, setActiveFaq] = useState<number | null>(null);
+  const [simStep, setSimStep] = useState<'idle' | 'uploading' | 'indexing' | 'ready'>('idle');
+  const [simProgress, setSimProgress] = useState(0);
 
   // Dynamic theme class helpers
   const containerBg = darkMode
@@ -395,6 +400,16 @@ export default function App() {
   const [uploadResult, setUploadResult] = useState<StorageFile | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Overview Drag-and-Drop Uploader State
+  const [overviewFile, setOverviewFile] = useState<globalThis.File | null>(null);
+  const [overviewPassword, setOverviewPassword] = useState<string>('');
+  const [isOverviewDragging, setIsOverviewDragging] = useState<boolean>(false);
+  const [overviewUploading, setOverviewUploading] = useState<boolean>(false);
+  const [overviewProgress, setOverviewProgress] = useState<number>(0);
+  const [overviewResult, setOverviewResult] = useState<any | null>(null);
+  const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [overviewWorkspaceId, setOverviewWorkspaceId] = useState<string>('');
 
   // Files List & Rename
   const [files, setFiles] = useState<StorageFile[]>([]);
@@ -1017,6 +1032,81 @@ export default function App() {
     }
   };
 
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsOverviewDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsOverviewDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsOverviewDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      const droppedFile = e.dataTransfer.files[0];
+      setOverviewFile(droppedFile);
+      setOverviewResult(null);
+      setOverviewError(null);
+    }
+  };
+
+  const handleOverviewUpload = async (fileToUpload: globalThis.File) => {
+    if (!fileToUpload) return;
+    setOverviewUploading(true);
+    setOverviewError(null);
+    setOverviewResult(null);
+    setOverviewProgress(10);
+
+    const formData = new FormData();
+    formData.append('file', fileToUpload);
+    if (overviewPassword.trim()) {
+      formData.append('password', overviewPassword.trim());
+    }
+    const targetWsId = overviewWorkspaceId || activeWorkspace?.id;
+    if (targetWsId) {
+      formData.append('workspace_id', String(targetWsId));
+    }
+
+    const progressInterval = setInterval(() => {
+      setOverviewProgress((prev) => {
+        if (prev >= 92) return 92;
+        return prev + Math.floor(Math.random() * 8) + 4;
+      });
+    }, 400);
+
+    try {
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      clearInterval(progressInterval);
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || `Upload failed with status ${res.status}`);
+      }
+
+      const result = await res.json();
+      setOverviewProgress(100);
+      setOverviewResult(result);
+      setOverviewFile(null);
+      setOverviewPassword('');
+      
+      fetchWorkspaces();
+      fetchFiles();
+      fetchStats();
+    } catch (err: any) {
+      clearInterval(progressInterval);
+      setOverviewError(err.message || 'File upload failed');
+      setOverviewProgress(0);
+    } finally {
+      setOverviewUploading(false);
+    }
+  };
+
   const handleRenameSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingFile || !newFileNameInput.trim()) return;
@@ -1151,20 +1241,31 @@ export default function App() {
     }
   };
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2500);
-  };
-
   const getFileShortId = (messageId: number | string): string => {
     const num = Number(messageId) || 0;
     let b36 = num.toString(36).toUpperCase();
-    if (b36.length < 6) {
-      const padding = "TC789";
-      b36 = (b36 + padding).substring(0, 6);
-    }
     return b36;
+  };
+
+  const copyToClipboard = (text: string, id: string) => {
+    let formattedText = text;
+    // Intercept and convert standard download links to s3.htknetwork.in
+    if (text && (text.includes('/api/download/') || text.includes('localhost') || text.includes('run.app') || text.includes('htknetwork'))) {
+      const match = text.match(/\/api\/download\/([0-9]+)/);
+      if (match && match[1]) {
+        const shortId = getFileShortId(match[1]);
+        formattedText = `https://s3.htknetwork.in/${shortId}`;
+      } else if (text.startsWith('http') && !text.includes('s3.htknetwork.in')) {
+        // Fallback or generic convert if shortId is present as digits
+        const numericId = text.replace(/[^0-9]/g, '');
+        if (numericId && numericId.length >= 4) {
+          formattedText = `https://s3.htknetwork.in/${getFileShortId(numericId)}`;
+        }
+      }
+    }
+    navigator.clipboard.writeText(formattedText);
+    setCopiedId(id);
+    setTimeout(() => setCopiedId(null), 2500);
   };
 
   const formatBytes = (bytes: number) => {
@@ -1217,125 +1318,465 @@ export default function App() {
   // VIEW A: LANDING PAGE (UNAUTHENTICATED)
   // ==========================================
   if (!connected && !loadingStatus) {
+    const handleSimulate = () => {
+      setSimStep('uploading');
+      setSimProgress(0);
+      let progress = 0;
+      const interval = setInterval(() => {
+        progress += 10;
+        setSimProgress(progress);
+        if (progress >= 100) {
+          clearInterval(interval);
+          setSimStep('indexing');
+          setTimeout(() => {
+            setSimStep('ready');
+          }, 800);
+        }
+      }, 120);
+    };
+
+    const faqs = [
+      {
+        q: "How does the unlimited storage mechanism work?",
+        a: "TeleCloud connects directly to Telegram's MTProto servers. Telegram permits unlimited file uploads within personal chats and private channels. TeleCloud operates as a highly optimized stream-indexer: it handles files, logs their byte maps to your personal MySQL database, and serves high-speed HTTP streams on demand."
+      },
+      {
+        q: "How does s3.htknetwork.in handle high-speed streaming?",
+        a: "When a user requests a file via s3.htknetwork.in, Nginx and our optimized download.php proxy handle the HTTP Range headers. It requests only the exact byte range requested by the browser from the Telegram MTProto engine. This means you can seek instantly through 4K videos or scrub large audio tracks with zero buffering."
+      },
+      {
+        q: "Is my personal data securely encrypted?",
+        a: "Absolutely. All communication between your browser, your VPS, and Telegram's data centers is fully encrypted using Telegram's enterprise-grade MTProto cryptosystem. TeleCloud never sees or stores your master credentials; you authenticate securely through native OTP or Bot tokens."
+      }
+    ];
+
     return (
-      <div className={`min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white relative overflow-x-hidden transition-colors duration-200 ${containerBg}`}>
-        {/* Ambient liquid orbs */}
+      <div className={`min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white relative overflow-x-hidden transition-colors duration-300 ${containerBg}`}>
+        {/* Ambient background architectural grid & glow */}
+        <div className="absolute inset-0 bg-[linear-gradient(to_right,#8080800a_1px,transparent_1px),linear-gradient(to_bottom,#8080800a_1px,transparent_1px)] bg-[size:14px_24px] pointer-events-none" />
         <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
-          <div className={`absolute -top-40 -left-40 w-96 h-96 rounded-full blur-[100px] ${darkMode ? 'bg-gradient-to-tr from-sky-900/30 to-indigo-900/20' : 'bg-gradient-to-tr from-sky-200/50 to-indigo-200/40'}`} />
-          <div className={`absolute top-1/3 -right-32 w-[30rem] h-[30rem] rounded-full blur-[120px] ${darkMode ? 'bg-gradient-to-bl from-indigo-900/20 via-sky-900/20 to-teal-900/10' : 'bg-gradient-to-bl from-indigo-200/40 via-sky-100/50 to-teal-100/40'}`} />
+          <div className={`absolute -top-40 -left-40 w-[32rem] h-[32rem] rounded-full blur-[130px] ${darkMode ? 'bg-sky-950/25' : 'bg-sky-200/40'}`} />
+          <div className={`absolute top-1/4 -right-32 w-[35rem] h-[35rem] rounded-full blur-[150px] ${darkMode ? 'bg-indigo-950/20' : 'bg-indigo-200/30'}`} />
         </div>
 
-        {/* Landing Header */}
-        <header className={`sticky top-0 z-50 border-b backdrop-blur-2xl transition-colors duration-200 ${darkMode ? 'bg-slate-900/90 border-slate-800 text-white shadow-xl' : 'bg-white/80 border-white/80 text-slate-900 shadow-xs'}`}>
+        {/* Top Navigation Bar - Strict 3-Zone Contract */}
+        <header className={`sticky top-0 z-50 border-b backdrop-blur-xl transition-colors duration-200 ${darkMode ? 'bg-slate-950/85 border-slate-900 text-white shadow-md' : 'bg-white/80 border-slate-200/60 text-slate-900 shadow-xs'}`}>
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-            <div className="flex items-center space-x-3">
-              <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-sky-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-sky-500/25 ring-2 ring-sky-400/30">
-                <Radio className="w-5 h-5 text-white animate-pulse" />
-              </div>
-              <div>
-                <div className="flex items-center space-x-2">
-                  <span className={`font-extrabold text-lg tracking-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>TeleCloud</span>
-                  <span className="px-2.5 py-0.5 text-xs font-mono font-bold bg-sky-500/10 text-sky-500 border border-sky-400/30 rounded-full shadow-xs">
-                    {APP_VERSION}
-                  </span>
-                </div>
-                <p className={`text-xs hidden sm:block font-medium ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>MTProto Unlimited Cloud Storage</p>
-              </div>
+            {/* Zone 1: Single text wordmark */}
+            <div className="flex items-center space-x-2 shrink-0">
+              <span className={`font-black text-xl tracking-tight bg-gradient-to-r from-sky-400 to-indigo-500 bg-clip-text text-transparent`}>
+                TeleCloud
+              </span>
+              <span className="px-2 py-0.5 text-[10px] font-mono font-bold bg-sky-500/10 text-sky-400 border border-sky-500/25 rounded-md">
+                {APP_VERSION}
+              </span>
             </div>
 
-            <div className="flex items-center space-x-3">
+            {/* Zone 2: Navigation Links (unboxed inline text) */}
+            <nav className="hidden md:flex items-center gap-8 text-xs font-semibold tracking-wide uppercase text-slate-500 dark:text-slate-400">
+              <a href="#how-it-works" className="hover:text-sky-500 transition-colors">How it Works</a>
+              <a href="#simulator" className="hover:text-sky-500 transition-colors">Interactive Demo</a>
+              <a href="#features" className="hover:text-sky-500 transition-colors">Capabilities</a>
+              <a href="#faq" className="hover:text-sky-500 transition-colors">FAQ Support</a>
+            </nav>
+
+            {/* Zone 3: Primary Actions */}
+            <div className="flex items-center gap-3">
               <button
                 onClick={toggleDarkMode}
-                className={`px-3 py-2 rounded-xl border transition flex items-center space-x-1.5 text-xs font-bold ${
+                className={`p-2.5 rounded-xl border transition-colors ${
                   darkMode
-                    ? 'bg-slate-800 text-amber-300 border-slate-700 hover:bg-slate-700'
+                    ? 'bg-slate-900 text-amber-300 border-slate-800 hover:bg-slate-800'
                     : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
                 }`}
                 title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
               >
                 {darkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-indigo-600" />}
-                <span className="hidden sm:inline">{darkMode ? 'Light' : 'Dark'}</span>
               </button>
 
               <button
                 onClick={() => setShowAuthModal(true)}
-                className="px-5 py-2.5 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-extrabold text-xs shadow-md shadow-sky-500/20 transition flex items-center space-x-2 active:scale-95"
+                className="px-5 py-2.5 rounded-xl bg-slate-900 dark:bg-sky-500 hover:bg-slate-800 dark:hover:bg-sky-400 text-white dark:text-slate-950 font-bold text-xs shadow-lg transition duration-200 flex items-center space-x-2"
               >
                 <Smartphone className="w-4 h-4" />
-                <span>Sign in with Telegram</span>
+                <span>Connect Vault</span>
               </button>
             </div>
           </div>
         </header>
 
-        {/* Landing Hero */}
-        <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-16 relative z-10 flex flex-col justify-center">
-          <div className="text-center max-w-3xl mx-auto space-y-6">
-            <div className={`inline-flex items-center space-x-2 px-4 py-1.5 rounded-full border text-xs font-bold shadow-xs backdrop-blur-md ${darkMode ? 'bg-slate-900/80 border-sky-500/30 text-sky-400' : 'bg-white/80 border-sky-200 text-sky-600'}`}>
-              <Sparkles className="w-4 h-4" />
-              <span>Decentralized MTProto File Vault • Cloud Catalog</span>
+        {/* Main Marketing Content */}
+        <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-12 sm:py-20 relative z-10 space-y-24">
+          
+          {/* Section 1: Hero & Real-Time MTProto Simulator Side-by-Side */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+            
+            {/* Left Column: Hero Proposition */}
+            <div className="lg:col-span-7 space-y-6 text-left">
+              <div className="inline-flex items-center space-x-2 text-xs font-semibold text-sky-500">
+                <Sparkles className="w-4 h-4 animate-pulse" />
+                <span>Enterprise Self-Hosted MTProto Storage</span>
+              </div>
+
+              <h1 className="text-4xl sm:text-6xl font-extrabold tracking-tight leading-tight text-wrap-balance text-slate-900 dark:text-white">
+                Decentralized Unlimited Cloud Storage on{' '}
+                <span className="bg-gradient-to-r from-sky-400 via-indigo-400 to-purple-400 bg-clip-text text-transparent">
+                  Your VPS.
+                </span>
+              </h1>
+
+              <p className="text-base sm:text-lg leading-relaxed text-slate-600 dark:text-slate-300 max-w-2xl">
+                Store, index, and stream files of any size directly from your secure Telegram MTProto storage chats. TeleCloud indexes your library automatically in your private MySQL catalog and generates lightning-fast, seekable HTTP links instantly.
+              </p>
+
+              <div className="pt-2 flex flex-col sm:flex-row items-center gap-4">
+                <button
+                  onClick={() => setShowAuthModal(true)}
+                  className="w-full sm:w-auto px-7 py-3.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-sm shadow-xl shadow-sky-500/20 transition flex items-center justify-center space-x-3 group"
+                >
+                  <span>Access Personal Cloud</span>
+                  <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
+                </button>
+                <a
+                  href="#how-it-works"
+                  className="w-full sm:w-auto px-7 py-3.5 rounded-xl border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-900 text-slate-700 dark:text-slate-300 font-bold text-sm transition text-center"
+                >
+                  Explore Mechanism
+                </a>
+              </div>
+
+              {/* Unboxed Metadata Trust Badge */}
+              <div className="flex items-center gap-3 pt-2 text-xs text-slate-500 dark:text-slate-400 font-medium">
+                <ShieldCheck className="w-4 h-4 text-emerald-500" />
+                <span>Zero Email/Passwords</span>
+                <span>·</span>
+                <span>Self-Hosted Database</span>
+                <span>·</span>
+                <span>Full Stream Range Seeking</span>
+              </div>
             </div>
 
-            <h1 className={`text-4xl sm:text-6xl font-black tracking-tight leading-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-              Unlimited Cloud Storage on{' '}
-              <span className="bg-gradient-to-r from-sky-400 via-indigo-400 to-purple-400 bg-clip-text text-transparent">
-                Telegram MTProto
-              </span>
-            </h1>
+            {/* Right Column: Live Interactive MTProto Engine Simulator */}
+            <div id="simulator" className="lg:col-span-5">
+              <div className="p-6 rounded-3xl bg-slate-900 border border-slate-800 text-slate-100 shadow-2xl relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500" />
+                
+                {/* Simulator Header */}
+                <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-4">
+                  <div className="flex items-center space-x-2">
+                    <div className="w-3 h-3 rounded-full bg-red-500" />
+                    <div className="w-3 h-3 rounded-full bg-amber-500" />
+                    <div className="w-3 h-3 rounded-full bg-emerald-500" />
+                  </div>
+                  <span className="text-[10px] font-mono tracking-widest text-slate-400 uppercase">MTPROTO ENGINE SIMULATOR</span>
+                </div>
 
-            <p className={`text-base sm:text-lg leading-relaxed font-normal ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-              Store files up to 50 MB per item in your Telegram chat vault. Generates instant, public direct access HTTP streaming links with range seeking, indexed securely in your personal cloud library.
+                {/* Simulator Screen */}
+                <div className="space-y-4 min-h-[220px] flex flex-col justify-between">
+                  {simStep === 'idle' && (
+                    <div className="text-center py-6 space-y-4 flex-1 flex flex-col justify-center items-center">
+                      <div className="w-14 h-14 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center border border-sky-500/25 animate-bounce">
+                        <UploadCloud className="w-6 h-6" />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-sm font-semibold">Test the MTProto Streaming Pipeline</p>
+                        <p className="text-xs text-slate-400">Click below to upload a simulated movie and see how the VPS indexes and streams it in real-time!</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {simStep === 'uploading' && (
+                    <div className="space-y-4 flex-1 flex flex-col justify-center">
+                      <div className="flex items-center justify-between text-xs font-mono text-slate-400">
+                        <span className="flex items-center gap-1.5"><RefreshCw className="w-3 h-3 animate-spin text-sky-400" /> Splitting file into encrypted blocks...</span>
+                        <span>{simProgress}%</span>
+                      </div>
+                      {/* Visual Chunk Grid */}
+                      <div className="grid grid-cols-10 gap-1.5 p-2 bg-slate-950/80 rounded-xl border border-slate-800/80">
+                        {Array.from({ length: 20 }).map((_, i) => (
+                          <div 
+                            key={i} 
+                            className={`h-4 rounded-sm transition-all duration-300 ${
+                              i * 5 < simProgress 
+                                ? 'bg-gradient-to-br from-sky-400 to-indigo-600 shadow-xs shadow-sky-500/50' 
+                                : 'bg-slate-800'
+                            }`} 
+                          />
+                        ))}
+                      </div>
+                      <p className="text-[10px] font-mono text-slate-500 text-center">Encrypting chunks with AES-256-IGE & pushing to MTProto stream channel</p>
+                    </div>
+                  )}
+
+                  {simStep === 'indexing' && (
+                    <div className="text-center py-6 space-y-4 flex-1 flex flex-col justify-center items-center">
+                      <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center border border-indigo-500/25 animate-pulse">
+                        <Database className="w-5 h-5" />
+                      </div>
+                      <div className="space-y-1">
+                        <p className="text-xs font-mono text-indigo-400">Writing to Local VPS MySQL...</p>
+                        <p className="text-xs text-slate-400">Saving file name, mime type, byte mapping, and assigning static short index.</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {simStep === 'ready' && (
+                    <div className="space-y-4 flex-1 flex flex-col justify-center animate-fadeIn">
+                      <div className="p-3 bg-slate-950/90 rounded-2xl border border-emerald-500/30 flex items-center justify-between">
+                        <div className="flex items-center space-x-3">
+                          <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+                            <CheckCircle2 className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <p className="text-xs font-bold text-white">Stream URL Ready!</p>
+                            <p className="text-[10px] font-mono text-slate-500">s3.htknetwork.in/6JGOTC</p>
+                          </div>
+                        </div>
+                        <span className="text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full">Active</span>
+                      </div>
+
+                      <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800 space-y-2">
+                        <p className="text-[11px] font-mono text-slate-400 truncate">GET https://s3.htknetwork.in/6JGOTC</p>
+                        <p className="text-[10px] text-slate-500 leading-normal">
+                          HTTP/1.1 200 OK<br/>
+                          Accept-Ranges: bytes<br/>
+                          Content-Type: video/mp4<br/>
+                          Content-Length: 1.48 GB
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Simulator Trigger */}
+                  <div className="pt-2">
+                    {simStep === 'ready' ? (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleSimulate}
+                          className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition active:scale-98"
+                        >
+                          Simulate Another
+                        </button>
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText("https://s3.htknetwork.in/6JGOTC");
+                            alert("Copied simulated link to clipboard!");
+                          }}
+                          className="px-4 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-xs transition flex items-center justify-center gap-1.5 active:scale-98"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>Copy</span>
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={handleSimulate}
+                        disabled={simStep !== 'idle'}
+                        className={`w-full py-3 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 ${
+                          simStep !== 'idle'
+                            ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                            : 'bg-sky-500 hover:bg-sky-400 text-slate-950 shadow-lg shadow-sky-500/10 active:scale-98'
+                        }`}
+                      >
+                        <Play className="w-3.5 h-3.5" />
+                        <span>Start MTProto Simulation</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 2: Core Capabilities (Numbered Service List) */}
+          <div id="how-it-works" className="space-y-12">
+            <div className="text-center max-w-2xl mx-auto space-y-3">
+              <span className="text-xs font-bold text-indigo-500 uppercase tracking-wider">The Mechanism</span>
+              <h2 className="text-3xl font-black tracking-tight text-slate-900 dark:text-white">How TeleCloud Streams Bytes</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400">
+                A highly optimized direct connection between your private storage chats and your custom public domains.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+              <div className="space-y-4 text-left p-2">
+                <span className="text-3xl font-extrabold text-sky-500/30 dark:text-sky-400/20 font-mono">01.</span>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Secure Chunking & Handshake</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
+                  Upon uploading, the file is split into optimal MTProto-aligned memory blocks. These blocks are securely transmitted directly to your private Telegram cloud chat, bypassing local hard drive storage limits.
+                </p>
+              </div>
+
+              <div className="space-y-4 text-left p-2">
+                <span className="text-3xl font-extrabold text-indigo-500/30 dark:text-indigo-400/20 font-mono">02.</span>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Relational DB Catalog Sync</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
+                  The local VPS MySQL database logs the file's mime type, file name, message ID, and assigns a short Alphanumeric Base-36 ID. This keeps your library catalog lightning-fast and search-optimized.
+                </p>
+              </div>
+
+              <div className="space-y-4 text-left p-2">
+                <span className="text-3xl font-extrabold text-purple-500/30 dark:text-purple-400/20 font-mono">03.</span>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-white">Nginx/PHP Range Streamer</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400 leading-relaxed">
+                  When a direct link is accessed on s3.htknetwork.in, the server reads from MySQL, grabs the chunks on-the-fly, and proxies the stream with HTTP Range header support. You can seek and fast-forward instantly!
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 3: Quantitative Proof Bento Grid */}
+          <div id="features" className="space-y-8">
+            <div className="text-center max-w-2xl mx-auto space-y-2">
+              <span className="text-xs font-bold text-sky-500 uppercase tracking-wider">Unmatched Performance</span>
+              <h2 className="text-3xl font-black text-slate-900 dark:text-white">Storage Reimagined</h2>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+              
+              {/* Marquee Box */}
+              <div className={`md:col-span-8 p-8 rounded-3xl ${cardBg} flex flex-col justify-between space-y-6 text-left relative overflow-hidden`}>
+                <div className="space-y-3 relative z-10">
+                  <div className="w-10 h-10 rounded-xl bg-sky-500/10 text-sky-500 flex items-center justify-center">
+                    <Zap className="w-5 h-5" />
+                  </div>
+                  <h3 className="text-xl font-bold">Zero Buffering Seek Latency</h3>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 max-w-lg leading-normal">
+                    Through on-the-fly range chunk proxying, TeleCloud skips waiting for entire large videos or audio files to download. It fetches only the active bytes being played by your viewer.
+                  </p>
+                </div>
+                
+                <div className="flex gap-8 border-t border-slate-200/50 dark:border-slate-800/60 pt-4 relative z-10">
+                  <div>
+                    <p className="text-3xl font-black font-mono tracking-tight text-slate-900 dark:text-white">0ms</p>
+                    <p className="text-[10px] uppercase font-mono tracking-wider text-slate-400">Connection Handshake</p>
+                  </div>
+                  <div>
+                    <p className="text-3xl font-black font-mono tracking-tight text-slate-900 dark:text-white">100%</p>
+                    <p className="text-[10px] uppercase font-mono tracking-wider text-slate-400">HTML5 Range Compliant</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Box 2 */}
+              <div className={`md:col-span-4 p-8 rounded-3xl ${cardBg} flex flex-col justify-between text-left`}>
+                <div className="space-y-3">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-500/10 text-indigo-500 flex items-center justify-center">
+                    <Lock className="w-5 h-5" />
+                  </div>
+                  <h3 className="text-lg font-bold">Encrypted Handshake</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                    Native MTProto layer encryption ensures that only authorized clients authenticated through secure sessions can upload or stream documents from your vault.
+                  </p>
+                </div>
+                <div className="text-xs font-mono text-indigo-400 font-bold pt-4">AES-256-IGE Encrypted</div>
+              </div>
+
+              {/* Box 3 */}
+              <div className={`md:col-span-4 p-8 rounded-3xl ${cardBg} flex flex-col justify-between text-left`}>
+                <div className="space-y-3">
+                  <div className="w-10 h-10 rounded-xl bg-purple-500/10 text-purple-400 flex items-center justify-center">
+                    <Layers className="w-5 h-5" />
+                  </div>
+                  <h3 className="text-lg font-bold">Workspace Isolation</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                    Create independent sandboxes to organize files. Map distinct Telegram groups or storage channels to separate project directories securely.
+                  </p>
+                </div>
+                <div className="text-xs font-mono text-purple-400 font-bold pt-4">Multi-Workspace Ready</div>
+              </div>
+
+              {/* Box 4 - Big Stat */}
+              <div className={`md:col-span-8 p-8 rounded-3xl ${cardBg} flex flex-col justify-between text-left relative overflow-hidden`}>
+                <div className="space-y-2">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500/10 text-emerald-500 flex items-center justify-center">
+                    <Globe className="w-5 h-5" />
+                  </div>
+                  <h3 className="text-lg font-bold">No Bandwidth Penalties</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                    Since data packets flow on-the-fly through your private VPS memory stream directly from Telegram cloud nodes, you pay absolutely $0 for external storage space or download bandwidth caps.
+                  </p>
+                </div>
+                <div className="flex items-baseline gap-2 pt-6">
+                  <span className="text-4xl font-extrabold tracking-tight text-slate-900 dark:text-white">$0.00</span>
+                  <span className="text-xs text-slate-400 font-medium">/ GB storage and streaming fees</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section 4: Interactive Accordion FAQs */}
+          <div id="faq" className="max-w-3xl mx-auto space-y-10">
+            <div className="text-center space-y-2">
+              <span className="text-xs font-bold text-indigo-500 uppercase tracking-wider">Support Catalog</span>
+              <h2 className="text-3xl font-black text-slate-900 dark:text-white font-display">Frequently Answered Queries</h2>
+            </div>
+
+            <div className="space-y-4">
+              {faqs.map((faq, index) => {
+                const isOpen = activeFaq === index;
+                return (
+                  <div 
+                    key={index} 
+                    className={`rounded-2xl transition-all duration-200 border ${
+                      isOpen 
+                        ? 'bg-slate-50 dark:bg-slate-900 border-sky-500/20' 
+                        : 'border-slate-200/60 dark:border-slate-900/80 hover:border-slate-300 dark:hover:border-slate-800'
+                    }`}
+                  >
+                    <button
+                      onClick={() => setActiveFaq(isOpen ? null : index)}
+                      className="w-full px-6 py-5 flex items-center justify-between text-left focus:outline-none"
+                    >
+                      <span className="text-sm font-bold text-slate-900 dark:text-white">{faq.q}</span>
+                      <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${isOpen ? 'rotate-180 text-sky-500' : ''}`} />
+                    </button>
+                    {isOpen && (
+                      <div className="px-6 pb-5 pt-1 text-xs sm:text-sm text-slate-500 dark:text-slate-400 leading-relaxed border-t border-slate-200/40 dark:border-slate-800/40 animate-slideDown">
+                        {faq.a}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Section 5: Bottom Final Call to Action */}
+          <div className="p-8 sm:p-12 rounded-3xl bg-slate-900 border border-slate-800 text-center space-y-6 relative overflow-hidden">
+            <div className="absolute inset-0 bg-gradient-to-tr from-sky-500/10 via-indigo-500/5 to-transparent pointer-events-none" />
+            <h2 className="text-3xl sm:text-4xl font-extrabold text-white">Ready to Own Your Cloud?</h2>
+            <p className="text-sm text-slate-400 max-w-xl mx-auto leading-normal">
+              Establish a secure decentralized gateway, register a database, and configure your streaming vault on port 3000 in minutes.
             </p>
-
-            <div className="pt-4 flex flex-col sm:flex-row items-center justify-center gap-4">
+            <div className="pt-2">
               <button
                 onClick={() => setShowAuthModal(true)}
-                className="w-full sm:w-auto px-8 py-4 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-extrabold text-sm shadow-xl shadow-sky-500/25 transition flex items-center justify-center space-x-2.5 active:scale-95"
+                className="mx-auto px-8 py-3.5 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold text-sm shadow-xl shadow-sky-500/20 transition flex items-center justify-center space-x-2 active:scale-95"
               >
                 <Smartphone className="w-5 h-5" />
-                <span>Connect Telegram to Enter Cloud</span>
-                <ArrowRight className="w-4 h-4" />
+                <span>Launch TeleCloud Dashboard</span>
               </button>
             </div>
-
-            <p className="text-xs text-slate-400 font-medium">
-              🔒 No email or password needed. 100% authenticated through native Telegram MTProto.
-            </p>
           </div>
 
-          {/* Value Props */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-16">
-            <div className={`p-7 rounded-3xl space-y-3 ${cardBg}`}>
-              <div className="w-12 h-12 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center">
-                <Zap className="w-6 h-6" />
-              </div>
-              <h3 className={`font-bold ${darkMode ? 'text-white' : 'text-slate-900'}`}>Direct HTTP Streaming Links</h3>
-              <p className={`text-xs leading-relaxed ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
-                Stream audio, video, or download any document via standard browser HTTP with range headers.
-              </p>
-            </div>
-
-            <div className={`p-7 rounded-3xl space-y-3 ${cardBg}`}>
-              <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
-                <ShieldCheck className="w-6 h-6" />
-              </div>
-              <h3 className={`font-bold ${darkMode ? 'text-white' : 'text-slate-900'}`}>Personal Cloud File Catalog</h3>
-              <p className={`text-xs leading-relaxed ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
-                Every file is securely indexed to your Telegram account. Rename, organize, and direct-stream anytime.
-              </p>
-            </div>
-
-            <div className={`p-7 rounded-3xl space-y-3 ${cardBg}`}>
-              <div className="w-12 h-12 rounded-2xl bg-indigo-500/10 text-indigo-400 flex items-center justify-center">
-                <ShieldCheck className="w-6 h-6" />
-              </div>
-              <h3 className={`font-bold ${darkMode ? 'text-white' : 'text-slate-900'}`}>Zero Password Hassle</h3>
-              <p className={`text-xs leading-relaxed ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
-                One-tap sign in via Telegram Phone OTP, Bot Token, or Telethon StringSession.
-              </p>
-            </div>
-          </div>
         </main>
+
+        {/* Quiet Footer */}
+        <footer className={`border-t py-12 transition-colors duration-200 ${darkMode ? 'bg-slate-950/50 border-slate-900' : 'bg-slate-50 border-slate-200/50'}`}>
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-6">
+            <div className="flex items-center space-x-2">
+              <span className="font-extrabold text-sm tracking-tight text-slate-900 dark:text-white">TeleCloud</span>
+              <span className="text-xs text-slate-400">© {new Date().getFullYear()} • Personal Decoupled Storage Systems</span>
+            </div>
+            
+            <div className="flex gap-6 text-xs text-slate-400">
+              <span className="hover:text-sky-500 cursor-pointer">Security Protocol</span>
+              <span className="hover:text-sky-500 cursor-pointer">API Agreement</span>
+              <span className="hover:text-sky-500 cursor-pointer">Terms of Service</span>
+            </div>
+          </div>
+        </footer>
 
         {/* Telegram Auth Modal */}
         {renderAuthModal()}
@@ -1481,20 +1922,9 @@ export default function App() {
                             setWorkspaceDropdownOpen(false);
                             setCreateWorkspaceModalOpen(true);
                           }}
-                          className="flex-1 py-1.5 px-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs text-center shadow-xs transition"
+                          className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs text-center shadow-xs transition"
                         >
-                          + New Workspace
-                        </button>
-                        <button
-                          onClick={() => {
-                            setWorkspaceDropdownOpen(false);
-                            setDashboardTab('workspaces');
-                          }}
-                          className={`py-1.5 px-3 rounded-xl font-semibold text-xs border transition ${
-                            darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
-                          }`}
-                        >
-                          Manage
+                          + Create New Workspace
                         </button>
                       </div>
                     </div>
@@ -1628,30 +2058,7 @@ export default function App() {
               <span>Overview & Stats</span>
             </button>
 
-            <button
-              onClick={() => { setDashboardTab('workspaces'); setMobileSidebarOpen(false); }}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-2xl text-xs font-bold transition ${
-                dashboardTab === 'workspaces'
-                  ? (darkMode ? 'bg-purple-950/80 text-purple-300 border border-purple-800/80 shadow-xs' : 'bg-purple-50/80 text-purple-900 border border-purple-200/80 shadow-2xs')
-                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/80 hover:text-white' : 'text-slate-700 hover:bg-slate-100/80 hover:text-slate-900')
-              }`}
-            >
-              <div className="flex items-center space-x-3">
-                <div className={`w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
-                  dashboardTab === 'workspaces' ? 'bg-purple-500 text-white shadow-xs' : (darkMode ? 'bg-purple-950/60 text-purple-400' : 'bg-purple-50 text-purple-600')
-                }`}>
-                  <Layers className="w-4 h-4" />
-                </div>
-                <span>Workspaces</span>
-              </div>
-              {workspaces.length > 0 && (
-                <span className={`px-2 py-0.5 text-[10px] rounded-full font-mono font-bold ${
-                  dashboardTab === 'workspaces' ? (darkMode ? 'bg-purple-900 text-purple-200' : 'bg-purple-200 text-purple-800') : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
-                }`}>
-                  {workspaces.length}
-                </span>
-              )}
-            </button>
+            {/* Removed Workspaces button as requested. Options are now strictly in header and bottom of sidebar. */}
 
             <button
               onClick={() => { setDashboardTab('upload'); setMobileSidebarOpen(false); }}
@@ -1785,56 +2192,260 @@ export default function App() {
               </p>
             </div>
 
-            <div className={`flex items-center justify-between text-[11px] px-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-              <span>Workspace: <strong className={darkMode ? 'text-slate-200' : 'text-slate-800'}>{activeWorkspace?.name || 'Default Workspace'} (ID #{activeWorkspace?.id || 1})</strong></span>
-              <button onClick={() => setDashboardTab('workspaces')} className="text-sky-400 underline font-semibold">Switch</button>
-            </div>
-
-            {/* Quick Dark / Light Toggle in Sidebar */}
-            <div className="pt-1">
-              <button
-                onClick={toggleDarkMode}
-                className={`w-full py-2 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-between ${
-                  darkMode
-                    ? 'bg-slate-800/90 text-amber-300 border-slate-700 hover:bg-slate-700'
-                    : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200'
-                }`}
+            <div className="space-y-1.5 px-1 py-1">
+              <div className="flex items-center justify-between">
+                <span className={`text-[10px] uppercase font-mono font-bold tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Active Workspace</span>
+                <button 
+                  onClick={() => setCreateWorkspaceModalOpen(true)}
+                  className="text-[10px] font-extrabold text-sky-500 hover:text-sky-400 flex items-center gap-0.5"
+                >
+                  + Create New
+                </button>
+              </div>
+              <select
+                value={activeWorkspaceId || ''}
+                onChange={(e) => {
+                  const wsId = e.target.value;
+                  if (wsId) {
+                    handleSwitchWorkspace(Number(wsId));
+                  }
+                }}
+                className={`w-full text-xs px-2.5 py-1.5 rounded-xl transition ${inputBg} font-bold`}
               >
-                <div className="flex items-center space-x-2">
-                  {darkMode ? <Sun className="w-3.5 h-3.5 text-amber-400" /> : <Moon className="w-3.5 h-3.5 text-indigo-600" />}
-                  <span>{darkMode ? 'Dark Mode Active' : 'Light Mode Active'}</span>
-                </div>
-                <span className="text-[10px] underline font-medium opacity-80">Toggle</span>
-              </button>
+                {workspaces.map((ws) => (
+                  <option key={ws.id} value={ws.id}>
+                    {ws.name} (ID #{ws.id})
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
         </aside>
 
         {/* MAIN DASHBOARD CONTENT AREA */}
-        <main className="flex-1 p-3.5 sm:p-6 lg:p-8 overflow-y-auto min-w-0 pb-24 md:pb-8">
+        <main className="flex-1 p-3 sm:p-5 lg:p-6 overflow-y-auto min-w-0 pb-24 md:pb-8">
           
           {/* TAB 1: OVERVIEW & STATS */}
           {dashboardTab === 'overview' && (
-            <div className="space-y-6">
+            <div className="space-y-6 font-sans">
               {/* Welcome Header */}
-              <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-3xl transition-colors duration-200 ${cardBg}`}>
+              <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 sm:p-5 rounded-2xl transition-colors duration-200 ${cardBg}`}>
                 <div>
-                  <h1 className={`text-xl sm:text-2xl font-black tracking-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                  <h1 className={`text-lg sm:text-xl font-black tracking-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
                     Welcome back, {user?.first_name}!
                   </h1>
-                  <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                  <p className={`text-[11px] mt-0.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                     Your personal cloud storage is active and linked to account: <span className={`font-mono font-bold ${darkMode ? 'text-sky-300' : 'text-slate-800'}`}>@{user?.username || user?.id}</span>
                   </p>
                 </div>
                 <div className="flex items-center space-x-2">
                   <button
                     onClick={() => setDashboardTab('upload')}
-                    className="px-4 py-2.5 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 text-white font-bold text-xs shadow-md shadow-sky-500/20 hover:from-sky-400 hover:to-indigo-500 transition flex items-center space-x-1.5 active:scale-95"
+                    className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 text-white font-bold text-[11px] shadow-md shadow-sky-500/20 hover:from-sky-400 hover:to-indigo-500 transition flex items-center space-x-1.5 active:scale-95"
                   >
-                    <UploadCloud className="w-4 h-4" />
-                    <span>Upload New File</span>
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    <span>Detailed Upload Options</span>
                   </button>
                 </div>
+              </div>
+
+              {/* Drag-and-Drop Direct Link Generator Card */}
+              <div className={`p-4 sm:p-5 rounded-2xl space-y-3 transition-colors duration-200 ${cardBg}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className={`font-black text-sm sm:text-base flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                      <UploadCloud className="w-5 h-5 text-sky-500" />
+                      <span>Drag & Drop Link Generator</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                      Instantly upload any file to Telegram and generate a secure, password-protected streaming link.
+                    </p>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-[10px] font-mono font-bold text-sky-500 uppercase tracking-widest bg-sky-500/10 px-2.5 py-0.5 rounded-md border border-sky-500/20 shadow-2xs">
+                      Max 50MB
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+                  {/* Left drag zone */}
+                  <div className="lg:col-span-7 flex flex-col">
+                    <div
+                      onDragOver={handleDragOver}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
+                      onClick={() => {
+                        const input = document.getElementById('overview-file-picker');
+                        if (input) input.click();
+                      }}
+                      className={`flex-1 border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-200 min-h-[180px] ${
+                        isOverviewDragging
+                          ? 'border-sky-500 bg-sky-500/5 shadow-lg shadow-sky-500/5'
+                          : overviewFile
+                          ? 'border-emerald-500/40 bg-emerald-500/5'
+                          : 'border-slate-200 dark:border-slate-800 hover:border-sky-500 dark:hover:border-sky-500/30'
+                      }`}
+                    >
+                      <input
+                        type="file"
+                        id="overview-file-picker"
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            setOverviewFile(e.target.files[0]);
+                            setOverviewResult(null);
+                            setOverviewError(null);
+                          }
+                        }}
+                      />
+                      
+                      {overviewFile ? (
+                        <div className="space-y-3">
+                          <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center mx-auto shadow-2xs border border-emerald-500/20">
+                            <Check className="w-6 h-6" />
+                          </div>
+                          <div>
+                            <p className={`text-xs font-extrabold max-w-[280px] truncate mx-auto ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                              {overviewFile.name}
+                            </p>
+                            <p className="text-[10px] text-slate-500 font-mono mt-0.5">
+                              {formatBytes(overviewFile.size)} · {overviewFile.type || 'Unknown Type'}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          <div className="w-12 h-12 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center mx-auto border border-sky-500/20">
+                            <UploadCloud className="w-6 h-6" />
+                          </div>
+                          <div className="space-y-1">
+                            <p className={`text-xs font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                              Drag and drop file here, or <span className="text-sky-500 underline">browse</span>
+                            </p>
+                            <p className="text-[10px] text-slate-400 dark:text-slate-500">
+                              Accepts any file up to 50MB (Telegram native limit)
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Right configuration zone */}
+                  <div className="lg:col-span-5 flex flex-col justify-between space-y-4">
+                    <div className="space-y-3 flex-1">
+                      {/* Password Protection */}
+                      <div className="space-y-1 text-left">
+                        <label className="text-[10px] uppercase font-mono font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
+                          <Lock className="w-3.5 h-3.5 text-sky-500" />
+                          <span>Enable Link Password Protection</span>
+                        </label>
+                        <input
+                          type="password"
+                          placeholder="Leave blank for no password"
+                          value={overviewPassword}
+                          onChange={(e) => setOverviewPassword(e.target.value)}
+                          className={`w-full px-3 py-2.5 rounded-xl text-xs transition ${inputBg} font-semibold`}
+                        />
+                      </div>
+
+                      {/* Implicitly using the current active workspace for upload */}
+                    </div>
+
+                    {/* Action button */}
+                    <div>
+                      {overviewUploading ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                            <span className="flex items-center gap-1.5">
+                              <RefreshCw className="w-3 h-3 animate-spin text-sky-400" />
+                              <span>Streaming to Telegram...</span>
+                            </span>
+                            <span>{overviewProgress}%</span>
+                          </div>
+                          <div className="w-full bg-slate-100 dark:bg-slate-950 rounded-full h-1.5 overflow-hidden">
+                            <div
+                              className="bg-gradient-to-r from-sky-500 to-indigo-600 h-1.5 rounded-full transition-all duration-300"
+                              style={{ width: `${overviewProgress}%` }}
+                            />
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex gap-2">
+                          {overviewFile && (
+                            <button
+                              onClick={() => {
+                                setOverviewFile(null);
+                                setOverviewPassword('');
+                                setOverviewResult(null);
+                                setOverviewError(null);
+                              }}
+                              className="px-3 py-3 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-900 transition flex items-center justify-center text-slate-500"
+                            >
+                              Reset
+                            </button>
+                          )}
+                          <button
+                            onClick={() => overviewFile && handleOverviewUpload(overviewFile)}
+                            disabled={!overviewFile}
+                            className={`flex-1 py-3 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 ${
+                              overviewFile
+                                ? 'bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white shadow-md active:scale-98'
+                                : darkMode
+                                ? 'bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed'
+                                : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                            }`}
+                          >
+                            <Play className="w-3.5 h-3.5" />
+                            <span>Upload & Generate Link</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Upload feedback messages */}
+                {overviewError && (
+                  <div className="p-3.5 rounded-xl bg-red-500/10 text-red-500 text-xs flex items-center gap-2 border border-red-500/20 font-medium">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{overviewError}</span>
+                  </div>
+                )}
+
+                {overviewResult && (
+                  <div className="p-4 rounded-2xl bg-emerald-500/10 text-emerald-500 space-y-2 border border-emerald-500/20 animate-fadeIn">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        <span className="text-xs font-bold text-slate-900 dark:text-white">File Uploaded Successfully!</span>
+                      </div>
+                      {overviewResult.has_password && (
+                        <span className="text-[9px] uppercase font-mono font-bold bg-amber-500/20 text-amber-500 border border-amber-500/25 px-2 py-0.5 rounded-md shadow-2xs flex items-center gap-1">
+                          <Lock className="w-3 h-3" /> Locked
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        readOnly
+                        value={overviewResult.direct_link || ''}
+                        className="flex-1 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono font-semibold focus:outline-none"
+                      />
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(overviewResult.direct_link || '');
+                          alert("Link copied successfully!");
+                        }}
+                        className="px-4 py-2 rounded-xl bg-emerald-500 text-slate-950 font-bold text-xs hover:bg-emerald-400 transition"
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Stats Cards Grid */}

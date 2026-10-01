@@ -27,6 +27,7 @@ import {
   getUserApiKey,
   regenerateUserApiKey,
   verifyWorkspaceBelongsToUser,
+  getFileByMessageId,
 } from './server/db.ts';
 
 const app = express();
@@ -902,6 +903,7 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
     }
 
     // 6. Record File in MySQL Database Catalog
+    const downloadPassword = req.body.password || req.body.download_password || null;
     await saveFileToDb({
       telegram_id: auth.user.telegram_id,
       message_id: messageId,
@@ -914,6 +916,7 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
       caption,
       storage_chat: telegramChat,
       direct_link: directDownloadUrl,
+      download_password: downloadPassword,
     });
 
     // 7. Return direct file_url in JSON response
@@ -933,6 +936,7 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
       checksum_sha256: fileSha256,
       telegram_link: telegramLink,
       auth_method: auth.authMethod,
+      has_password: !!downloadPassword,
       created_at: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -1018,9 +1022,59 @@ app.post('/api/v1/upload', handleUploadMiddleware, handleSecureUpload);
 // Direct Access Download / Stream Endpoint
 app.get('/api/download/:messageId/:filename?', async (req: Request, res: Response): Promise<void> => {
   const { messageId } = req.params;
-  const pyUrl = `${PY_BASE}/stream/${messageId}`;
 
   try {
+    // Check for password protection in Database
+    const file = await getFileByMessageId(messageId);
+    if (file && file.download_password) {
+      const providedPassword = req.query.password || req.headers['x-download-password'] || '';
+      if (providedPassword !== file.download_password) {
+        // Return a gorgeous HTML password prompt
+        res.setHeader('Content-Type', 'text/html');
+        res.status(403).send(`
+          <!DOCTYPE html>
+          <html lang="en" class="h-full">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Password Protected File - TeleCloud</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet">
+            <style>
+              body { font-family: 'Plus Jakarta Sans', sans-serif; }
+            </style>
+          </head>
+          <body class="bg-slate-950 text-slate-100 flex items-center justify-center min-h-full p-4">
+            <div class="max-w-md w-full p-8 rounded-3xl bg-slate-900 border border-slate-800 shadow-2xl space-y-6 text-center">
+              <div class="w-16 h-14 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center mx-auto border border-sky-500/20">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+              </div>
+              <div class="space-y-2">
+                <h1 class="text-xl font-extrabold text-white">Password Protected File</h1>
+                <p class="text-xs text-slate-400 truncate max-w-xs mx-auto">File: ${file.file_name}</p>
+                <p class="text-xs text-slate-500 font-medium">This secure file is encrypted in your personal cloud. Enter the access password to retrieve or stream this file.</p>
+              </div>
+              
+              <form method="GET" class="space-y-4">
+                <input type="password" name="password" required placeholder="Enter download password" 
+                  class="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm focus:outline-none focus:border-sky-500 text-center font-bold tracking-widest" />
+                <button type="submit" 
+                  class="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold text-sm transition active:scale-95">
+                  Decrypt & Download Stream
+                </button>
+              </form>
+              <div class="text-[10px] text-slate-600 font-mono uppercase tracking-wider">POWERED BY TELECLOUD ENGINE</div>
+            </div>
+          </body>
+          </html>
+        `);
+        return;
+      }
+    }
+
+    const pyUrl = `${PY_BASE}/stream/${messageId}`;
     const headers: Record<string, string> = {};
     if (req.headers.range) {
       headers['Range'] = req.headers.range;
