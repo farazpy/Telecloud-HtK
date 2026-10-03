@@ -171,8 +171,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.5.4
-  const APP_VERSION = "v1.5.4";
+  // App Version in Header - Incremented to v1.5.5
+  const APP_VERSION = "v1.5.5";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -1865,19 +1865,6 @@ export default function App() {
             {/* Zone 3: Primary Actions */}
             <div className="flex items-center gap-3">
               <button
-                onClick={() => navigate('/admin')}
-                className={`px-3 py-2 rounded-xl border text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer ${
-                  darkMode
-                    ? 'bg-slate-900/90 text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/10'
-                    : 'bg-slate-100 text-cyan-700 border-cyan-200 hover:bg-cyan-50'
-                }`}
-                title="System Admin & MySQL Configuration (PIN 9890)"
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Admin</span>
-              </button>
-
-              <button
                 onClick={toggleDarkMode}
                 className={`p-2.5 rounded-xl border transition-colors ${
                   darkMode
@@ -1905,13 +1892,6 @@ export default function App() {
             <div className={`lg:hidden border-t px-4 py-4 space-y-2 animate-in slide-in-from-top-2 duration-200 ${
               darkMode ? 'bg-slate-950 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900 shadow-lg'
             }`}>
-              <button
-                onClick={() => { navigate('/admin'); setMobileMenuOpen(false); }}
-                className="w-full text-left py-2 px-3 rounded-lg text-xs font-bold text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-between"
-              >
-                <span>⚙️ System Admin (PIN 9890)</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
               {[
                 { label: 'Home Overview', path: '/' },
                 { label: 'Features Breakdown', path: '/features' },
@@ -2586,20 +2566,6 @@ export default function App() {
             <span className="hidden sm:inline">{darkMode ? 'Light' : 'Dark'}</span>
           </button>
 
-          {/* System Admin Button */}
-          <button
-            onClick={() => navigate('/admin')}
-            className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border transition text-xs font-bold cursor-pointer ${
-              darkMode
-                ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/20'
-                : 'bg-cyan-50 text-cyan-700 border-cyan-200 hover:bg-cyan-100/80'
-            }`}
-            title="Master System Admin Panel & MySQL Settings (PIN 9890)"
-          >
-            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
-            <span className="hidden sm:inline">Admin</span>
-          </button>
-
           {/* Visual Storage Chat Quick Indicator Button */}
           <button
             onClick={() => setDashboardTab('settings')}
@@ -2750,32 +2716,6 @@ export default function App() {
 
             <div>
               <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                Workspaces
-              </p>
-              <button
-                onClick={() => { setDashboardTab('workspaces'); setMobileSidebarOpen(false); }}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition ${
-                  dashboardTab === 'workspaces'
-                    ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
-                    : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
-                }`}
-              >
-                <div className="flex items-center space-x-3">
-                  <Layers className={`w-4 h-4 ${dashboardTab === 'workspaces' ? 'text-sky-500' : 'text-slate-400'}`} />
-                  <span>All Workspaces</span>
-                </div>
-                <span className={`px-2 py-0.5 text-[10px] rounded-md font-mono font-bold ${
-                  dashboardTab === 'workspaces'
-                    ? (darkMode ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-800')
-                    : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
-                }`}>
-                  {workspaces.length}
-                </span>
-              </button>
-            </div>
-
-            <div>
-              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
                 Developer & Settings
               </p>
               <div className="space-y-1">
@@ -2810,23 +2750,6 @@ export default function App() {
                 >
                   <Sliders className={`w-4 h-4 ${dashboardTab === 'settings' ? 'text-sky-500' : 'text-slate-400'}`} />
                   <span>Storage Destination</span>
-                </button>
-
-                <button
-                  onClick={() => { navigate('/admin'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition ${
-                    darkMode
-                      ? 'text-cyan-400 hover:bg-cyan-500/10 border border-cyan-500/20'
-                      : 'text-cyan-700 hover:bg-cyan-50 border border-cyan-200'
-                  }`}
-                >
-                  <div className="flex items-center space-x-3">
-                    <ShieldCheck className="w-4 h-4 text-cyan-400" />
-                    <span>System Admin Panel</span>
-                  </div>
-                  <span className="px-1.5 py-0.5 text-[9px] rounded font-mono font-bold bg-cyan-500/20 text-cyan-300">
-                    PIN 9890
-                  </span>
                 </button>
               </div>
             </div>
