@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import QRCode from 'qrcode';
+import AdminPanel from './components/AdminPanel';
 import {
   UploadCloud,
   File,
@@ -170,15 +171,19 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.5.2
-  const APP_VERSION = "v1.5.2";
+  // App Version in Header - Incremented to v1.5.3
+  const APP_VERSION = "v1.5.3";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const path = window.location.pathname.toLowerCase();
-      if (['/features', '/benefits', '/architecture', '/streaming-cdn', '/streaming', '/security', '/pricing', '/contact'].includes(path)) {
+      if (['/features', '/benefits', '/architecture', '/streaming-cdn', '/streaming', '/security', '/pricing', '/contact', '/admin'].includes(path)) {
         return path;
+      }
+      const hash = window.location.hash.toLowerCase();
+      if (hash === '#/admin' || hash === '#admin') {
+        return '/admin';
       }
     }
     return '/';
@@ -1669,6 +1674,43 @@ export default function App() {
     );
   }
 
+  // =========================================================================
+  // VIEW: DEDICATED /admin SYSTEM CONTROL PANEL (Protected by PIN 9890)
+  // =========================================================================
+  if (currentRoute === '/admin') {
+    return (
+      <div className={`min-h-screen ${darkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-900 text-slate-100'} font-sans relative`}>
+        {/* Top Header */}
+        <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md sticky top-0 z-50 px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2.5 cursor-pointer" onClick={() => { setDashboardTab('overview'); navigate('/'); }}>
+            <div className="w-9 h-9 rounded-2xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-white font-bold shadow-md shadow-cyan-500/20">
+              <ShieldCheck className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold text-white tracking-tight">TeleCloud Master Admin</span>
+                <span className="px-2 py-0.5 text-[10px] font-mono font-bold rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-400/30">
+                  {APP_VERSION}
+                </span>
+              </div>
+              <p className="text-[10px] text-slate-400">PIN Protected System & MySQL Gateway</p>
+            </div>
+          </div>
+          <button
+            onClick={() => { setDashboardTab('overview'); navigate('/'); }}
+            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 hover:text-white border border-slate-700 transition flex items-center gap-1.5 cursor-pointer"
+          >
+            <span>← Exit to Vault</span>
+          </button>
+        </header>
+
+        <main className="py-6">
+          <AdminPanel onClose={() => { setDashboardTab('overview'); navigate('/'); }} onNavigateHome={() => { setDashboardTab('overview'); navigate('/'); }} />
+        </main>
+      </div>
+    );
+  }
+
   // ==========================================
   // VIEW A: LANDING PAGE (UNAUTHENTICATED)
   // ==========================================
@@ -1778,6 +1820,19 @@ export default function App() {
             {/* Zone 3: Primary Actions */}
             <div className="flex items-center gap-3">
               <button
+                onClick={() => navigate('/admin')}
+                className={`px-3 py-2 rounded-xl border text-xs font-bold transition-colors flex items-center gap-1.5 cursor-pointer ${
+                  darkMode
+                    ? 'bg-slate-900/90 text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/10'
+                    : 'bg-slate-100 text-cyan-700 border-cyan-200 hover:bg-cyan-50'
+                }`}
+                title="System Admin & MySQL Configuration (PIN 9890)"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Admin</span>
+              </button>
+
+              <button
                 onClick={toggleDarkMode}
                 className={`p-2.5 rounded-xl border transition-colors ${
                   darkMode
@@ -1805,6 +1860,13 @@ export default function App() {
             <div className={`lg:hidden border-t px-4 py-4 space-y-2 animate-in slide-in-from-top-2 duration-200 ${
               darkMode ? 'bg-slate-950 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900 shadow-lg'
             }`}>
+              <button
+                onClick={() => { navigate('/admin'); setMobileMenuOpen(false); }}
+                className="w-full text-left py-2 px-3 rounded-lg text-xs font-bold text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-between"
+              >
+                <span>⚙️ System Admin (PIN 9890)</span>
+                <ChevronRight className="w-4 h-4" />
+              </button>
               {[
                 { label: 'Home Overview', path: '/' },
                 { label: 'Features Breakdown', path: '/features' },
@@ -2479,6 +2541,20 @@ export default function App() {
             <span className="hidden sm:inline">{darkMode ? 'Light' : 'Dark'}</span>
           </button>
 
+          {/* System Admin Button */}
+          <button
+            onClick={() => navigate('/admin')}
+            className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border transition text-xs font-bold cursor-pointer ${
+              darkMode
+                ? 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30 hover:bg-cyan-500/20'
+                : 'bg-cyan-50 text-cyan-700 border-cyan-200 hover:bg-cyan-100/80'
+            }`}
+            title="Master System Admin Panel & MySQL Settings (PIN 9890)"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="hidden sm:inline">Admin</span>
+          </button>
+
           {/* Visual Storage Chat Quick Indicator Button */}
           <button
             onClick={() => setDashboardTab('settings')}
@@ -2689,6 +2765,23 @@ export default function App() {
                 >
                   <Sliders className={`w-4 h-4 ${dashboardTab === 'settings' ? 'text-sky-500' : 'text-slate-400'}`} />
                   <span>Storage Destination</span>
+                </button>
+
+                <button
+                  onClick={() => { navigate('/admin'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition ${
+                    darkMode
+                      ? 'text-cyan-400 hover:bg-cyan-500/10 border border-cyan-500/20'
+                      : 'text-cyan-700 hover:bg-cyan-50 border border-cyan-200'
+                  }`}
+                >
+                  <div className="flex items-center space-x-3">
+                    <ShieldCheck className="w-4 h-4 text-cyan-400" />
+                    <span>System Admin Panel</span>
+                  </div>
+                  <span className="px-1.5 py-0.5 text-[9px] rounded font-mono font-bold bg-cyan-500/20 text-cyan-300">
+                    PIN 9890
+                  </span>
                 </button>
               </div>
             </div>

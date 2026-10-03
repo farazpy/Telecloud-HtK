@@ -34,6 +34,10 @@ import {
   saveUserTelegramSessionInDb,
   getUserTelegramSessionFromDb,
   markUserSessionLostInDb,
+  getSystemSettingsFromDb,
+  updateSystemSettingsInDb,
+  verifyAdminPin,
+  getAdminSystemOverview,
 } from './server/db.ts';
 
 const app = express();
@@ -46,6 +50,7 @@ initDb()
   .then(() => {
     setTimeout(async () => {
       await restoreSessionFromMysql().catch((e) => console.warn('[MySQL] Auto-restore notice:', e.message));
+      await syncMysqlSettingsToPython().catch((e) => console.warn('[MySQL] Settings sync notice:', e.message));
     }, 2500);
   })
   .catch((err) => console.error('[MySQL] init error:', err));
@@ -262,6 +267,24 @@ async function syncSessionToMysql(telegramId?: number | string, explicitSessionS
     }
   } catch (err: any) {
     console.warn('[MySQL Session] Notice syncing session to MySQL:', err.message);
+  }
+}
+
+// Synchronize system settings from MySQL to Python daemon
+async function syncMysqlSettingsToPython() {
+  try {
+    const settings = await getSystemSettingsFromDb();
+    if (settings) {
+      await forwardToPython('POST', '/device_config', {
+        device_model: settings.device_model,
+        system_version: settings.system_version,
+        app_version: settings.app_version,
+        proxy_url: settings.proxy_url,
+      });
+      console.log(`[MySQL Settings] Device identity "${settings.device_model}" synced to Python daemon.`);
+    }
+  } catch (err: any) {
+    console.warn('[MySQL Settings] Startup sync notice:', err.message);
   }
 }
 
@@ -521,6 +544,130 @@ app.post('/api/disconnect', async (req: Request, res: Response) => {
   await clearTelegramSystemSessionInDb().catch((e) => console.error('[MySQL] clear error:', e));
   const result = await forwardToPython('POST', '/disconnect');
   res.status(result.status).json(result.data);
+});
+
+// ============================================================================
+// ADMIN PANEL API ENDPOINTS (/admin Protected by PIN 9890 / Custom PIN)
+// ============================================================================
+
+app.post('/api/admin/verify', async (req: Request, res: Response) => {
+  try {
+    const { pin } = req.body || {};
+    const isValid = await verifyAdminPin(pin);
+    if (!isValid) {
+      return res.status(401).json({ success: false, error: 'Invalid Admin PIN. Access denied.' });
+    }
+    return res.json({ success: true, message: 'Admin authentication verified.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/admin/settings', async (req: Request, res: Response) => {
+  try {
+    const pin = (req.headers['x-admin-pin'] as string) || (req.query.pin as string);
+    if (!(await verifyAdminPin(pin))) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid Admin PIN required.' });
+    }
+
+    const settings = await getSystemSettingsFromDb();
+    const dbStatus = getDbStatus();
+    const overview = await getAdminSystemOverview();
+    const pyStatus = await forwardToPython('GET', '/status').catch(() => ({ data: {} }));
+    const deviceConfig = await forwardToPython('GET', '/device_config').catch(() => ({ data: {} }));
+
+    return res.json({
+      success: true,
+      settings,
+      dbStatus,
+      overview,
+      telethonStatus: pyStatus.data,
+      device_model: deviceConfig.data?.device_model || settings.device_model,
+      system_version: deviceConfig.data?.system_version || settings.system_version,
+      app_version: deviceConfig.data?.app_version || settings.app_version,
+      proxy_url: deviceConfig.data?.proxy_url || settings.proxy_url,
+      location: deviceConfig.data?.location || null,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/admin/settings', async (req: Request, res: Response) => {
+  try {
+    const pin = (req.headers['x-admin-pin'] as string) || (req.body?.pin as string);
+    if (!(await verifyAdminPin(pin))) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid Admin PIN required.' });
+    }
+
+    const updates = { ...req.body };
+    delete updates.pin; // Do not treat pin payload as setting key unless updating admin_pin explicitly
+
+    const result = await updateSystemSettingsInDb(updates);
+    if (!result.success) {
+      return res.status(500).json({ success: false, error: result.error });
+    }
+
+    // Sync device identity and proxy configuration directly to Telethon Python daemon
+    const pySync = await forwardToPython('POST', '/device_config', {
+      device_model: result.settings.device_model,
+      system_version: result.settings.system_version,
+      app_version: result.settings.app_version,
+      proxy_url: result.settings.proxy_url,
+    }).catch((e) => ({ data: { error: e.message } }));
+
+    return res.json({
+      success: true,
+      message: 'Settings updated in MySQL database and propagated to active system workers.',
+      settings: result.settings,
+      location: pySync.data?.location || null,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/admin/users/reconnect', async (req: Request, res: Response) => {
+  try {
+    const pin = (req.headers['x-admin-pin'] as string) || (req.body?.pin as string);
+    if (!(await verifyAdminPin(pin))) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid Admin PIN required.' });
+    }
+
+    const { telegram_id } = req.body;
+    if (!telegram_id) {
+      return res.status(400).json({ success: false, error: 'telegram_id is required' });
+    }
+
+    const uSess = await getUserTelegramSessionFromDb(telegram_id);
+    if (!uSess || !uSess.session_str) {
+      return res.status(400).json({
+        success: false,
+        error: 'No Telegram MTProto session string found in MySQL for this user. User must log in.',
+      });
+    }
+
+    const verifyRes = await forwardToPython('POST', '/verify_session', { session_str: uSess.session_str });
+    if (verifyRes.data?.valid) {
+      await saveUserTelegramSessionInDb(telegram_id, {
+        session_str: uSess.session_str,
+        api_id: uSess.api_id,
+        api_hash: uSess.api_hash,
+      });
+      return res.json({
+        success: true,
+        message: `Session for user #${telegram_id} verified active and renewed for 30 days.`,
+      });
+    } else {
+      await markUserSessionLostInDb(telegram_id);
+      return res.json({
+        success: false,
+        error: 'Session has been revoked or expired on Telegram servers. User must re-authenticate.',
+      });
+    }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Workspace endpoints (Multi-workspace per Telegram account in MySQL)
