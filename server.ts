@@ -101,31 +101,25 @@ app.use(express.json());
 let pyProcess: ChildProcess | null = null;
 
 function ensurePythonDepsAndStart() {
-  const pyScript = path.resolve(process.cwd(), 'server', 'telethon_service.py');
-  
   // Quick check if python dependencies are present
   const check = spawn('python3', ['-c', 'import telethon, aiohttp']);
   check.on('close', (code) => {
-    if (code !== 0) {
-      console.log('[Node] Installing Python dependencies (telethon, aiohttp)...');
-      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages'], {
-        stdio: 'inherit',
-      });
-      install.on('close', (pipCode) => {
-        if (pipCode !== 0) {
-          const apt = spawn('apt-get', ['install', '-y', 'python3-aiohttp', 'python3-telethon'], {
-            stdio: 'inherit',
-          });
-          apt.on('close', () => {
-            startPythonService();
-          });
-        } else {
-          startPythonService();
-        }
-      });
-    } else {
+    if (code === 0) {
       startPythonService();
+      return;
     }
+
+    console.log('[Node] Installing Python dependencies (aiohttp, telethon)...');
+    const apt = spawn('apt-get', ['update', '-y']);
+    apt.on('close', () => {
+      const aptInstall = spawn('apt-get', ['install', '-y', 'python3-pip', 'python3-aiohttp']);
+      aptInstall.on('close', () => {
+        const pip = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', 'cryptg', '--break-system-packages']);
+        pip.on('close', () => {
+          startPythonService();
+        });
+      });
+    });
   });
 }
 
