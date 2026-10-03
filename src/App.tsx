@@ -172,8 +172,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.6.5
-  const APP_VERSION = "v1.6.5";
+  // App Version in Header - Incremented to v1.6.6
+  const APP_VERSION = "v1.6.6";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -685,6 +685,27 @@ export default function App() {
   // Fetch Old Telegram Files State
   const [isFetchingOldFiles, setIsFetchingOldFiles] = useState<boolean>(false);
   const [fetchOldFilesStatus, setFetchOldFilesStatus] = useState<string | null>(null);
+
+  // Active Workspace Live File Count & Storage Metric
+  const activeWorkspaceFileCount = useMemo(() => {
+    if (!activeWorkspace) return files.length;
+    const matching = files.filter(
+      (f) => String(f.workspace_id) === String(activeWorkspace.id) || (!f.workspace_id && activeWorkspace.is_default)
+    );
+    if (matching.length > 0) return matching.length;
+    return activeWorkspace.file_count ?? 0;
+  }, [activeWorkspace, files]);
+
+  const activeWorkspaceBytes = useMemo(() => {
+    if (!activeWorkspace) return stats?.totalBytes || 0;
+    const matching = files.filter(
+      (f) => String(f.workspace_id) === String(activeWorkspace.id) || (!f.workspace_id && activeWorkspace.is_default)
+    );
+    if (matching.length > 0) {
+      return matching.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0);
+    }
+    return activeWorkspace.total_bytes ?? 0;
+  }, [activeWorkspace, files, stats]);
 
   useEffect(() => {
     checkStatus();
@@ -2763,13 +2784,22 @@ export default function App() {
           <div className="relative w-full">
             <Search className="w-4 h-4 text-sky-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
-              type="text"
+              type="search"
+              name="telecloud_vault_global_search"
+              id="telecloud_vault_global_search"
               value={fileSearch}
               onChange={(e) => {
                 setFileSearch(e.target.value);
                 if (dashboardTab !== 'vault') setDashboardTab('vault');
               }}
               autoComplete="off"
+              autoCorrect="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              data-lpignore="true"
+              data-1p-ignore="true"
+              data-bwignore="true"
+              data-form-type="other"
               placeholder="Search cloud files, documents, videos..."
               className={`w-full rounded-2xl pl-9 pr-4 py-2 text-xs transition ${inputBg}`}
             />
@@ -2909,15 +2939,13 @@ export default function App() {
                     <HardDrive className={`w-4 h-4 text-purple-400 shrink-0`} />
                     <span>Files Vault</span>
                   </div>
-                  {files.length > 0 && (
-                    <span className={`px-2 py-0.5 text-[10px] rounded-md font-mono font-bold ${
-                      dashboardTab === 'vault'
-                        ? (darkMode ? 'bg-purple-500/20 text-purple-300' : 'bg-purple-100 text-purple-800')
-                        : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
-                    }`}>
-                      {files.length}
-                    </span>
-                  )}
+                  <span className={`px-2 py-0.5 text-[10px] rounded-md font-mono font-bold ${
+                    dashboardTab === 'vault'
+                      ? (darkMode ? 'bg-purple-500/20 text-purple-300' : 'bg-purple-100 text-purple-800')
+                      : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
+                  }`}>
+                    {activeWorkspaceFileCount} files
+                  </span>
                 </button>
 
                 <button
@@ -2981,24 +3009,39 @@ export default function App() {
             </div>
           </div>
 
-          {/* Sidebar Footer with Storage Meter & Quick Theme Switcher */}
+          {/* Sidebar Footer with Active Workspace Details & Storage Meter */}
           <div className={`pt-4 border-t space-y-3 ${darkMode ? 'border-slate-800' : 'border-slate-200/80'}`}>
-            <div className={`p-3 rounded-2xl border space-y-2 ${subCardBg}`}>
+            <div className={`p-3 rounded-2xl border space-y-2.5 ${subCardBg}`}>
               <div className="flex items-center justify-between text-[11px] font-bold">
-                <span className={darkMode ? 'text-slate-300' : 'text-slate-600'}>Cloud Storage</span>
-                <span className="text-sky-400 font-bold">∞ Unlimited</span>
+                <span className="flex items-center gap-1.5 text-slate-300">
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span>Active Workspace</span>
+                </span>
+                <span className="text-sky-400 font-mono font-bold">{activeWorkspaceFileCount} files</span>
               </div>
+              
+              <div className="flex items-center justify-between text-[10px]">
+                <span className={`truncate font-bold ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                  {activeWorkspace?.name || 'Default Workspace'}
+                </span>
+                <span className={`px-1.5 py-0.2 rounded font-mono text-[9px] font-bold ${darkMode ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' : 'bg-purple-100 text-purple-700 border border-purple-200'}`}>
+                  ID #{activeWorkspace?.id || 1}
+                </span>
+              </div>
+
               <div className={`w-full rounded-full h-1.5 overflow-hidden ${darkMode ? 'bg-slate-800' : 'bg-slate-200/80'}`}>
                 <div className="bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500 h-1.5 w-1/3 rounded-full" />
               </div>
-              <p className={`text-[10px] ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                Used: <strong className={darkMode ? 'text-white' : 'text-slate-800'}>{formatBytes(stats?.totalBytes || 0)}</strong> across {stats?.totalFiles || files.length} files
-              </p>
+              
+              <div className={`text-[10px] ${darkMode ? 'text-slate-400' : 'text-slate-500'} flex items-center justify-between font-medium`}>
+                <span>Size: <strong className={darkMode ? 'text-white' : 'text-slate-800'}>{formatBytes(activeWorkspaceBytes)}</strong></span>
+                <span>Total: <strong className={darkMode ? 'text-white' : 'text-slate-800'}>{formatBytes(stats?.totalBytes || 0)}</strong></span>
+              </div>
             </div>
 
             <div className="space-y-1.5 px-1 py-1">
               <div className="flex items-center justify-between">
-                <span className={`text-[10px] uppercase font-mono font-bold tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Active Workspace</span>
+                <span className={`text-[10px] uppercase font-mono font-bold tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Switch Workspace</span>
                 <button 
                   onClick={() => setCreateWorkspaceModalOpen(true)}
                   className="text-[10px] font-extrabold text-sky-500 hover:text-sky-400 flex items-center gap-0.5"
@@ -3018,7 +3061,7 @@ export default function App() {
               >
                 {workspaces.map((ws) => (
                   <option key={ws.id} value={ws.id}>
-                    {ws.name} (ID #{ws.id})
+                    {ws.name} ({ws.file_count || 0} files)
                   </option>
                 ))}
               </select>
@@ -4074,10 +4117,19 @@ export default function App() {
                 <div className={`flex flex-col sm:flex-row items-center justify-between gap-3 p-3 rounded-2xl transition-colors duration-200 ${cardBg}`}>
                   <div className="flex items-center space-x-2 w-full sm:w-auto">
                     <input
-                      type="text"
+                      type="search"
+                      name="telecloud_files_vault_filter"
+                      id="telecloud_files_vault_filter"
                       value={fileSearch}
                       onChange={(e) => setFileSearch(e.target.value)}
                       autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="off"
+                      spellCheck={false}
+                      data-lpignore="true"
+                      data-1p-ignore="true"
+                      data-bwignore="true"
+                      data-form-type="other"
                       placeholder="Search files by name, caption, workspace..."
                       className={`w-full sm:w-80 rounded-xl px-3.5 py-2 text-xs ${inputBg}`}
                     />

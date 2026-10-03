@@ -441,6 +441,8 @@ export default function AdminPanel({ onClose, onNavigateHome }: AdminPanelProps)
               <div className="relative">
                 <input
                   type={showPin ? 'text' : 'password'}
+                  name="telecloud_admin_access_code"
+                  id="telecloud_admin_access_code"
                   maxLength={8}
                   placeholder="Enter PIN (Default: 9890)"
                   value={pinInput}
@@ -451,6 +453,14 @@ export default function AdminPanel({ onClose, onNavigateHome }: AdminPanelProps)
                       handleVerifyPin(undefined, val);
                     }
                   }}
+                  autoComplete="one-time-code"
+                  autoCorrect="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  data-bwignore="true"
+                  data-form-type="other"
                   autoFocus
                   className="w-full bg-[#101517] border border-slate-700 focus:border-sky-500 rounded-xl py-3 px-4 text-center text-xl font-mono tracking-widest text-white placeholder:text-slate-600 placeholder:text-xs placeholder:tracking-normal focus:outline-none focus:ring-2 focus:ring-sky-500/20 transition-all"
                 />
