@@ -171,8 +171,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.5.5
-  const APP_VERSION = "v1.5.5";
+  // App Version in Header - Incremented to v1.5.6
+  const APP_VERSION = "v1.5.6";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -2637,50 +2637,56 @@ export default function App() {
           {/* Sidebar Menu Items */}
           <div className="space-y-4 overflow-y-auto pr-1 flex-1 scrollbar-thin">
             <div>
-              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">
                 Storage Cloud
               </p>
               <div className="space-y-1">
                 <button
                   onClick={() => { setDashboardTab('overview'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
+                  } ${
                     dashboardTab === 'overview'
-                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
-                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                      ? (darkMode ? 'bg-indigo-500/10 text-indigo-400' : 'bg-indigo-50 text-indigo-700')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
                   }`}
                 >
-                  <BarChart3 className={`w-4 h-4 ${dashboardTab === 'overview' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <BarChart3 className={`w-4 h-4 text-indigo-400 shrink-0`} />
                   <span>Overview</span>
                 </button>
 
                 <button
                   onClick={() => { setDashboardTab('upload'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
+                  } ${
                     dashboardTab === 'upload'
-                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
-                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                      ? (darkMode ? 'bg-emerald-500/10 text-emerald-400' : 'bg-emerald-50 text-emerald-700')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
                   }`}
                 >
-                  <UploadCloud className={`w-4 h-4 ${dashboardTab === 'upload' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <UploadCloud className={`w-4 h-4 text-emerald-400 shrink-0`} />
                   <span>Upload & Link</span>
                 </button>
 
                 <button
                   onClick={() => { setDashboardTab('vault'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition ${
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
+                  } ${
                     dashboardTab === 'vault'
-                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
-                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                      ? (darkMode ? 'bg-purple-500/10 text-purple-400' : 'bg-purple-50 text-purple-700')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
                   }`}
                 >
                   <div className="flex items-center space-x-3">
-                    <HardDrive className={`w-4 h-4 ${dashboardTab === 'vault' ? 'text-sky-500' : 'text-slate-400'}`} />
+                    <HardDrive className={`w-4 h-4 text-purple-400 shrink-0`} />
                     <span>Files Vault</span>
                   </div>
                   {files.length > 0 && (
                     <span className={`px-2 py-0.5 text-[10px] rounded-md font-mono font-bold ${
                       dashboardTab === 'vault'
-                        ? (darkMode ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-800')
+                        ? (darkMode ? 'bg-purple-500/20 text-purple-300' : 'bg-purple-100 text-purple-800')
                         : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
                     }`}>
                       {files.length}
@@ -2690,50 +2696,56 @@ export default function App() {
 
                 <button
                   onClick={() => { setDashboardTab('streamer'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
+                  } ${
                     dashboardTab === 'streamer'
-                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
-                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                      ? (darkMode ? 'bg-rose-500/10 text-rose-400' : 'bg-rose-50 text-rose-700')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
                   }`}
                 >
-                  <Film className={`w-4 h-4 ${dashboardTab === 'streamer' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <Film className={`w-4 h-4 text-rose-400 shrink-0`} />
                   <span>Media Streamer</span>
                 </button>
 
                 <button
                   onClick={() => { setDashboardTab('links'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
+                  } ${
                     dashboardTab === 'links'
-                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
-                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                      ? (darkMode ? 'bg-amber-500/10 text-amber-400' : 'bg-amber-50 text-amber-700')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
                   }`}
                 >
-                  <LinkIcon className={`w-4 h-4 ${dashboardTab === 'links' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <LinkIcon className={`w-4 h-4 text-amber-400 shrink-0`} />
                   <span>Direct Links Hub</span>
                 </button>
               </div>
             </div>
 
             <div>
-              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">
                 Developer & Settings
               </p>
               <div className="space-y-1">
                 <button
                   onClick={() => { setDashboardTab('api'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition ${
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
+                  } ${
                     dashboardTab === 'api'
-                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
-                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                      ? (darkMode ? 'bg-cyan-500/10 text-cyan-400' : 'bg-cyan-50 text-cyan-700')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
                   }`}
                 >
                   <div className="flex items-center space-x-3">
-                    <Terminal className={`w-4 h-4 ${dashboardTab === 'api' ? 'text-sky-500' : 'text-slate-400'}`} />
+                    <Terminal className={`w-4 h-4 text-cyan-400 shrink-0`} />
                     <span>API & Postman</span>
                   </div>
                   <span className={`px-1.5 py-0.5 text-[9px] rounded font-mono font-bold ${
                     dashboardTab === 'api'
-                      ? (darkMode ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-800')
+                      ? (darkMode ? 'bg-cyan-500/20 text-cyan-300' : 'bg-cyan-100 text-cyan-800')
                       : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
                   }`}>
                     REST
@@ -2742,13 +2754,15 @@ export default function App() {
 
                 <button
                   onClick={() => { setDashboardTab('settings'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
+                  } ${
                     dashboardTab === 'settings'
-                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
-                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                      ? (darkMode ? 'bg-pink-500/10 text-pink-400' : 'bg-pink-50 text-pink-700')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
                   }`}
                 >
-                  <Sliders className={`w-4 h-4 ${dashboardTab === 'settings' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <Sliders className={`w-4 h-4 text-pink-400 shrink-0`} />
                   <span>Storage Destination</span>
                 </button>
               </div>
@@ -2805,24 +2819,38 @@ export default function App() {
           
           {/* Telegram Connectivity Lost Alert Banner */}
           {(connectivityLost || !connected) && (
-            <div className="p-4 sm:p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-amber-200 shadow-xl backdrop-blur-xl">
+            <div className={`p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 border shadow-xl backdrop-blur-xl ${
+              darkMode 
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-200' 
+                : 'bg-amber-50 border-amber-200 text-amber-900'
+            }`}>
               <div className="flex items-start sm:items-center gap-3.5">
-                <div className="p-2.5 rounded-xl bg-amber-500/20 text-amber-400 shrink-0">
+                <div className={`p-2.5 rounded-xl shrink-0 ${
+                  darkMode ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-100 text-amber-700'
+                }`}>
                   <AlertCircle className="w-5 h-5" />
                 </div>
                 <div>
-                  <h4 className="text-sm font-black text-amber-300 flex items-center gap-2">
+                  <h4 className={`text-sm font-black flex items-center gap-2 ${
+                    darkMode ? 'text-amber-300' : 'text-amber-800'
+                  }`}>
                     <span>Telegram connectivity lost</span>
-                    <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 font-bold">Action Required</span>
+                    <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded-md font-bold ${
+                      darkMode ? 'bg-amber-500/20 text-amber-300' : 'bg-amber-200/60 text-amber-800'
+                    }`}>Action Required</span>
                   </h4>
-                  <p className="text-xs text-amber-200/90 mt-1 max-w-2xl leading-relaxed">
+                  <p className={`text-xs mt-1 max-w-2xl leading-relaxed ${
+                    darkMode ? 'text-amber-200/95' : 'text-amber-950/85'
+                  }`}>
                     Telegram connectivity lost, login to dashboard and click reconnect button. Your 30-day session expired or Telegram connection was disconnected.
                   </p>
                 </div>
               </div>
               <button
                 onClick={() => setShowAuthModal(true)}
-                className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs shadow-lg shadow-amber-500/20 transition active:scale-95 shrink-0 flex items-center justify-center space-x-2"
+                className={`px-5 py-2.5 rounded-xl font-black text-xs shadow-lg transition active:scale-95 shrink-0 flex items-center justify-center space-x-2 cursor-pointer ${
+                  darkMode ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-500/20' : 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-600/10'
+                }`}
               >
                 <RefreshCw className="w-4 h-4" />
                 <span>Reconnect Telegram</span>
@@ -6148,102 +6176,6 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
               <Key className="w-3.5 h-3.5 text-amber-400" />
               <span>Session String</span>
             </button>
-          </div>
-
-          {/* Active Session Device & Location Indicator Bar */}
-          <div className={`p-3 rounded-2xl border transition-all text-xs ${subCardBg}`}>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center space-x-2">
-                <div className="w-6 h-6 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center">
-                  <Laptop className="w-3.5 h-3.5" />
-                </div>
-                <div>
-                  <span className={`text-[10px] font-bold uppercase tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                    Active Session Device:
-                  </span>
-                  <p className="font-extrabold text-xs text-sky-400">
-                    {deviceModel} • <span className="font-mono text-[10px] text-slate-400">{systemVersion}</span>
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowAdvancedDeviceLogin(!showAdvancedDeviceLogin)}
-                className={`px-2.5 py-1 rounded-lg border text-[10px] font-bold transition flex items-center space-x-1 ${
-                  darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
-                }`}
-              >
-                <Sliders className="w-3 h-3" />
-                <span>{showAdvancedDeviceLogin ? 'Close' : 'Customize Device'}</span>
-              </button>
-            </div>
-
-            {showAdvancedDeviceLogin && (
-              <div className="mt-3 pt-3 border-t border-slate-200/50 dark:border-slate-800 space-y-3 animate-in fade-in duration-200">
-                <div>
-                  <label className={`block text-[10px] font-bold uppercase mb-1.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                    Choose Device Preset (Displays on Phone Settings → Devices):
-                  </label>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                    {DEVICE_PRESETS.map((p) => (
-                      <button
-                        key={p.name}
-                        type="button"
-                        onClick={() => {
-                          setDeviceModel(p.device);
-                          setSystemVersion(p.system);
-                          setDeviceAppVersion(p.app);
-                        }}
-                        className={`p-2 rounded-xl border text-left text-[11px] font-bold transition flex items-center justify-between ${
-                          deviceModel === p.device
-                            ? 'bg-sky-500/20 text-sky-300 border-sky-500/50'
-                            : (darkMode ? 'bg-slate-900 border-slate-800 text-slate-300' : 'bg-white border-slate-200 text-slate-700')
-                        }`}
-                      >
-                        <span className="truncate">{p.name}</span>
-                        {deviceModel === p.device && <Check className="w-3 h-3 text-sky-400 shrink-0" />}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2 text-left">
-                  <div>
-                    <label className={`block text-[10px] font-bold mb-1 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
-                      Custom Device Name:
-                    </label>
-                    <input
-                      type="text"
-                      value={deviceModel}
-                      onChange={(e) => setDeviceModel(e.target.value)}
-                      placeholder="e.g. MacBook Pro 16"
-                      className={`w-full rounded-xl px-2.5 py-1.5 text-xs font-mono ${inputBg}`}
-                    />
-                  </div>
-                  <div>
-                    <label className={`block text-[10px] font-bold mb-1 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
-                      Custom OS / System:
-                    </label>
-                    <input
-                      type="text"
-                      value={systemVersion}
-                      onChange={(e) => setSystemVersion(e.target.value)}
-                      placeholder="e.g. macOS Sonoma 14.5"
-                      className={`w-full rounded-xl px-2.5 py-1.5 text-xs font-mono ${inputBg}`}
-                    />
-                  </div>
-                </div>
-
-                {serverLocation && (
-                  <div className={`p-2 rounded-xl text-[10px] font-mono flex items-center space-x-1.5 ${
-                    darkMode ? 'bg-slate-950 text-slate-400' : 'bg-slate-100 text-slate-600'
-                  }`}>
-                    <MapPin className="w-3 h-3 text-sky-400 shrink-0" />
-                    <span>Location: {serverLocation.city || 'Cloud'}, {serverLocation.country || 'Global'} ({serverLocation.ip || 'Server IP'})</span>
-                  </div>
-                )}
-              </div>
-            )}
           </div>
 
           {authMode === 'qr' && (
