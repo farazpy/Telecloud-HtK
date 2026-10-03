@@ -28,6 +28,12 @@ import {
   regenerateUserApiKey,
   verifyWorkspaceBelongsToUser,
   getFileByMessageId,
+  getTelegramSystemSessionFromDb,
+  saveTelegramSystemSessionToDb,
+  clearTelegramSystemSessionInDb,
+  saveUserTelegramSessionInDb,
+  getUserTelegramSessionFromDb,
+  markUserSessionLostInDb,
 } from './server/db.ts';
 
 const app = express();
@@ -35,8 +41,14 @@ const PORT = process.env.PORT || 3000;
 const PY_PORT = 5050;
 const PY_BASE = `http://127.0.0.1:${PY_PORT}/api/py`;
 
-// Initialize MySQL database
-initDb().catch((err) => console.error('[MySQL] init error:', err));
+// Initialize MySQL database and auto-restore Telegram session if available
+initDb()
+  .then(() => {
+    setTimeout(async () => {
+      await restoreSessionFromMysql().catch((e) => console.warn('[MySQL] Auto-restore notice:', e.message));
+    }, 2500);
+  })
+  .catch((err) => console.error('[MySQL] init error:', err));
 
 const uploadDir = path.resolve(process.cwd(), 'uploads');
 if (!fs.existsSync(uploadDir)) {
@@ -207,10 +219,124 @@ function getShortLink(messageId: number | string, _req?: Request): string {
   return `https://${domain}/f/${shortId}`;
 }
 
+// Synchronize active Telegram MTProto Session from Python to MySQL (User 30-day & Admin Fallback)
+async function syncSessionToMysql(telegramId?: number | string) {
+  try {
+    const sessionRes = await forwardToPython('GET', '/session_data');
+    if (sessionRes.status === 200 && sessionRes.data?.session_str) {
+      // 1. Persist to system admin fallback session
+      await saveTelegramSystemSessionToDb({
+        api_id: sessionRes.data.api_id,
+        api_hash: sessionRes.data.api_hash,
+        session_str: sessionRes.data.session_str,
+        storage_chat: sessionRes.data.storage_chat,
+        active_user: sessionRes.data.user,
+      });
+
+      // 2. Persist 30-day user session in MySQL
+      const tgId = telegramId || sessionRes.data.user?.id;
+      if (tgId) {
+        await saveUserTelegramSessionInDb(tgId, {
+          session_str: sessionRes.data.session_str,
+          api_id: sessionRes.data.api_id,
+          api_hash: sessionRes.data.api_hash,
+        });
+      }
+      console.log('[MySQL Session] Telegram MTProto session synced to MySQL (Admin & User 30-Day validity).');
+    }
+  } catch (err: any) {
+    console.warn('[MySQL Session] Notice syncing session to MySQL:', err.message);
+  }
+}
+
+// Auto-restore Telegram MTProto Session from MySQL if disconnected
+async function restoreSessionFromMysql(): Promise<boolean> {
+  try {
+    const saved = await getTelegramSystemSessionFromDb();
+    if (!saved || !saved.session_str) return false;
+
+    // Check if python is already connected
+    const statusRes = await forwardToPython('GET', '/status');
+    if (statusRes.status === 200 && statusRes.data?.connected) {
+      return true;
+    }
+
+    console.log('[MySQL Session] Restoring Telegram MTProto session from MySQL database...');
+    const connectRes = await forwardToPython('POST', '/connect', {
+      api_id: saved.api_id || 27254692,
+      api_hash: saved.api_hash || '9f6f826a62b78378292fd224e943cb65',
+      string_session: saved.session_str,
+      storage_chat: saved.storage_chat || 'me',
+    });
+
+    if (connectRes.status === 200) {
+      console.log('[MySQL Session] Telegram MTProto session successfully restored from MySQL!');
+      return true;
+    } else {
+      console.warn('[MySQL Session] Notice restoring session from MySQL:', connectRes.data);
+      return false;
+    }
+  } catch (err: any) {
+    console.warn('[MySQL Session] Warning restoring session from MySQL:', err.message);
+    return false;
+  }
+}
+
 // API Routes
 
-app.get('/api/status', async (_req: Request, res: Response) => {
-  const result = await forwardToPython('GET', '/status');
+app.get('/api/status', async (req: Request, res: Response) => {
+  let result = await forwardToPython('GET', '/status');
+  if (result.status === 200 && !result.data?.connected) {
+    // Attempt auto-restoration from MySQL before returning disconnected
+    const restored = await restoreSessionFromMysql();
+    if (restored) {
+      result = await forwardToPython('GET', '/status');
+    }
+  }
+
+  // Check user session status if a specific user ID is passed
+  const queryTgId = req.query.telegram_id as string;
+  let userSessionInfo: any = null;
+  let connectivityLost = false;
+
+  if (queryTgId) {
+    const uSess = await getUserTelegramSessionFromDb(queryTgId);
+    if (uSess) {
+      if (uSess.is_expired || uSess.session_status === 'disconnected') {
+        connectivityLost = true;
+        userSessionInfo = {
+          connected: false,
+          connectivity_lost: true,
+          reconnect_required: true,
+          error: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
+          expires_at: uSess.expires_at,
+          status: uSess.is_expired ? 'expired' : 'disconnected',
+        };
+      } else if (uSess.session_str) {
+        // Validate with Telethon daemon
+        const verifyRes = await forwardToPython('POST', '/verify_session', { session_str: uSess.session_str });
+        if (verifyRes.data?.valid) {
+          userSessionInfo = {
+            connected: true,
+            connectivity_lost: false,
+            expires_at: uSess.expires_at,
+            status: 'active',
+          };
+        } else {
+          await markUserSessionLostInDb(queryTgId);
+          connectivityLost = true;
+          userSessionInfo = {
+            connected: false,
+            connectivity_lost: true,
+            reconnect_required: true,
+            error: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
+            status: 'disconnected',
+          };
+        }
+      }
+    }
+  }
+
   if (result.status === 200 && result.data && result.data.user) {
     // Sync active telegram user to MySQL
     saveUserToDb({
@@ -221,15 +347,28 @@ app.get('/api/status', async (_req: Request, res: Response) => {
       phone: result.data.user.phone,
       storage_chat: result.data.storage_chat,
     }).catch((e) => console.error('[MySQL] User sync error:', e));
-    res.json(result.data);
+
+    res.json({
+      ...result.data,
+      user_session: userSessionInfo,
+      connectivity_lost: connectivityLost,
+      error: connectivityLost ? 'Telegram connectivity lost, login to dashboard and click reconnect button.' : undefined,
+    });
   } else if (result.status === 200) {
-    res.json(result.data);
+    res.json({
+      ...result.data,
+      user_session: userSessionInfo,
+      connectivity_lost: connectivityLost,
+      error: connectivityLost ? 'Telegram connectivity lost, login to dashboard and click reconnect button.' : undefined,
+    });
   } else {
     // Graceful fallback status so frontend never fails with 503 or HTML errors
     res.json({
       connected: false,
       has_session: false,
       status: 'starting',
+      connectivity_lost: true,
+      error: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
       message: result.data?.error || 'Telegram MTProto service is initializing',
     });
   }
@@ -254,6 +393,9 @@ app.post('/api/connect', async (req: Request, res: Response) => {
       username: result.data.user.username,
       storage_chat: req.body.storage_chat || 'me',
     }).catch((e) => console.error('[MySQL] saveUserToDb error:', e));
+
+    // Persist session to MySQL (User 30-Day & System Fallback)
+    await syncSessionToMysql(result.data.user.id);
   }
   res.status(result.status).json(result.data);
 });
@@ -295,6 +437,9 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
       phone: result.data.user.phone || phone,
       storage_chat: 'me',
     }).catch((e) => console.error('[MySQL] user save error:', e));
+
+    // Persist 30-day session to MySQL
+    await syncSessionToMysql(result.data.user.id);
   }
   res.status(result.status).json(result.data);
 });
@@ -321,11 +466,19 @@ app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: 
       phone: result.data.user.phone || '',
       storage_chat: 'me',
     }).catch((e) => console.error('[MySQL] user save error:', e));
+
+    // Persist session to MySQL on successful QR authorization (30-day user session + admin fallback)
+    await syncSessionToMysql(result.data.user.id);
   }
   res.status(result.status).json(result.data);
 });
 
-app.post('/api/disconnect', async (_req: Request, res: Response) => {
+app.post('/api/disconnect', async (req: Request, res: Response) => {
+  const tgId = req.body?.telegram_id;
+  if (tgId) {
+    await markUserSessionLostInDb(tgId).catch(() => {});
+  }
+  await clearTelegramSystemSessionInDb().catch((e) => console.error('[MySQL] clear error:', e));
   const result = await forwardToPython('POST', '/disconnect');
   res.status(result.status).json(result.data);
 });
@@ -464,6 +617,9 @@ app.post('/api/storage', async (req: Request, res: Response) => {
       await updateWorkspaceInDb(activeWs.id, tgId, { storage_chat: storageChat });
     }
   }
+
+  // Persist updated storage destination to MySQL session
+  syncSessionToMysql().catch(() => {});
 
   res.status(result.status).json(result.data);
 });
@@ -955,20 +1111,38 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
     const customFileName = req.body.file_name || originalName;
     const caption = req.body.caption || '';
 
-    // 5. Execute MTProto Upload via Telethon Daemon
+    // Retrieve authenticated user's 30-day session from MySQL
+    const userSession = await getUserTelegramSessionFromDb(auth.user.telegram_id);
+    let sessionStrToUse: string | undefined = undefined;
+    if (userSession && !userSession.is_expired && userSession.session_status === 'active') {
+      sessionStrToUse = userSession.session_str || undefined;
+    }
+
+    // Guarantee active Telegram MTProto session (auto-restore from MySQL if server restarted)
+    const statusCheck = await forwardToPython('GET', '/status');
+    if (statusCheck.status !== 200 || !statusCheck.data?.connected) {
+      await restoreSessionFromMysql().catch(() => {});
+    }
+
+    // 5. Execute MTProto Upload via Telethon Daemon (uses user session, fallback to Admin session)
     const pyResult = await forwardToPython('POST', '/upload', {
       file_path: filePath,
       file_name: customFileName,
       caption,
+      session_str: sessionStrToUse,
     });
 
     // Remove temp file from disk
     fs.unlink(filePath, () => {});
 
     if (pyResult.status !== 200) {
-      res.status(pyResult.status).json({
+      const errMsg = pyResult.data?.error || 'Telegram upload failed';
+      const isConnLost = errMsg.toLowerCase().includes('connectivity lost') || errMsg.toLowerCase().includes('reconnect');
+      res.status(isConnLost ? 401 : pyResult.status).json({
         success: false,
-        error: pyResult.data?.error || 'Telegram upload failed',
+        error: isConnLost ? 'telegram_connectivity_lost' : errMsg,
+        message: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
+        reconnect_required: true,
       });
       return;
     }
@@ -1216,8 +1390,16 @@ async function streamCdnFile(
     }
   }
 
-  // 4. Stream directly from Telegram MTProto with Auto-Retry
-  const pyUrl = `${PY_BASE}/stream/${msgId}?storage_chat=${encodeURIComponent(targetStorageChat)}`;
+  // 4. Stream directly from Telegram MTProto with Auto-Retry (User session with Admin fallback)
+  let userSessionStr = '';
+  if (file && file.telegram_id) {
+    const ownerSession = await getUserTelegramSessionFromDb(file.telegram_id);
+    if (ownerSession && !ownerSession.is_expired && ownerSession.session_status === 'active') {
+      userSessionStr = ownerSession.session_str || '';
+    }
+  }
+
+  const pyUrl = `${PY_BASE}/stream/${msgId}?storage_chat=${encodeURIComponent(targetStorageChat)}&session_str=${encodeURIComponent(userSessionStr)}`;
   const headers: Record<string, string> = {};
   if (req.headers.range) {
     headers['Range'] = req.headers.range;

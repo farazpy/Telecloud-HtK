@@ -106,9 +106,27 @@ export async function initDb() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
+    // 5. Create Telegram System Sessions Table (Centralized Cloud Session Storage)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS telegram_system_sessions (
+        id INT PRIMARY KEY DEFAULT 1,
+        api_id INT DEFAULT NULL,
+        api_hash VARCHAR(100) DEFAULT NULL,
+        session_str TEXT DEFAULT NULL,
+        storage_chat VARCHAR(255) DEFAULT 'me',
+        active_user JSON DEFAULT NULL,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
     // Ensure columns exist safely
     try { await pool.query(`ALTER TABLE users ADD COLUMN active_workspace_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN api_key VARCHAR(128) UNIQUE DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE users ADD COLUMN session_str TEXT DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE users ADD COLUMN session_expires_at DATETIME DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE users ADD COLUMN session_status VARCHAR(50) DEFAULT 'active';`); } catch {}
+    try { await pool.query(`ALTER TABLE users ADD COLUMN session_api_id INT DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE users ADD COLUMN session_api_hash VARCHAR(100) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_name VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN download_password VARCHAR(255) DEFAULT NULL;`); } catch {}
@@ -678,3 +696,182 @@ export async function reassignFileWorkspaceInDb(
   );
   return { success: true, workspace_id: wsId, workspace_name: targetWs.name };
 }
+
+export async function getTelegramSystemSessionFromDb(): Promise<{
+  id: number;
+  api_id: number | null;
+  api_hash: string | null;
+  session_str: string | null;
+  storage_chat: string;
+  active_user: any;
+} | null> {
+  if (!pool || !isDbConnected) return null;
+  try {
+    const [rows]: any = await pool.query(
+      `SELECT * FROM telegram_system_sessions WHERE id = 1 LIMIT 1`
+    );
+    if (!rows || rows.length === 0 || !rows[0].session_str) return null;
+    const r = rows[0];
+    let userObj = r.active_user;
+    if (typeof userObj === 'string') {
+      try { userObj = JSON.parse(userObj); } catch {}
+    }
+    return {
+      id: r.id,
+      api_id: r.api_id,
+      api_hash: r.api_hash,
+      session_str: r.session_str,
+      storage_chat: r.storage_chat || 'me',
+      active_user: userObj || null,
+    };
+  } catch (err: any) {
+    console.warn(`[MySQL] Notice getting telegram session: ${err.message}`);
+    return null;
+  }
+}
+
+export async function saveTelegramSystemSessionToDb(data: {
+  api_id?: number | null;
+  api_hash?: string | null;
+  session_str: string;
+  storage_chat?: string;
+  active_user?: any;
+}): Promise<boolean> {
+  if (!pool || !isDbConnected) return false;
+  try {
+    const userJson = data.active_user ? JSON.stringify(data.active_user) : null;
+    await pool.query(
+      `INSERT INTO telegram_system_sessions (id, api_id, api_hash, session_str, storage_chat, active_user, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, NOW())
+       ON DUPLICATE KEY UPDATE 
+         api_id = VALUES(api_id),
+         api_hash = VALUES(api_hash),
+         session_str = VALUES(session_str),
+         storage_chat = VALUES(storage_chat),
+         active_user = VALUES(active_user),
+         updated_at = NOW()`,
+      [
+        data.api_id || null,
+        data.api_hash || null,
+        data.session_str,
+        data.storage_chat || 'me',
+        userJson,
+      ]
+    );
+    console.log('[MySQL] Telegram MTProto session securely saved to MySQL database.');
+    return true;
+  } catch (err: any) {
+    console.error(`[MySQL Error] Failed to save telegram session: ${err.message}`);
+    return false;
+  }
+}
+
+export async function clearTelegramSystemSessionInDb(): Promise<boolean> {
+  if (!pool || !isDbConnected) return false;
+  try {
+    await pool.query(`DELETE FROM telegram_system_sessions WHERE id = 1`);
+    console.log('[MySQL] Telegram MTProto session removed from MySQL database.');
+    return true;
+  } catch (err: any) {
+    console.error(`[MySQL Error] Failed to clear telegram session: ${err.message}`);
+    return false;
+  }
+}
+
+// 30-Day Per-User Telegram Session Management in MySQL
+export async function saveUserTelegramSessionInDb(
+  telegramId: number | string,
+  sessionData: {
+    session_str: string;
+    api_id?: number | null;
+    api_hash?: string | null;
+  }
+): Promise<boolean> {
+  if (!pool || !isDbConnected) return false;
+  try {
+    const tgId = String(telegramId);
+    await pool.query(
+      `UPDATE users 
+       SET session_str = ?,
+           session_api_id = ?,
+           session_api_hash = ?,
+           session_status = 'active',
+           session_expires_at = DATE_ADD(NOW(), INTERVAL 30 DAY),
+           last_active_at = NOW(),
+           updated_at = NOW()
+       WHERE telegram_id = ?`,
+      [
+        sessionData.session_str,
+        sessionData.api_id || 27254692,
+        sessionData.api_hash || '9f6f826a62b78378292fd224e943cb65',
+        tgId,
+      ]
+    );
+    console.log(`[MySQL] User #${tgId} Telegram session securely saved with 30-day validity.`);
+    return true;
+  } catch (err: any) {
+    console.error(`[MySQL Error] Failed to save user session: ${err.message}`);
+    return false;
+  }
+}
+
+export async function getUserTelegramSessionFromDb(
+  telegramId: number | string
+): Promise<{
+  session_str: string | null;
+  is_expired: boolean;
+  session_status: string;
+  expires_at: string | null;
+  api_id: number | null;
+  api_hash: string | null;
+} | null> {
+  if (!pool || !isDbConnected) return null;
+  try {
+    const tgId = String(telegramId);
+    const [rows]: any = await pool.query(
+      `SELECT session_str, session_api_id, session_api_hash, session_status, session_expires_at,
+              (session_expires_at IS NOT NULL AND session_expires_at < NOW()) AS is_expired
+       FROM users 
+       WHERE telegram_id = ?
+       LIMIT 1`,
+      [tgId]
+    );
+
+    if (!rows || rows.length === 0) return null;
+    const r = rows[0];
+    return {
+      session_str: r.session_str || null,
+      is_expired: Boolean(r.is_expired),
+      session_status: r.session_status || 'active',
+      expires_at: r.session_expires_at ? new Date(r.session_expires_at).toISOString() : null,
+      api_id: r.session_api_id || null,
+      api_hash: r.session_api_hash || null,
+    };
+  } catch (err: any) {
+    console.warn(`[MySQL] Notice getting user telegram session: ${err.message}`);
+    return null;
+  }
+}
+
+export async function markUserSessionLostInDb(
+  telegramId: number | string
+): Promise<boolean> {
+  if (!pool || !isDbConnected) return false;
+  try {
+    const tgId = String(telegramId);
+    await pool.query(
+      `UPDATE users 
+       SET session_status = 'disconnected',
+           updated_at = NOW()
+       WHERE telegram_id = ?`,
+      [tgId]
+    );
+    console.log(`[MySQL] Marked user #${tgId} session status as disconnected.`);
+    return true;
+  } catch (err: any) {
+    console.error(`[MySQL Error] Failed to mark user session lost: ${err.message}`);
+    return false;
+  }
+}
+
+

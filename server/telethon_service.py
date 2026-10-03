@@ -54,6 +54,7 @@ class TelethonManager:
         self.pending_phone_code_hash: Optional[str] = None
         self.active_user: Optional[Dict[str, Any]] = None
         self.is_connected = False
+        self.user_clients: Dict[str, TelegramClient] = {}
 
         # QR Login state
         self.qr_client: Optional[TelegramClient] = None
@@ -245,6 +246,84 @@ class TelethonManager:
         except Exception as e:
             logger.error(f"Error connecting session string: {e}")
             raise e
+
+    async def get_client_for_session(self, session_str: Optional[str] = None) -> Optional[TelegramClient]:
+        if not session_str or not str(session_str).strip():
+            await self.ensure_connected()
+            if self.client and self.is_connected:
+                return self.client
+            return None
+
+        clean_session = str(session_str).strip()
+        # Check active client pool
+        if clean_session in self.user_clients:
+            existing = self.user_clients[clean_session]
+            try:
+                if not existing.is_connected():
+                    await existing.connect()
+                if await existing.is_user_authorized():
+                    return existing
+            except Exception as e:
+                logger.warning(f"Cached user client connection issue: {e}")
+                try:
+                    await existing.disconnect()
+                except Exception:
+                    pass
+                self.user_clients.pop(clean_session, None)
+
+        # Connect user session string
+        try:
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+
+            user_client = TelegramClient(
+                StringSession(clean_session),
+                self.api_id,
+                self.api_hash,
+                loop=current_loop,
+                connection_retries=3,
+                retry_delay=1,
+                timeout=15
+            )
+            await user_client.connect()
+            if await user_client.is_user_authorized():
+                self.user_clients[clean_session] = user_client
+                return user_client
+            else:
+                logger.warning("User session is unauthorized or revoked by Telegram.")
+                try:
+                    await user_client.disconnect()
+                except Exception:
+                    pass
+                return None
+        except Exception as e:
+            logger.warning(f"Error connecting user session client: {e}")
+            return None
+
+    async def resolve_entity_for_client(self, client: TelegramClient, target: Any):
+        if not target or target == "me":
+            return "me"
+        target_str = str(target).strip()
+        if (target_str.startswith("-100") and target_str[4:].isdigit()) or \
+           (target_str.startswith("-") and target_str[1:].isdigit()) or \
+           target_str.isdigit():
+            target_int = int(target_str)
+            try:
+                return await client.get_input_entity(target_int)
+            except Exception:
+                try:
+                    return await client.get_entity(target_int)
+                except Exception:
+                    return target_int
+        try:
+            return await client.get_input_entity(target_str)
+        except Exception:
+            try:
+                return await client.get_entity(target_str)
+            except Exception:
+                return target_str
 
     async def send_code_request(self, api_id: int, api_hash: str, phone: str, storage_chat: str = "me"):
         phone_clean = phone.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
@@ -612,20 +691,34 @@ class TelethonManager:
             logger.error(f"Error resolving target entity '{target}': {e}")
             raise ValueError(f"Could not resolve storage chat entity '{target}'. Verify channel ID or admin access.")
 
-    async def upload_file(self, file_path: str, file_name: str, caption: Optional[str] = None):
-        await self.ensure_connected()
-        if not self.client or not self.is_connected:
-            raise ValueError("Telegram MTProto client is not connected.")
-
+    async def upload_file(self, file_path: str, file_name: str, caption: Optional[str] = None, session_str: Optional[str] = None):
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found on disk: {file_path}")
 
-        entity = await self.get_target_entity()
         file_size = os.path.getsize(file_path)
         mime_type, _ = mimetypes.guess_type(file_name)
         mime_type = mime_type or "application/octet-stream"
 
-        logger.info(f"Uploading file '{file_name}' ({file_size} bytes) to chat '{self.storage_chat}'...")
+        active_client = None
+        session_type = "user"
+        if session_str and str(session_str).strip():
+            try:
+                active_client = await self.get_client_for_session(session_str)
+            except Exception as e:
+                logger.warning(f"Notice connecting user session for upload: {e}")
+
+        # If user session not provided, expired, or failed, fallback to Admin session
+        if not active_client:
+            logger.info("Using Admin Telegram session (fallback) for file upload...")
+            await self.ensure_connected()
+            if self.client and self.is_connected:
+                active_client = self.client
+                session_type = "admin_fallback"
+            else:
+                raise ValueError("Telegram connectivity lost, login to dashboard and click reconnect button.")
+
+        entity = await self.resolve_entity_for_client(active_client, self.storage_chat)
+        logger.info(f"Uploading '{file_name}' ({file_size} bytes) via {session_type} session to '{self.storage_chat}'...")
 
         # Progress tracking callback
         uploaded_bytes = 0
@@ -633,14 +726,35 @@ class TelethonManager:
             nonlocal uploaded_bytes
             uploaded_bytes = current
 
-        msg = await self.client.send_file(
-            entity,
-            file_path,
-            caption=caption or "",
-            force_document=True,
-            attributes=[DocumentAttributeFilename(file_name)],
-            progress_callback=callback
-        )
+        try:
+            msg = await active_client.send_file(
+                entity,
+                file_path,
+                caption=caption or "",
+                force_document=True,
+                attributes=[DocumentAttributeFilename(file_name)],
+                progress_callback=callback
+            )
+        except Exception as upload_err:
+            if session_type == "user":
+                logger.warning(f"User session upload error: {upload_err}. Attempting fallback to Admin session...")
+                await self.ensure_connected()
+                if self.client and self.is_connected:
+                    active_client = self.client
+                    entity = await self.resolve_entity_for_client(active_client, self.storage_chat)
+                    msg = await active_client.send_file(
+                        entity,
+                        file_path,
+                        caption=caption or "",
+                        force_document=True,
+                        attributes=[DocumentAttributeFilename(file_name)],
+                        progress_callback=callback
+                    )
+                    session_type = "admin_fallback"
+                else:
+                    raise ValueError("Telegram connectivity lost, login to dashboard and click reconnect button.")
+            else:
+                raise upload_err
 
         return {
             "success": True,
@@ -648,7 +762,8 @@ class TelethonManager:
             "file_name": file_name,
             "file_size": file_size,
             "mime_type": mime_type,
-            "storage_chat": str(self.storage_chat)
+            "storage_chat": str(self.storage_chat),
+            "session_type": session_type
         }
 
     async def list_files(self, limit: int = 50):
@@ -716,6 +831,18 @@ async def handle_status(request: web.Request):
         "api_id": manager.api_id,
         "api_hash": manager.api_hash,
         "storage_chat": manager.storage_chat,
+        "user": manager.active_user
+    })
+
+async def handle_session_data(request: web.Request):
+    await manager.ensure_connected()
+    return web.json_response({
+        "success": True,
+        "api_id": manager.api_id,
+        "api_hash": manager.api_hash,
+        "session_str": manager.session_str,
+        "storage_chat": manager.storage_chat,
+        "is_connected": manager.is_connected,
         "user": manager.active_user
     })
 
@@ -839,11 +966,12 @@ async def handle_upload(request: web.Request):
         file_path = data.get("file_path")
         file_name = data.get("file_name")
         caption = data.get("caption")
+        session_str = data.get("session_str") or data.get("user_session")
 
         if not file_path or not file_name:
             return web.json_response({"error": "Missing file_path or file_name"}, status=400)
 
-        result = await manager.upload_file(file_path, file_name, caption)
+        result = await manager.upload_file(file_path, file_name, caption, session_str=session_str)
         return web.json_response(result)
     except Exception as e:
         logger.exception("Error uploading file")
@@ -869,42 +997,68 @@ async def handle_stream_file(request: web.Request):
     try:
         msg_id = int(request.match_info["message_id"])
         chat_param = request.query.get("storage_chat") or request.query.get("chat_id")
+        user_session = request.query.get("session_str") or request.query.get("user_session")
 
-        # Retry loop to guarantee active connection during public CDN requests
-        for attempt in range(3):
-            await manager.ensure_connected()
-            if manager.client and manager.is_connected:
-                break
-            await asyncio.sleep(0.5)
-
-        if not manager.client or not manager.is_connected:
-            return web.Response(text="Telegram MTProto Client not connected", status=503)
-
+        active_client = None
         entity = None
-        if chat_param:
-            try:
-                entity = await manager.get_target_entity(chat_param)
-            except Exception as e:
-                logger.warning(f"Notice resolving custom chat '{chat_param}': {e}")
-
-        if not entity:
-            entity = await manager.get_target_entity()
-
         msg = None
-        try:
-            msg = await manager.client.get_messages(entity, ids=msg_id)
-        except Exception as e:
-            logger.warning(f"Error fetching message #{msg_id} from primary entity: {e}")
 
-        # Fallback to 'me' if not found in custom entity
-        if (not msg or not msg.media) and entity != "me":
+        # 1. Try with user's Telegram session if provided
+        if user_session and str(user_session).strip():
             try:
-                msg = await manager.client.get_messages("me", ids=msg_id)
-            except Exception:
-                pass
+                user_client = await manager.get_client_for_session(user_session)
+                if user_client and await user_client.is_user_authorized():
+                    target_chat = chat_param or manager.storage_chat or "me"
+                    user_entity = await manager.resolve_entity_for_client(user_client, target_chat)
+                    try:
+                        candidate = await user_client.get_messages(user_entity, ids=msg_id)
+                        if candidate and candidate.media:
+                            msg = candidate
+                            active_client = user_client
+                            entity = user_entity
+                    except Exception as ue:
+                        logger.warning(f"User session get_messages notice for #{msg_id}: {ue}")
+            except Exception as e:
+                logger.warning(f"User session stream init error: {e}")
 
+        # 2. Fallback to Admin / System Session if user session unavailable or message not found
         if not msg or not msg.media:
-            return web.Response(text="File message not found in chat storage", status=404)
+            logger.info(f"Using Admin session fallback for stream message #{msg_id}...")
+            for attempt in range(3):
+                await manager.ensure_connected()
+                if manager.client and manager.is_connected:
+                    break
+                await asyncio.sleep(0.5)
+
+            if manager.client and manager.is_connected:
+                admin_client = manager.client
+                target_chat = chat_param or manager.storage_chat or "me"
+                admin_entity = await manager.resolve_entity_for_client(admin_client, target_chat)
+                try:
+                    candidate = await admin_client.get_messages(admin_entity, ids=msg_id)
+                    if candidate and candidate.media:
+                        msg = candidate
+                        active_client = admin_client
+                        entity = admin_entity
+                except Exception as ae:
+                    logger.warning(f"Admin session entity notice for #{msg_id}: {ae}")
+
+                # Secondary fallback to 'me' in admin session
+                if (not msg or not msg.media) and target_chat != "me":
+                    try:
+                        candidate = await admin_client.get_messages("me", ids=msg_id)
+                        if candidate and candidate.media:
+                            msg = candidate
+                            active_client = admin_client
+                            entity = "me"
+                    except Exception:
+                        pass
+
+        if not msg or not msg.media or not active_client:
+            return web.Response(
+                text="Telegram connectivity lost or file not found. Login to dashboard and click reconnect button.",
+                status=404
+            )
 
         file_name = "download"
         file_size = 0
@@ -964,7 +1118,7 @@ async def handle_stream_file(request: web.Request):
 
         bytes_sent = 0
         chunk_size = 128 * 1024
-        async for chunk in manager.client.iter_download(msg.media, offset=offset, request_size=chunk_size):
+        async for chunk in active_client.iter_download(msg.media, offset=offset, request_size=chunk_size):
             if limit_bytes and bytes_sent + len(chunk) > limit_bytes:
                 needed = limit_bytes - bytes_sent
                 await response.write(chunk[:needed])
@@ -976,7 +1130,38 @@ async def handle_stream_file(request: web.Request):
         return response
     except Exception as e:
         logger.exception("Error in handle_stream_file")
-        return web.Response(text=f"Error streaming file: {str(e)}", status=500)
+        return web.Response(text="Telegram connectivity lost, login to dashboard and click reconnect button.", status=500)
+
+async def handle_verify_session(request: web.Request):
+    try:
+        data = await request.json() if request.can_read_body else {}
+        session_str = data.get("session_str")
+        if not session_str:
+            return web.json_response({
+                "valid": False,
+                "error": "Telegram connectivity lost, login to dashboard and click reconnect button."
+            }, status=400)
+
+        client = await manager.get_client_for_session(session_str)
+        if client and await client.is_user_authorized():
+            me = await client.get_me()
+            return web.json_response({
+                "valid": True,
+                "user": {
+                    "id": me.id,
+                    "first_name": getattr(me, "first_name", ""),
+                    "username": getattr(me, "username", "")
+                }
+            })
+        return web.json_response({
+            "valid": False,
+            "error": "Telegram connectivity lost, login to dashboard and click reconnect button."
+        })
+    except Exception as e:
+        return web.json_response({
+            "valid": False,
+            "error": f"Telegram connectivity lost: {str(e)}"
+        })
 
 async def on_startup(app: web.Application):
     logger.info("Aiohttp server startup: initializing saved Telegram client on active loop...")
@@ -1001,6 +1186,8 @@ def init_app():
     app.on_cleanup.append(on_cleanup)
 
     app.router.add_get("/api/py/status", handle_status)
+    app.router.add_get("/api/py/session_data", handle_session_data)
+    app.router.add_post("/api/py/verify_session", handle_verify_session)
     app.router.add_post("/api/py/connect", handle_connect)
     app.router.add_post("/api/py/send_code", handle_send_code)
     app.router.add_post("/api/py/sign_in", handle_sign_in)

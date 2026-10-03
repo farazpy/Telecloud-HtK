@@ -166,8 +166,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.4.8
-  const APP_VERSION = "v1.4.8";
+  // App Version in Header - Incremented to v1.5.0
+  const APP_VERSION = "v1.5.0";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -276,6 +276,8 @@ export default function App() {
   // Connection & Auth State
   const [loadingStatus, setLoadingStatus] = useState<boolean>(true);
   const [connected, setConnected] = useState<boolean>(false);
+  const [connectivityLost, setConnectivityLost] = useState<boolean>(false);
+  const [sessionExpiresAt, setSessionExpiresAt] = useState<string | null>(null);
   const [user, setUser] = useState<TelegramUser | null>(null);
   const [storageChat, setStorageChat] = useState<string>('me');
   const [hasSession, setHasSession] = useState<boolean>(false);
@@ -545,10 +547,19 @@ export default function App() {
   const checkStatus = async () => {
     setLoadingStatus(true);
     try {
-      const data = await safeJsonFetch('/api/status');
+      const storedTgId = localStorage.getItem('telecloud_user_tg_id') || '';
+      const data = await safeJsonFetch(`/api/status${storedTgId ? `?telegram_id=${storedTgId}` : ''}`);
       const isConn = Boolean(data?.connected);
+      const isConnLost = Boolean(data?.connectivity_lost || data?.reconnect_required);
       setConnected(isConn);
-      setUser(data?.user || null);
+      setConnectivityLost(isConnLost);
+      if (data?.user_session?.expires_at) {
+        setSessionExpiresAt(data.user_session.expires_at);
+      }
+      if (data?.user) {
+        setUser(data.user);
+        localStorage.setItem('telecloud_user_tg_id', String(data.user.id));
+      }
       if (data?.storage_chat) setStorageChat(data.storage_chat);
       setHasSession(Boolean(data?.has_session));
       if (data?.api_id) {
@@ -2618,8 +2629,35 @@ export default function App() {
         </aside>
 
         {/* MAIN DASHBOARD CONTENT AREA */}
-        <main className="flex-1 p-3 sm:p-5 lg:p-6 overflow-y-auto min-w-0 pb-24 md:pb-8">
+        <main className="flex-1 p-3 sm:p-5 lg:p-6 overflow-y-auto min-w-0 pb-24 md:pb-8 space-y-4">
           
+          {/* Telegram Connectivity Lost Alert Banner */}
+          {(connectivityLost || !connected) && (
+            <div className="p-4 sm:p-5 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-amber-200 shadow-xl backdrop-blur-xl">
+              <div className="flex items-start sm:items-center gap-3.5">
+                <div className="p-2.5 rounded-xl bg-amber-500/20 text-amber-400 shrink-0">
+                  <AlertCircle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="text-sm font-black text-amber-300 flex items-center gap-2">
+                    <span>Telegram connectivity lost</span>
+                    <span className="text-[10px] font-mono uppercase px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 font-bold">Action Required</span>
+                  </h4>
+                  <p className="text-xs text-amber-200/90 mt-1 max-w-2xl leading-relaxed">
+                    Telegram connectivity lost, login to dashboard and click reconnect button. Your 30-day session expired or Telegram connection was disconnected.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowAuthModal(true)}
+                className="px-5 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-xs shadow-lg shadow-amber-500/20 transition active:scale-95 shrink-0 flex items-center justify-center space-x-2"
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>Reconnect Telegram</span>
+              </button>
+            </div>
+          )}
+
           {/* TAB 1: OVERVIEW & STATS */}
           {dashboardTab === 'overview' && (
             <div className="space-y-6 font-sans">
