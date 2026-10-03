@@ -144,19 +144,6 @@ export async function initDb() {
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_name VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN download_password VARCHAR(255) DEFAULT NULL;`); } catch {}
-    try { await pool.query(`ALTER TABLE user_files ADD COLUMN file_slug VARCHAR(150) UNIQUE DEFAULT NULL;`); } catch {}
-    try { await pool.query(`ALTER TABLE user_files ADD INDEX idx_file_slug (file_slug);`); } catch {}
-
-    // Backfill any existing files with null file_slug to ensure 100% unique slugs
-    try {
-      const [nullSlugRows]: any = await pool.query(`SELECT id, file_name, message_id FROM user_files WHERE file_slug IS NULL LIMIT 1000`);
-      if (Array.isArray(nullSlugRows)) {
-        for (const row of nullSlugRows) {
-          const generated = generateUniqueFileSlug(row.file_name, row.id);
-          await pool.query(`UPDATE user_files SET file_slug = ? WHERE id = ?`, [generated, row.id]).catch(() => {});
-        }
-      }
-    } catch {}
 
     isDbConnected = true;
     dbInitError = null;
@@ -576,20 +563,6 @@ export async function saveUserToDb(user: {
   return { success: true, api_key: apiKey };
 }
 
-export function generateUniqueFileSlug(fileName: string, idOrSeed?: number | string): string {
-  const cleanName = (fileName || 'file')
-    .toLowerCase()
-    .replace(/\.[^/.]+$/, '') // remove extension
-    .replace(/[^a-z0-9]+/g, '-') // replace non-alphanumeric with hyphen
-    .replace(/^-+|-+$/g, '') // trim hyphens
-    .slice(0, 32);
-  
-  const randomSuffix = crypto.randomBytes(3).toString('hex'); // 6 hex characters (e.g. 7f8a9b)
-  const seedPart = idOrSeed ? Number(idOrSeed).toString(36).toLowerCase() : '';
-  const uniqueId = seedPart ? `${seedPart}-${randomSuffix}` : randomSuffix;
-  return cleanName ? `${cleanName}-${uniqueId}` : `f-${uniqueId}`;
-}
-
 export async function saveFileToDb(fileData: {
   telegram_id: number | string;
   message_id: number | string;
@@ -603,13 +576,11 @@ export async function saveFileToDb(fileData: {
   storage_chat?: string;
   direct_link?: string;
   download_password?: string | null;
-  file_slug?: string;
 }) {
   const tgId = String(fileData.telegram_id);
   const msgId = String(fileData.message_id);
   const wsId = fileData.workspace_id ? Number(fileData.workspace_id) : null;
   const wsName = fileData.workspace_name || null;
-  const fileSlug = fileData.file_slug || generateUniqueFileSlug(fileData.file_name, `${tgId}${msgId}`);
 
   if (!pool || !isDbConnected) {
     throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
@@ -617,8 +588,8 @@ export async function saveFileToDb(fileData: {
 
   await pool.query(
     `INSERT INTO user_files 
-      (telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, file_slug, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+      (telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
      ON DUPLICATE KEY UPDATE
       workspace_id = COALESCE(VALUES(workspace_id), workspace_id),
       workspace_name = COALESCE(VALUES(workspace_name), workspace_name),
@@ -626,7 +597,6 @@ export async function saveFileToDb(fileData: {
       caption = VALUES(caption),
       direct_link = VALUES(direct_link),
       download_password = VALUES(download_password),
-      file_slug = COALESCE(file_slug, VALUES(file_slug)),
       updated_at = NOW()`,
     [
       tgId,
@@ -641,10 +611,9 @@ export async function saveFileToDb(fileData: {
       fileData.storage_chat || 'me',
       fileData.direct_link || '',
       fileData.download_password || null,
-      fileSlug,
     ]
   );
-  return { success: true, file_slug: fileSlug };
+  return { success: true };
 }
 
 export async function getUserFilesFromDb(
@@ -659,7 +628,7 @@ export async function getUserFilesFromDb(
   }
 
   let query = `
-    SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, file_slug, created_at, updated_at
+    SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at
     FROM user_files
     WHERE telegram_id = ?
   `;
@@ -676,66 +645,22 @@ export async function getUserFilesFromDb(
   return rows as any[];
 }
 
-export async function getFileBySlugOrId(slugOrId: string | number) {
+export async function getFileByMessageId(messageId: number | string) {
   if (!pool || !isDbConnected) {
     return null;
   }
-  const identifier = String(slugOrId).trim();
-  if (!identifier) return null;
-
   try {
-    // 1. Try matching exact file_slug
-    let [rows]: any = await pool.query(
-      `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, download_password, storage_chat, direct_link, file_slug, created_at 
+    const [rows]: any[] = await pool.query(
+      `SELECT id, telegram_id, message_id, file_name, file_size, mime_type, download_password, storage_chat, direct_link, created_at 
        FROM user_files 
-       WHERE file_slug = ? LIMIT 1`,
-      [identifier]
+       WHERE message_id = ? LIMIT 1`,
+      [String(messageId)]
     );
     if (rows && rows.length > 0) return rows[0];
-
-    // 2. Try matching MySQL auto-increment primary key ID
-    if (/^\d+$/.test(identifier)) {
-      [rows] = await pool.query(
-        `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, download_password, storage_chat, direct_link, file_slug, created_at 
-         FROM user_files 
-         WHERE id = ? LIMIT 1`,
-        [Number(identifier)]
-      );
-      if (rows && rows.length > 0) return rows[0];
-    }
-
-    // 3. Try matching Telegram message_id (legacy fallback)
-    if (/^\d+$/.test(identifier)) {
-      [rows] = await pool.query(
-        `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, download_password, storage_chat, direct_link, file_slug, created_at 
-         FROM user_files 
-         WHERE message_id = ? 
-         ORDER BY id DESC LIMIT 1`,
-        [String(identifier)]
-      );
-      if (rows && rows.length > 0) return rows[0];
-    }
-
-    // 4. Try base36 decoded ID
-    const decodedNum = parseInt(identifier, 36);
-    if (!isNaN(decodedNum) && decodedNum > 0) {
-      [rows] = await pool.query(
-        `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_name, original_name, file_size, mime_type, download_password, storage_chat, direct_link, file_slug, created_at 
-         FROM user_files 
-         WHERE id = ? OR message_id = ? 
-         ORDER BY id DESC LIMIT 1`,
-        [decodedNum, String(decodedNum)]
-      );
-      if (rows && rows.length > 0) return rows[0];
-    }
-  } catch (e: any) {
-    console.error('[MySQL] getFileBySlugOrId error:', e);
+  } catch (e) {
+    console.error('[MySQL] getFileByMessageId error:', e);
   }
   return null;
-}
-
-export async function getFileByMessageId(messageId: number | string) {
-  return getFileBySlugOrId(messageId);
 }
 
 export async function renameFileInDb(

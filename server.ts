@@ -28,7 +28,6 @@ import {
   regenerateUserApiKey,
   verifyWorkspaceBelongsToUser,
   getFileByMessageId,
-  getFileBySlugOrId,
   getTelegramSystemSessionFromDb,
   saveTelegramSystemSessionToDb,
   clearTelegramSystemSessionInDb,
@@ -101,25 +100,31 @@ app.use(express.json());
 let pyProcess: ChildProcess | null = null;
 
 function ensurePythonDepsAndStart() {
+  const pyScript = path.resolve(process.cwd(), 'server', 'telethon_service.py');
+  
   // Quick check if python dependencies are present
   const check = spawn('python3', ['-c', 'import telethon, aiohttp']);
   check.on('close', (code) => {
-    if (code === 0) {
-      startPythonService();
-      return;
-    }
-
-    console.log('[Node] Installing Python dependencies (aiohttp, telethon)...');
-    const apt = spawn('apt-get', ['update', '-y']);
-    apt.on('close', () => {
-      const aptInstall = spawn('apt-get', ['install', '-y', 'python3-pip', 'python3-aiohttp']);
-      aptInstall.on('close', () => {
-        const pip = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', 'cryptg', '--break-system-packages']);
-        pip.on('close', () => {
-          startPythonService();
-        });
+    if (code !== 0) {
+      console.log('[Node] Installing Python dependencies (telethon, aiohttp)...');
+      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages'], {
+        stdio: 'inherit',
       });
-    });
+      install.on('close', (pipCode) => {
+        if (pipCode !== 0) {
+          const apt = spawn('apt-get', ['install', '-y', 'python3-aiohttp', 'python3-telethon'], {
+            stdio: 'inherit',
+          });
+          apt.on('close', () => {
+            startPythonService();
+          });
+        } else {
+          startPythonService();
+        }
+      });
+    } else {
+      startPythonService();
+    }
   });
 }
 
@@ -214,22 +219,10 @@ async function forwardToPython(
   return { status: 503, data: { error: 'Telegram MTProto service unavailable' } };
 }
 
-function getShortLink(file: any, _req?: Request): string {
+function getShortLink(messageId: number | string, _req?: Request): string {
+  const shortId = Number(messageId).toString(36).toUpperCase();
   const domain = process.env.CUSTOM_DOMAIN || 's3.htknetwork.in';
-  if (typeof file === 'object' && file !== null) {
-    if (file.file_slug) {
-      return `https://${domain}/f/${file.file_slug}`;
-    }
-    if (file.id) {
-      const shortId = Number(file.id).toString(36).toLowerCase();
-      return `https://${domain}/f/${shortId}`;
-    }
-    if (file.message_id) {
-      return `https://${domain}/f/${file.message_id}`;
-    }
-  }
-  const slugOrId = String(file || '').trim();
-  return `https://${domain}/f/${slugOrId}`;
+  return `https://${domain}/f/${shortId}`;
 }
 
 // Synchronize active Telegram MTProto Session from Python to MySQL (User 30-day & Admin Fallback)
@@ -966,7 +959,7 @@ app.get(['/api/user/files', '/api/v1/files'], async (req: Request, res: Response
   const formattedFiles = dbFiles.map(file => {
     return {
       ...file,
-      direct_link: getShortLink(file, req)
+      direct_link: getShortLink(file.message_id, req)
     };
   });
   res.json({ files: formattedFiles, total: formattedFiles.length });
@@ -1060,7 +1053,7 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
     const dbFiles = await getUserFilesFromDb(tgId, workspaceId || undefined);
     const formatted = dbFiles.map((file) => ({
       ...file,
-      direct_link: getShortLink(file, req),
+      direct_link: getShortLink(file.message_id, req),
     }));
 
     return res.json({
@@ -1680,12 +1673,12 @@ if (!fs.existsSync(CDN_CACHE_DIR)) {
 
 // Global High-Performance Public CDN Streaming Engine
 async function streamCdnFile(
-  slugOrMessageId: string | number,
+  messageId: string | number,
   req: Request,
   res: Response,
   options?: { customFileName?: string; downloadPassword?: string | null; storageChat?: string }
 ): Promise<void> {
-  const identifier = String(slugOrMessageId).trim();
+  const msgId = String(messageId);
 
   // Set global public CDN CORS & caching headers for direct embedding & streaming
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1700,9 +1693,8 @@ async function streamCdnFile(
     return;
   }
 
-  // 1. Resolve file metadata from MySQL by unique slug, auto-increment id, or message_id
-  let file = await getFileBySlugOrId(identifier);
-  const msgId = file?.message_id ? String(file.message_id) : identifier;
+  // 1. Resolve file metadata from MySQL if available
+  let file = await getFileByMessageId(msgId);
   const fileName = options?.customFileName || file?.file_name || `file_${msgId}`;
   const mimeType = file?.mime_type || 'application/octet-stream';
   const targetStorageChat = options?.storageChat || file?.storage_chat || '';
@@ -1898,13 +1890,25 @@ app.get('/api/download/:messageId/:filename?', async (req: Request, res: Respons
   await streamCdnFile(req.params.messageId, req, res, { customFileName: req.params.filename });
 });
 
-// Direct Shortlink Slug Service (s3.htknetwork.in/f/{slug}) - Fully Public CDN with unique file slugs
+// Direct Shortlink Slug Service (s3.htknetwork.in/f/{file_id}) - Fully Public CDN
 app.head('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
-  await streamCdnFile(req.params.file_id, req, res);
+  const { file_id } = req.params;
+  let messageId = file_id;
+  if (!/^\d+$/.test(file_id)) {
+    const num = parseInt(file_id, 36);
+    if (!isNaN(num)) messageId = String(num);
+  }
+  await streamCdnFile(messageId, req, res);
 });
 
 app.get('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
-  await streamCdnFile(req.params.file_id, req, res);
+  const { file_id } = req.params;
+  let messageId = file_id;
+  if (!/^\d+$/.test(file_id)) {
+    const num = parseInt(file_id, 36);
+    if (!isNaN(num)) messageId = String(num);
+  }
+  await streamCdnFile(messageId, req, res);
 });
 
 // Provide standalone Python script download
