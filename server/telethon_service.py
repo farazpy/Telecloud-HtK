@@ -15,6 +15,12 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 
 try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    pass
+
+try:
     import socks
 except ImportError:
     socks = None
@@ -1326,7 +1332,7 @@ async def handle_stream_file(request: web.Request):
             return response
 
         bytes_sent = 0
-        chunk_size = 128 * 1024
+        chunk_size = 512 * 1024
         async for chunk in active_client.iter_download(msg.media, offset=offset, request_size=chunk_size):
             if limit_bytes and bytes_sent + len(chunk) > limit_bytes:
                 needed = limit_bytes - bytes_sent
