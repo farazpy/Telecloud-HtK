@@ -28,6 +28,8 @@ import {
   regenerateUserApiKey,
   verifyWorkspaceBelongsToUser,
   getFileByMessageId,
+  getFileBySlug,
+  generateUniqueFileSlug,
   getTelegramSystemSessionFromDb,
   saveTelegramSystemSessionToDb,
   clearTelegramSystemSessionInDb,
@@ -219,10 +221,9 @@ async function forwardToPython(
   return { status: 503, data: { error: 'Telegram MTProto service unavailable' } };
 }
 
-function getShortLink(messageId: number | string, _req?: Request): string {
-  const shortId = Number(messageId).toString(36).toUpperCase();
+function getShortLink(slugOrId: number | string, _req?: Request): string {
   const domain = process.env.CUSTOM_DOMAIN || 's3.htknetwork.in';
-  return `https://${domain}/f/${shortId}`;
+  return `https://${domain}/f/${slugOrId}`;
 }
 
 // Synchronize active Telegram MTProto Session from Python to MySQL (User 30-day & Admin Fallback)
@@ -959,7 +960,7 @@ app.get(['/api/user/files', '/api/v1/files'], async (req: Request, res: Response
   const formattedFiles = dbFiles.map(file => {
     return {
       ...file,
-      direct_link: getShortLink(file.message_id, req)
+      direct_link: getShortLink(file.file_slug || file.message_id, req)
     };
   });
   res.json({ files: formattedFiles, total: formattedFiles.length });
@@ -1053,7 +1054,7 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
     const dbFiles = await getUserFilesFromDb(tgId, workspaceId || undefined);
     const formatted = dbFiles.map((file) => ({
       ...file,
-      direct_link: getShortLink(file.message_id, req),
+      direct_link: getShortLink(file.file_slug || file.message_id, req),
     }));
 
     return res.json({
@@ -1174,15 +1175,18 @@ app.post('/api/files/rename', async (req: Request, res: Response): Promise<void>
     return;
   }
 
-  const directDownloadUrl = getShortLink(message_id, req);
+  const directDownloadUrl = getShortLink(req.body.file_slug || message_id, req);
 
   const result = await renameFileInDb(tgId, message_id, new_file_name);
   if (result.success) {
+    const updatedFile = await getFileByMessageId(message_id);
+    const finalLink = getShortLink(updatedFile?.file_slug || message_id, req);
     res.json({
       success: true,
       message_id,
       file_name: new_file_name,
-      direct_link: directDownloadUrl,
+      file_slug: updatedFile?.file_slug,
+      direct_link: finalLink,
     });
   } else {
     res.status(404).json({ error: (result as any).error || 'Failed to rename file' });
@@ -1306,7 +1310,7 @@ app.get('/api/manifest', async (req: Request, res: Response): Promise<void> => {
     res.setHeader('Content-Disposition', 'attachment; filename="telecloud-playlist.m3u"');
     let m3u = '#EXTM3U\n';
     for (const f of selectedFiles) {
-      const link = getShortLink(f.message_id, req);
+      const link = getShortLink(f.file_slug || f.message_id, req);
       m3u += `#EXTINF:-1,${f.file_name}\n${link}\n`;
     }
     res.send(m3u);
@@ -1319,10 +1323,11 @@ app.get('/api/manifest', async (req: Request, res: Response): Promise<void> => {
     totalBytes += size;
     return {
       message_id: f.message_id,
+      file_slug: f.file_slug,
       file_name: f.file_name,
       file_size: size,
       mime_type: f.mime_type || 'application/octet-stream',
-      direct_link: getShortLink(f.message_id, req),
+      direct_link: getShortLink(f.file_slug || f.message_id, req),
       created_at: f.created_at || f.date,
     };
   });
@@ -1540,7 +1545,6 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
     }
 
     const messageId = pyResult.data.message_id;
-    const directDownloadUrl = getShortLink(messageId, req);
     const telegramChat = pyResult.data.chat_id || targetWs?.storage_chat || 'me';
 
     let telegramLink = 'https://t.me/me';
@@ -1549,13 +1553,35 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
       telegramLink = `https://t.me/c/${channelClean}/${messageId}`;
     }
 
-    // 6. Record File in MySQL Database Catalog
+    // 6. Record File in MySQL Database Catalog with Globally Unique Slug
     const downloadPassword = req.body.password || req.body.download_password || null;
+    const generatedSlug = generateUniqueFileSlug(8);
+
+    const saveResult = await saveFileToDb({
+      telegram_id: auth.user.telegram_id,
+      message_id: messageId,
+      workspace_id: targetWs?.id || null,
+      workspace_name: targetWs?.name || 'Default Workspace',
+      file_slug: generatedSlug,
+      file_name: customFileName,
+      original_name: originalName,
+      file_size: pyResult.data.file_size || req.file.size,
+      mime_type: pyResult.data.mime_type || req.file.mimetype,
+      caption,
+      storage_chat: telegramChat,
+      download_password: downloadPassword,
+    });
+
+    const finalSlug = saveResult.file_slug || generatedSlug;
+    const directDownloadUrl = getShortLink(finalSlug, req);
+
+    // Update stored direct_link with authoritative unique slug link
     await saveFileToDb({
       telegram_id: auth.user.telegram_id,
       message_id: messageId,
       workspace_id: targetWs?.id || null,
       workspace_name: targetWs?.name || 'Default Workspace',
+      file_slug: finalSlug,
       file_name: customFileName,
       original_name: originalName,
       file_size: pyResult.data.file_size || req.file.size,
@@ -1569,6 +1595,7 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
     // 7. Return direct file_url in JSON response
     res.json({
       success: true,
+      file_slug: finalSlug,
       file_url: directDownloadUrl,
       direct_link: directDownloadUrl,
       message_id: messageId,
@@ -1671,14 +1698,14 @@ if (!fs.existsSync(CDN_CACHE_DIR)) {
   fs.mkdirSync(CDN_CACHE_DIR, { recursive: true });
 }
 
-// Global High-Performance Public CDN Streaming Engine
+// Global High-Performance Public CDN Streaming Engine with Unique Slug & Collision Resolution
 async function streamCdnFile(
-  messageId: string | number,
+  slugOrId: string | number,
   req: Request,
   res: Response,
   options?: { customFileName?: string; downloadPassword?: string | null; storageChat?: string }
 ): Promise<void> {
-  const msgId = String(messageId);
+  const identifier = String(slugOrId).trim();
 
   // Set global public CDN CORS & caching headers for direct embedding & streaming
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1693,11 +1720,20 @@ async function streamCdnFile(
     return;
   }
 
-  // 1. Resolve file metadata from MySQL if available
-  let file = await getFileByMessageId(msgId);
+  // 1. Resolve file metadata from MySQL by unique file_slug, message_id, or base36
+  let file = await getFileBySlug(identifier);
+  if (!file && options?.storageChat) {
+    file = await getFileByMessageId(identifier, options.storageChat);
+  }
+  if (!file) {
+    file = await getFileByMessageId(identifier);
+  }
+
+  const msgId = file ? String(file.message_id) : identifier;
   const fileName = options?.customFileName || file?.file_name || `file_${msgId}`;
   const mimeType = file?.mime_type || 'application/octet-stream';
   const targetStorageChat = options?.storageChat || file?.storage_chat || '';
+  const fileUniqueKey = file?.file_slug || `${targetStorageChat || 'chat'}_${msgId}`;
 
   // 2. Check Password Protection
   const requiredPassword = options?.downloadPassword !== undefined ? options.downloadPassword : file?.download_password;
@@ -1734,8 +1770,9 @@ async function streamCdnFile(
     }
   }
 
-  // 3. Check Local Disk Cache for Instant 0ms Latency CDN Delivery
-  const cachePath = path.join(CDN_CACHE_DIR, `${msgId}.bin`);
+  // 3. Check Local Disk Cache for Instant 0ms Latency CDN Delivery (unique per slug/chat to prevent cross-workspace collision)
+  const cacheKeySanitized = fileUniqueKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cachePath = path.join(CDN_CACHE_DIR, `${cacheKeySanitized}.bin`);
   if (fs.existsSync(cachePath)) {
     try {
       const stat = fs.statSync(cachePath);
@@ -1744,7 +1781,7 @@ async function streamCdnFile(
         res.setHeader('Content-Type', mimeType);
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
-        res.setHeader('ETag', `"${msgId}-${stat.size}"`);
+        res.setHeader('ETag', `"${cacheKeySanitized}-${stat.size}"`);
 
         if (range) {
           const parts = range.replace(/bytes=/, '').split('-');
@@ -1842,7 +1879,7 @@ async function streamCdnFile(
 
   // Write full downloads to CDN disk cache for future instant delivery
   let cacheStream: fs.WriteStream | null = null;
-  const tmpCachePath = path.join(CDN_CACHE_DIR, `${msgId}.tmp`);
+  const tmpCachePath = path.join(CDN_CACHE_DIR, `${cacheKeySanitized}.tmp`);
   if (pyRes.status === 200) {
     try {
       cacheStream = fs.createWriteStream(tmpCachePath);
@@ -1874,41 +1911,29 @@ async function streamCdnFile(
   }
 }
 
-// Direct Access Download / Stream Endpoints with CDN support
-app.options(['/api/download/:messageId/:filename?', '/f/:file_id', '/stream/:message_id'], (_req, res) => {
+// Direct Access Download / Stream Endpoints with CDN & Unique Slug support
+app.options(['/api/download/:messageId/:filename?', '/f/:file_id/:filename?', '/f/:file_id', '/stream/:message_id/:filename?', '/stream/:message_id'], (_req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.status(204).end();
 });
 
-app.head('/api/download/:messageId/:filename?', async (req: Request, res: Response): Promise<void> => {
+app.head(['/api/download/:messageId/:filename?', '/api/download/:messageId'], async (req: Request, res: Response): Promise<void> => {
   await streamCdnFile(req.params.messageId, req, res, { customFileName: req.params.filename });
 });
 
-app.get('/api/download/:messageId/:filename?', async (req: Request, res: Response): Promise<void> => {
+app.get(['/api/download/:messageId/:filename?', '/api/download/:messageId'], async (req: Request, res: Response): Promise<void> => {
   await streamCdnFile(req.params.messageId, req, res, { customFileName: req.params.filename });
 });
 
-// Direct Shortlink Slug Service (s3.htknetwork.in/f/{file_id}) - Fully Public CDN
-app.head('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
-  const { file_id } = req.params;
-  let messageId = file_id;
-  if (!/^\d+$/.test(file_id)) {
-    const num = parseInt(file_id, 36);
-    if (!isNaN(num)) messageId = String(num);
-  }
-  await streamCdnFile(messageId, req, res);
+// Direct Shortlink Slug Service (s3.htknetwork.in/f/{file_slug}) - Fully Public CDN
+app.head(['/f/:file_id/:filename?', '/f/:file_id'], async (req: Request, res: Response): Promise<void> => {
+  await streamCdnFile(req.params.file_id, req, res, { customFileName: req.params.filename });
 });
 
-app.get('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
-  const { file_id } = req.params;
-  let messageId = file_id;
-  if (!/^\d+$/.test(file_id)) {
-    const num = parseInt(file_id, 36);
-    if (!isNaN(num)) messageId = String(num);
-  }
-  await streamCdnFile(messageId, req, res);
+app.get(['/f/:file_id/:filename?', '/f/:file_id'], async (req: Request, res: Response): Promise<void> => {
+  await streamCdnFile(req.params.file_id, req, res, { customFileName: req.params.filename });
 });
 
 // Provide standalone Python script download

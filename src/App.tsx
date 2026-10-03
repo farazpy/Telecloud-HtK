@@ -85,6 +85,7 @@ interface StorageFile {
   id?: number;
   telegram_id?: number | string;
   message_id: number;
+  file_slug?: string;
   workspace_id?: number | null;
   workspace_name?: string | null;
   file_name: string;
@@ -171,8 +172,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.6.3
-  const APP_VERSION = "v1.6.3";
+  // App Version in Header - Incremented to v1.6.5
+  const APP_VERSION = "v1.6.5";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -935,7 +936,7 @@ export default function App() {
           workspace_id: f.workspace_id,
           workspace_name: f.workspace_name || activeWorkspace?.name || 'Default Workspace',
           storage_chat: f.storage_chat || 'me',
-          direct_link: f.direct_link || `${window.location.origin}/api/download/${f.message_id}/${encodeURIComponent(f.file_name)}`,
+          direct_link: f.direct_link || (f.file_slug ? `${window.location.origin}/f/${f.file_slug}` : `${window.location.origin}/api/download/${f.message_id}/${encodeURIComponent(f.file_name)}`),
           telegram_link: (f.storage_chat || storageChat).startsWith('-100')
             ? `https://t.me/c/${(f.storage_chat || storageChat).replace('-100', '')}/${f.message_id}`
             : `https://t.me/me`
