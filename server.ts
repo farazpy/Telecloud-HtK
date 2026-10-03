@@ -810,7 +810,7 @@ app.put('/api/workspaces/:id', async (req: Request, res: Response): Promise<void
 app.delete('/api/workspaces/:id', async (req: Request, res: Response): Promise<void> => {
   const wsId = Number(req.params.id);
   const statusRes = await forwardToPython('GET', '/status');
-  const tgId = statusRes.data?.user?.id;
+  let tgId = statusRes.data?.user?.id || req.body.telegram_id || req.query.telegram_id;
   if (!tgId) {
     res.status(401).json({ error: 'User not authenticated' });
     return;

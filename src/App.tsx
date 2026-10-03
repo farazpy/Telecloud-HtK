@@ -171,8 +171,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.5.9
-  const APP_VERSION = "v1.5.9";
+  // App Version in Header - Incremented to v1.6.0
+  const APP_VERSION = "v1.6.0";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -530,6 +530,23 @@ export default function App() {
   const [loginQrLoading, setLoginQrLoading] = useState<boolean>(false);
   const qrPollTimerRef = useRef<any>(null);
   const qrRefreshTimerRef = useRef<any>(null);
+  const workspaceDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        workspaceDropdownOpen &&
+        workspaceDropdownRef.current &&
+        !workspaceDropdownRef.current.contains(event.target as Node)
+      ) {
+        setWorkspaceDropdownOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [workspaceDropdownOpen]);
 
   // Phone login flow
   const [phoneCodeHash, setPhoneCodeHash] = useState<string | null>(null);
@@ -791,28 +808,6 @@ export default function App() {
       alert(`Error updating workspace: ${err.message}`);
     } finally {
       setSavingWorkspace(false);
-    }
-  };
-
-  const handleDeleteWorkspace = async (workspaceId: number, workspaceName: string) => {
-    if (workspaces.length <= 1) {
-      alert('You cannot delete your only remaining workspace.');
-      return;
-    }
-    if (!confirm(`Are you sure you want to delete workspace "${workspaceName}"? Files in Telegram will be preserved.`)) {
-      return;
-    }
-    try {
-      const data = await safeJsonFetch(`/api/workspaces/${workspaceId}`, {
-        method: 'DELETE',
-      });
-      if (data.success) {
-        await fetchWorkspaces();
-        await fetchFiles();
-        await fetchStats();
-      }
-    } catch (err: any) {
-      alert(`Error deleting workspace: ${err.message}`);
     }
   };
 
@@ -1393,6 +1388,34 @@ export default function App() {
       alert(`Deletion failed: ${err.message}`);
     } finally {
       setDeletingAccount(false);
+    }
+  };
+
+  const handleDeleteWorkspace = async (wsId: number, name: string) => {
+    if (workspaces.length <= 1) {
+      alert('You must keep at least one workspace. Deletion cancelled.');
+      return;
+    }
+    const msg = `Are you sure you want to delete the workspace "${name}"?\n\n⚠️ WARNING: All cataloged file records belonging to this workspace will also be permanently deleted! This action is irreversible.`;
+    if (!confirm(msg)) return;
+
+    try {
+      const res = await fetch(`/api/workspaces/${wsId}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ telegram_id: user?.id })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert(`Workspace "${name}" and all of its files have been deleted.`);
+        await fetchWorkspaces();
+        await fetchFiles();
+        await fetchStats();
+      } else {
+        alert(data.error || 'Failed to delete workspace.');
+      }
+    } catch (err: any) {
+      alert(`Deletion failed: ${err.message}`);
     }
   };
 
@@ -2540,7 +2563,7 @@ export default function App() {
                 </span>
 
                 {/* Interactive Multi-Workspace Switcher Dropdown */}
-                <div className="relative">
+                <div className="relative" ref={workspaceDropdownRef}>
                   <button
                     onClick={() => setWorkspaceDropdownOpen(!workspaceDropdownOpen)}
                     className={`flex items-center space-x-1 sm:space-x-1.5 px-2 sm:px-2.5 py-1 text-xs font-semibold rounded-xl border transition shadow-2xs active:scale-95 ${
@@ -2583,19 +2606,21 @@ export default function App() {
                         {workspaces.map((ws) => {
                           const isActive = ws.id === activeWorkspaceId;
                           return (
-                            <button
+                            <div
                               key={ws.id}
-                              onClick={() => {
-                                handleSwitchWorkspace(ws.id);
-                                setWorkspaceDropdownOpen(false);
-                              }}
-                              className={`w-full text-left p-2.5 rounded-xl text-xs flex items-center justify-between transition ${
+                              className={`w-full p-1.5 rounded-xl text-xs flex items-center justify-between transition ${
                                 isActive
-                                  ? (darkMode ? 'bg-sky-500/20 text-sky-200 border border-sky-500/40 shadow-xs' : 'bg-sky-50 text-sky-900 border border-sky-200/80 shadow-2xs')
-                                  : (darkMode ? 'text-slate-300 hover:bg-slate-800 hover:text-white border border-transparent' : 'text-slate-700 hover:bg-slate-50 hover:text-slate-900 border border-transparent')
+                                  ? (darkMode ? 'bg-sky-500/10 text-sky-200 border border-sky-500/30' : 'bg-sky-50 text-sky-900 border border-sky-100')
+                                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/40 border border-transparent' : 'text-slate-700 hover:bg-slate-50 border border-transparent')
                               }`}
                             >
-                              <div className="truncate pr-2">
+                              <div
+                                onClick={() => {
+                                  handleSwitchWorkspace(ws.id);
+                                  setWorkspaceDropdownOpen(false);
+                                }}
+                                className="flex-1 min-w-0 cursor-pointer pr-2"
+                              >
                                 <div className="flex items-center space-x-1.5 flex-wrap">
                                   <span className={`font-extrabold text-xs truncate ${darkMode ? 'text-white' : 'text-slate-900'}`}>{ws.name}</span>
                                   <span className={`px-1.5 py-0.2 text-[9px] font-mono font-bold rounded border ${
@@ -2613,30 +2638,57 @@ export default function App() {
                                   Target: {ws.storage_chat === 'me' ? 'Self (Saved Messages)' : ws.storage_chat}
                                 </p>
                               </div>
-                              <div className="flex items-center space-x-1.5 flex-shrink-0">
+                              <div className="flex items-center space-x-2 flex-shrink-0">
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded font-mono font-bold ${
                                   darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600'
                                 }`}>
                                   {ws.file_count || 0} f
                                 </span>
                                 {isActive && (
-                                  <Check className="w-4 h-4 text-sky-400" />
+                                  <Check className="w-4 h-4 text-sky-400 shrink-0" />
                                 )}
+                                <button
+                                  type="button"
+                                  disabled={workspaces.length <= 1}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDeleteWorkspace(ws.id, ws.name);
+                                  }}
+                                  className={`p-1 rounded-lg transition ${
+                                    workspaces.length <= 1
+                                      ? 'opacity-30 cursor-not-allowed text-slate-500'
+                                      : 'text-rose-400 hover:text-rose-500 hover:bg-rose-500/10'
+                                  }`}
+                                  title="Delete workspace and all associated files"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
                               </div>
-                            </button>
+                            </div>
                           );
                         })}
                       </div>
 
-                      <div className={`pt-2 border-t flex items-center justify-between gap-2 ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+                      <div className={`pt-2 border-t flex items-center gap-2 ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
                         <button
                           onClick={() => {
                             setWorkspaceDropdownOpen(false);
                             setCreateWorkspaceModalOpen(true);
                           }}
-                          className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs text-center shadow-xs transition"
+                          className="flex-1 py-2 px-3 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs text-center shadow-xs transition"
                         >
-                          + Create New Workspace
+                          + Create New
+                        </button>
+                        <button
+                          onClick={() => {
+                            setWorkspaceDropdownOpen(false);
+                            setDashboardTab('settings');
+                          }}
+                          className={`py-2 px-3 rounded-xl font-bold text-xs border transition ${
+                            darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+                          }`}
+                        >
+                          Manage Workspace
                         </button>
                       </div>
                     </div>
@@ -2658,6 +2710,7 @@ export default function App() {
                 setFileSearch(e.target.value);
                 if (dashboardTab !== 'vault') setDashboardTab('vault');
               }}
+              autoComplete="off"
               placeholder="Search cloud files, documents, videos..."
               className={`w-full rounded-2xl pl-9 pr-4 py-2 text-xs transition ${inputBg}`}
             />
@@ -2820,20 +2873,6 @@ export default function App() {
                 >
                   <Film className={`w-4 h-4 text-rose-400 shrink-0`} />
                   <span>Media Streamer</span>
-                </button>
-
-                <button
-                  onClick={() => { setDashboardTab('links'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
-                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
-                  } ${
-                    dashboardTab === 'links'
-                      ? (darkMode ? 'bg-amber-500/10 text-amber-400' : 'bg-amber-50 text-amber-700')
-                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
-                  }`}
-                >
-                  <LinkIcon className={`w-4 h-4 text-amber-400 shrink-0`} />
-                  <span>Direct Links Hub</span>
                 </button>
               </div>
             </div>
@@ -3979,6 +4018,7 @@ export default function App() {
                       type="text"
                       value={fileSearch}
                       onChange={(e) => setFileSearch(e.target.value)}
+                      autoComplete="off"
                       placeholder="Search files by name, caption, workspace..."
                       className={`w-full sm:w-80 rounded-xl px-3.5 py-2 text-xs ${inputBg}`}
                     />
@@ -4642,88 +4682,6 @@ export default function App() {
           )}
 
           {/* TAB 5: DIRECT LINKS HUB */}
-          {dashboardTab === 'links' && (
-            <div className="space-y-6">
-              <div className={`p-6 rounded-3xl transition-colors duration-200 ${cardBg}`}>
-                <h2 className={`text-lg font-extrabold flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                  <LinkIcon className="w-5 h-5 text-sky-500" />
-                  <span>Direct Access Links Hub</span>
-                </h2>
-                <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                  Export, embed, or test your generated direct download and streaming URLs.
-                </p>
-              </div>
-
-              <div className={`rounded-3xl overflow-hidden transition-colors duration-200 ${cardBg}`}>
-                <div className={`divide-y ${darkMode ? 'divide-slate-800' : 'divide-slate-100'}`}>
-                  {files.map((file) => (
-                    <div key={file.message_id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="min-w-0 max-w-lg">
-                        <div className="flex items-center space-x-2">
-                          <p className={`font-bold text-xs truncate ${darkMode ? 'text-slate-200' : 'text-slate-900'}`}>{file.file_name}</p>
-                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-bold ${
-                            darkMode ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-emerald-50 text-emerald-700'
-                          }`}>
-                            {formatBytes(file.file_size)}
-                          </span>
-                        </div>
-                        <input
-                          type="text"
-                          readOnly
-                          value={file.direct_link || ''}
-                          className={`w-full mt-1.5 rounded-lg px-2.5 py-1 text-[11px] font-mono text-sky-400 select-all ${inputBg}`}
-                        />
-                      </div>
-
-                      <div className="flex items-center space-x-2 flex-shrink-0">
-                        <button
-                          onClick={() => copyToClipboard(file.direct_link || '', `link-${file.message_id}`)}
-                          className={`px-3 py-1.5 rounded-xl font-bold text-xs border flex items-center space-x-1 ${
-                            darkMode ? 'bg-sky-950/80 text-sky-300 border-sky-800/80 hover:bg-sky-900' : 'bg-sky-50 hover:bg-sky-100 text-sky-600 border-sky-200'
-                          }`}
-                        >
-                          {copiedId === `link-${file.message_id}` ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                          <span>{copiedId === `link-${file.message_id}` ? 'Copied' : 'Copy'}</span>
-                        </button>
-
-                        <button
-                          onClick={() => copyToClipboard(`<a href="${file.direct_link}">Download ${file.file_name}</a>`, `html-${file.message_id}`)}
-                          className={`px-3 py-1.5 rounded-xl font-semibold text-xs border ${
-                            darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border-slate-200'
-                          }`}
-                        >
-                          HTML
-                        </button>
-
-                        <button
-                          onClick={() => setQrModalFile(file)}
-                          className={`px-3 py-1.5 rounded-xl font-bold text-xs border flex items-center space-x-1 transition ${
-                            darkMode ? 'bg-amber-950/80 text-amber-300 border-amber-800/80 hover:bg-amber-900' : 'bg-amber-50 hover:bg-amber-100 text-amber-700 border-amber-200'
-                          }`}
-                          title="Generate & View QR Code"
-                        >
-                          <QrCode className="w-3.5 h-3.5" />
-                          <span>QR</span>
-                        </button>
-
-                        <a
-                          href={file.direct_link}
-                          target="_blank"
-                          rel="noreferrer"
-                          className={`p-2 rounded-xl border shadow-xs ${
-                            darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
-                          }`}
-                        >
-                          <LinkExternal className="w-3.5 h-3.5" />
-                        </a>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* TAB 6: VISUAL STORAGE DESTINATION PICKER & PREFERENCES */}
           {dashboardTab === 'settings' && (
             <div className="max-w-4xl mx-auto space-y-6">

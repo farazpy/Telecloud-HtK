@@ -345,6 +345,12 @@ export async function deleteWorkspaceInDb(
     [workspaceId, tgId]
   );
 
+  // Delete catalog files belonging to this workspace
+  await pool.query(
+    `DELETE FROM user_files WHERE workspace_id = ? AND telegram_id = ?`,
+    [workspaceId, tgId]
+  );
+
   const [userRows] = await pool.query(
     `SELECT active_workspace_id FROM users WHERE telegram_id = ?`,
     [tgId]
