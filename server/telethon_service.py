@@ -105,6 +105,7 @@ class TelethonManager:
         self.qr_status: str = "idle"
         self.qr_user: Optional[Dict[str, Any]] = None
         self.qr_error: Optional[str] = None
+        self.bot_token: Optional[str] = None
 
         self.load_config()
 
@@ -138,6 +139,7 @@ class TelethonManager:
                     self.lang_code = cfg.get("lang_code") or "en"
                     self.system_lang_code = cfg.get("system_lang_code") or "en"
                     self.proxy_url = cfg.get("proxy_url") or os.environ.get("TELEGRAM_PROXY_URL") or ""
+                    self.bot_token = cfg.get("bot_token")
             except Exception as e:
                 logger.error(f"Error loading config: {e}")
 
@@ -154,7 +156,8 @@ class TelethonManager:
                     "app_version": self.app_version,
                     "lang_code": self.lang_code,
                     "system_lang_code": self.system_lang_code,
-                    "proxy_url": self.proxy_url
+                    "proxy_url": self.proxy_url,
+                    "bot_token": self.bot_token
                 }, f, indent=2)
         except Exception as e:
             logger.error(f"Error saving config: {e}")
@@ -299,6 +302,7 @@ class TelethonManager:
             self.api_id = api_id
             self.api_hash = api_hash
             self.session_str = session.save()
+            self.bot_token = bot_token
             self.storage_chat = storage_chat
             self.is_connected = True
             self.active_user = {
@@ -1002,7 +1006,8 @@ async def handle_session_data(request: web.Request):
         "device_model": manager.device_model,
         "system_version": manager.system_version,
         "app_version": manager.app_version,
-        "proxy_url": manager.proxy_url
+        "proxy_url": manager.proxy_url,
+        "bot_token": manager.bot_token
     })
 
 async def handle_connect(request: web.Request):

@@ -138,7 +138,9 @@ export async function initDb() {
     try { await pool.query(`ALTER TABLE users ADD COLUMN session_api_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN session_api_hash VARCHAR(100) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN last_active_at DATETIME DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE users ADD COLUMN bot_token VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;`); } catch {}
+    try { await pool.query(`ALTER TABLE telegram_system_sessions ADD COLUMN bot_token VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_name VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN download_password VARCHAR(255) DEFAULT NULL;`); } catch {}
@@ -508,6 +510,7 @@ export async function saveUserToDb(user: {
   storage_chat?: string;
   api_key?: string;
   session_str?: string;
+  bot_token?: string | null;
 }) {
   const tgId = BigInt(user.telegram_id);
   const firstName = user.first_name || '';
@@ -516,6 +519,7 @@ export async function saveUserToDb(user: {
   const phone = user.phone || '';
   const storageChat = user.storage_chat || 'me';
   const sessionStr = user.session_str || null;
+  const botToken = user.bot_token || null;
 
   if (!pool || !isDbConnected) {
     console.warn('[MySQL Warning] saveUserToDb called while MySQL is disconnected.');
@@ -523,7 +527,7 @@ export async function saveUserToDb(user: {
   }
 
   const [existing] = await pool.query(
-    `SELECT api_key, session_str FROM users WHERE telegram_id = ?`,
+    `SELECT api_key, session_str, bot_token FROM users WHERE telegram_id = ?`,
     [tgId.toString()]
   );
   let apiKey = (existing as any[])[0]?.api_key || user.api_key;
@@ -531,10 +535,11 @@ export async function saveUserToDb(user: {
     apiKey = generateApiKey();
   }
   const effectiveSessionStr = sessionStr || (existing as any[])[0]?.session_str || null;
+  const effectiveBotToken = botToken || (existing as any[])[0]?.bot_token || null;
 
   await pool.query(
-    `INSERT INTO users (telegram_id, first_name, last_name, username, phone, storage_chat, api_key, session_str, session_status, session_expires_at, last_login)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())
+    `INSERT INTO users (telegram_id, first_name, last_name, username, phone, storage_chat, api_key, session_str, bot_token, session_status, session_expires_at, last_login)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())
      ON DUPLICATE KEY UPDATE
        first_name = VALUES(first_name),
        last_name = VALUES(last_name),
@@ -543,10 +548,11 @@ export async function saveUserToDb(user: {
        storage_chat = VALUES(storage_chat),
        api_key = COALESCE(api_key, VALUES(api_key)),
        session_str = COALESCE(VALUES(session_str), session_str),
+       bot_token = COALESCE(VALUES(bot_token), bot_token),
        session_status = 'active',
        session_expires_at = COALESCE(session_expires_at, DATE_ADD(NOW(), INTERVAL 30 DAY)),
        last_login = NOW()`,
-    [tgId.toString(), firstName, lastName, username, phone, storageChat, apiKey, effectiveSessionStr]
+    [tgId.toString(), firstName, lastName, username, phone, storageChat, apiKey, effectiveSessionStr, effectiveBotToken]
   );
   return { success: true, api_key: apiKey };
 }
@@ -722,6 +728,7 @@ export async function getTelegramSystemSessionFromDb(): Promise<{
   session_str: string | null;
   storage_chat: string;
   active_user: any;
+  bot_token: string | null;
 } | null> {
   if (!pool || !isDbConnected) return null;
   try {
@@ -741,6 +748,7 @@ export async function getTelegramSystemSessionFromDb(): Promise<{
       session_str: r.session_str,
       storage_chat: r.storage_chat || 'me',
       active_user: userObj || null,
+      bot_token: r.bot_token || null,
     };
   } catch (err: any) {
     console.warn(`[MySQL] Notice getting telegram session: ${err.message}`);
@@ -754,19 +762,21 @@ export async function saveTelegramSystemSessionToDb(data: {
   session_str: string;
   storage_chat?: string;
   active_user?: any;
+  bot_token?: string | null;
 }): Promise<boolean> {
   if (!pool || !isDbConnected) return false;
   try {
     const userJson = data.active_user ? JSON.stringify(data.active_user) : null;
     await pool.query(
-      `INSERT INTO telegram_system_sessions (id, api_id, api_hash, session_str, storage_chat, active_user, updated_at)
-       VALUES (1, ?, ?, ?, ?, ?, NOW())
+      `INSERT INTO telegram_system_sessions (id, api_id, api_hash, session_str, storage_chat, active_user, bot_token, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, NOW())
        ON DUPLICATE KEY UPDATE 
          api_id = VALUES(api_id),
          api_hash = VALUES(api_hash),
          session_str = VALUES(session_str),
          storage_chat = VALUES(storage_chat),
          active_user = VALUES(active_user),
+         bot_token = VALUES(bot_token),
          updated_at = NOW()`,
       [
         data.api_id || null,
@@ -774,6 +784,7 @@ export async function saveTelegramSystemSessionToDb(data: {
         data.session_str,
         data.storage_chat || 'me',
         userJson,
+        data.bot_token || null,
       ]
     );
     console.log('[MySQL] Telegram MTProto session securely saved to MySQL database.');
@@ -803,6 +814,7 @@ export async function saveUserTelegramSessionInDb(
     session_str: string;
     api_id?: number | null;
     api_hash?: string | null;
+    bot_token?: string | null;
   }
 ): Promise<boolean> {
   if (!pool || !isDbConnected) return false;
@@ -813,12 +825,14 @@ export async function saveUserTelegramSessionInDb(
     await pool.query(
       `UPDATE users 
        SET session_str = ?,
+           bot_token = COALESCE(?, bot_token),
            session_status = 'active',
            session_expires_at = DATE_ADD(NOW(), INTERVAL 30 DAY),
            last_login = NOW()
        WHERE telegram_id = ?`,
       [
         sessionData.session_str,
+        sessionData.bot_token || null,
         tgId,
       ]
     );
@@ -830,11 +844,11 @@ export async function saveUserTelegramSessionInDb(
          SET session_api_id = ?,
              session_api_hash = ?
          WHERE telegram_id = ?`,
-        [
-          sessionData.api_id || 27254692,
-          sessionData.api_hash || '9f6f826a62b78378292fd224e943cb65',
-          tgId
-        ]
+         [
+           sessionData.api_id || 27254692,
+           sessionData.api_hash || '9f6f826a62b78378292fd224e943cb65',
+           tgId
+         ]
       );
     } catch {}
 

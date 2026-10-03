@@ -171,8 +171,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.5.6
-  const APP_VERSION = "v1.5.6";
+  // App Version in Header - Incremented to v1.5.7
+  const APP_VERSION = "v1.5.7";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -508,6 +508,8 @@ export default function App() {
   const [loadingChats, setLoadingChats] = useState<boolean>(false);
   const [chatSuccessMessage, setChatSuccessMessage] = useState<string | null>(null);
   const [customChatId, setCustomChatId] = useState<string>('');
+  const [testingConnection, setTestingConnection] = useState<boolean>(false);
+  const [testConnectionResult, setTestConnectionResult] = useState<{ success: boolean; message: string } | null>(null);
 
   // Settings / Connect form
   const [authMode, setAuthMode] = useState<'qr' | 'phone' | 'bot' | 'session'>('qr');
@@ -956,11 +958,43 @@ export default function App() {
     }
   };
 
-  const handleCustomChatSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleCustomChatSubmit = (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!customChatId.trim()) return;
     selectStorageDestination(customChatId.trim(), `Custom Chat (${customChatId.trim()})`);
     setCustomChatId('');
+  };
+
+  const handleTestConnection = async (chatIdToTest: string) => {
+    if (!chatIdToTest.trim()) return;
+    setTestingConnection(true);
+    setTestConnectionResult(null);
+    try {
+      const res = await fetch('/api/storage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storage_chat: chatIdToTest.trim() })
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setTestConnectionResult({
+          success: true,
+          message: `Connection Verified! Successfully resolved entity: "${data.entity_name || chatIdToTest.trim()}"`
+        });
+      } else {
+        setTestConnectionResult({
+          success: false,
+          message: data.error || 'Failed to resolve entity. Make sure your bot is an Administrator in this channel or group.'
+        });
+      }
+    } catch (err: any) {
+      setTestConnectionResult({
+        success: false,
+        message: err.message || 'Connection test failed.'
+      });
+    } finally {
+      setTestingConnection(false);
+    }
   };
 
   const validatePhoneNumber = (country: CountryInfo, digits: string) => {
@@ -4625,16 +4659,18 @@ export default function App() {
                   </p>
                 </div>
 
-                <button
-                  onClick={fetchAvailableChats}
-                  disabled={loadingChats}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold border shadow-xs flex items-center space-x-2 transition self-start sm:self-auto ${
-                    darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
-                  }`}
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${loadingChats ? 'animate-spin text-sky-500' : ''}`} />
-                  <span>{loadingChats ? 'Scanning Chats...' : 'Refresh Chats'}</span>
-                </button>
+                {!user?.is_bot && (
+                  <button
+                    onClick={fetchAvailableChats}
+                    disabled={loadingChats}
+                    className={`px-4 py-2 rounded-xl text-xs font-bold border shadow-xs flex items-center space-x-2 transition self-start sm:self-auto ${
+                      darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                    }`}
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${loadingChats ? 'animate-spin text-sky-500' : ''}`} />
+                    <span>{loadingChats ? 'Scanning Chats...' : 'Refresh Chats'}</span>
+                  </button>
+                )}
               </div>
 
               {/* Success Notification Banner */}
@@ -4720,153 +4756,248 @@ export default function App() {
               </div>
 
               {/* Visual Chat Selection Grid */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className={`text-xs font-extrabold uppercase tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                    Choose Destination Chat
-                  </h3>
-                  <span className={`text-xs ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Click any destination to switch instantly</span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {/* OPTION 1: Self (Saved Messages) - Pinned First */}
-                  <div
-                    onClick={() => selectStorageDestination('me', 'Self (Saved Messages)')}
-                    className={`cursor-pointer rounded-3xl p-5 border transition flex flex-col justify-between space-y-4 relative ${
-                      storageChat === 'me'
-                        ? (darkMode ? 'bg-sky-950/80 border-sky-500 ring-2 ring-sky-500/30' : 'bg-gradient-to-br from-sky-50 to-indigo-50/40 border-sky-400 ring-2 ring-sky-400/50 shadow-md')
-                        : cardBg
-                    }`}
-                  >
-                    <div className="flex items-start justify-between">
-                      <div className="flex items-center space-x-3">
-                        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xs ${
-                          storageChat === 'me' ? 'bg-sky-500 text-white' : (darkMode ? 'bg-sky-950 text-sky-400' : 'bg-sky-100 text-sky-600')
-                        }`}>
-                          <UserCheck className="w-6 h-6" />
-                        </div>
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <h4 className={`font-extrabold text-sm ${darkMode ? 'text-white' : 'text-slate-900'}`}>Self (Saved Messages)</h4>
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                              darkMode ? 'bg-sky-950 text-sky-300 border-sky-800' : 'bg-sky-100 text-sky-700 border-sky-200'
-                            }`}>
-                              Private & Default
-                            </span>
-                          </div>
-                          <p className={`text-[11px] font-mono mt-0.5 ${darkMode ? 'text-slate-400' : 'text-slate-400'}`}>Destination ID: me</p>
-                        </div>
-                      </div>
-
-                      {storageChat === 'me' && (
-                        <div className="w-6 h-6 rounded-full bg-sky-500 text-white flex items-center justify-center shadow-xs">
-                          <Check className="w-3.5 h-3.5" />
-                        </div>
-                      )}
+              {user?.is_bot ? (
+                <div className={`p-6 rounded-3xl space-y-4 transition-colors duration-200 border ${
+                  darkMode ? 'bg-slate-900 border-indigo-500/20' : 'bg-slate-50 border-indigo-200/50'
+                }`}>
+                  <div className="flex items-center space-x-3.5">
+                    <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-sky-400 to-indigo-600 text-white flex items-center justify-center shadow-lg">
+                      <Bot className="w-6 h-6" />
                     </div>
-
-                    <p className={`text-xs leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                      Your personal Telegram "Saved Messages" chat. 100% private to your account. Files uploaded here are permanently accessible and never shared with anyone.
-                    </p>
-
-                    <div className={`flex items-center justify-between pt-2 border-t text-xs ${darkMode ? 'border-slate-800' : 'border-slate-200/60'}`}>
-                      <span className="font-bold text-sky-400">Recommended for personal vaults</span>
-                      <span className={`font-extrabold ${storageChat === 'me' ? 'text-sky-400' : 'text-slate-400'}`}>
-                        {storageChat === 'me' ? '● Currently Active' : 'Click to Select'}
-                      </span>
+                    <div>
+                      <h4 className={`font-extrabold text-sm ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                        Telegram Bot Storage Mode Active
+                      </h4>
+                      <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Telegram bots cannot fetch active chat dialogs automatically. Please specify your target storage channel or group ID below.
+                      </p>
                     </div>
                   </div>
 
-                  {/* OTHER FETCHED CHATS FROM TELEGRAM DIALOGS */}
-                  {availableChats
-                    .filter((c) => c.id !== 'me')
-                    .map((chat) => {
-                      const isSelected = storageChat === chat.id;
-                      return (
-                        <div
-                          key={chat.id}
-                          onClick={() => selectStorageDestination(chat.id, chat.title)}
-                          className={`cursor-pointer rounded-3xl p-5 border transition flex flex-col justify-between space-y-4 relative ${
-                            isSelected
-                              ? (darkMode ? 'bg-indigo-950/80 border-indigo-500 ring-2 ring-indigo-500/30' : 'bg-gradient-to-br from-indigo-50 to-purple-50/40 border-indigo-400 ring-2 ring-indigo-400/50 shadow-md')
-                              : cardBg
+                  <div className={`p-5 rounded-2xl border text-xs space-y-4 ${subCardBg}`}>
+                    <div className="space-y-3">
+                      <label className={`block font-bold mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                        Storage Destination Channel / Chat ID
+                      </label>
+                      <input
+                        type="text"
+                        value={customChatId}
+                        onChange={(e) => setCustomChatId(e.target.value)}
+                        placeholder="e.g. -1001234567890 or @my_storage_channel"
+                        className={`w-full rounded-xl px-4 py-2.5 text-xs font-mono border focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 ${
+                          darkMode ? 'bg-slate-950 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
+                        }`}
+                      />
+                      
+                      <div className="flex flex-col sm:flex-row gap-2.5">
+                        <button
+                          type="button"
+                          disabled={testingConnection || !customChatId.trim()}
+                          onClick={() => handleTestConnection(customChatId)}
+                          className={`flex-1 px-5 py-2.5 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-1.5 active:scale-95 cursor-pointer ${
+                            darkMode 
+                              ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-200' 
+                              : 'bg-white hover:bg-slate-50 border-slate-200 text-slate-700'
                           }`}
                         >
-                          <div className="flex items-start justify-between">
-                            <div className="flex items-center space-x-3">
-                              <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xs ${
-                                isSelected ? 'bg-indigo-600 text-white' : (darkMode ? 'bg-indigo-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600')
-                              }`}>
-                                <Radio className="w-5 h-5" />
-                              </div>
-                              <div className="min-w-0">
-                                <div className="flex items-center space-x-2">
-                                  <h4 className={`font-extrabold text-sm truncate max-w-[160px] ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                                    {chat.title}
-                                  </h4>
-                                  <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
-                                    darkMode ? 'bg-indigo-950 text-indigo-300 border-indigo-800' : 'bg-indigo-50 text-indigo-700 border-indigo-200'
-                                  }`}>
-                                    {chat.badge || 'Channel/Group'}
-                                  </span>
-                                </div>
-                                <p className={`text-[11px] font-mono mt-0.5 truncate ${darkMode ? 'text-slate-400' : 'text-slate-400'}`}>
-                                  ID: {chat.id}
-                                </p>
-                              </div>
-                            </div>
+                          {testingConnection ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Radio className="w-4 h-4 text-sky-400" />}
+                          <span>{testingConnection ? 'Testing Connection...' : 'Test Connection'}</span>
+                        </button>
 
-                            {isSelected && (
-                              <div className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-xs">
-                                <Check className="w-3.5 h-3.5" />
-                              </div>
-                            )}
+                        <button
+                          type="button"
+                          disabled={testingConnection || !customChatId.trim()}
+                          onClick={() => handleCustomChatSubmit(undefined)}
+                          className="flex-1 px-5 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-xs font-bold transition shadow-md shadow-sky-500/10 flex items-center justify-center space-x-1.5 active:scale-95 cursor-pointer"
+                        >
+                          <Check className="w-4 h-4" />
+                          <span>Verify & Save Destination</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Connection Test Results */}
+                    {testConnectionResult && (
+                      <div className={`p-4 rounded-xl text-xs flex flex-col gap-1 border animate-in fade-in duration-200 ${
+                        testConnectionResult.success
+                          ? (darkMode ? 'bg-emerald-950/80 border-emerald-800 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-800')
+                          : (darkMode ? 'bg-rose-950/80 border-rose-800 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-800')
+                      }`}>
+                        <div className="flex items-center space-x-2 font-bold">
+                          {testConnectionResult.success ? (
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                          ) : (
+                            <AlertCircle className="w-4 h-4 text-rose-400 flex-shrink-0" />
+                          )}
+                          <span>{testConnectionResult.success ? 'Success!' : 'Verification Failed'}</span>
+                        </div>
+                        <p className="leading-relaxed opacity-90">{testConnectionResult.message}</p>
+                      </div>
+                    )}
+
+                    <div className={`text-[11px] leading-relaxed p-3.5 rounded-xl border ${
+                      darkMode ? 'bg-slate-950/40 border-slate-800 text-slate-400' : 'bg-white border-slate-100 text-slate-500'
+                    }`}>
+                      <p className="font-semibold text-slate-300 mb-1">Requirements for Bot Storage Destination:</p>
+                      <ul className="list-disc list-inside space-y-0.5">
+                        <li>The bot must be added as an <strong>Administrator</strong> to your group or channel.</li>
+                        <li>The bot must have permissions to <strong>Post Messages</strong> and <strong>Edit Messages</strong>.</li>
+                        <li>Channel IDs usually start with <code className="font-mono text-sky-400 font-bold">-100</code> (e.g. <code className="font-mono text-slate-400">-1002345678901</code>).</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className={`text-xs font-extrabold uppercase tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                      Choose Destination Chat
+                    </h3>
+                    <span className={`text-xs ${darkMode ? 'text-slate-500' : 'text-slate-400'}`}>Click any destination to switch instantly</span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* OPTION 1: Self (Saved Messages) - Pinned First */}
+                    <div
+                      onClick={() => selectStorageDestination('me', 'Self (Saved Messages)')}
+                      className={`cursor-pointer rounded-3xl p-5 border transition flex flex-col justify-between space-y-4 relative ${
+                        storageChat === 'me'
+                          ? (darkMode ? 'bg-sky-950/80 border-sky-500 ring-2 ring-sky-500/30' : 'bg-gradient-to-br from-sky-50 to-indigo-50/40 border-sky-400 ring-2 ring-sky-400/50 shadow-md')
+                          : cardBg
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center space-x-3">
+                          <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xs ${
+                            storageChat === 'me' ? 'bg-sky-500 text-white' : (darkMode ? 'bg-sky-950 text-sky-400' : 'bg-sky-100 text-sky-600')
+                          }`}>
+                            <UserCheck className="w-6 h-6" />
                           </div>
-
-                          <p className={`text-xs leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
-                            {chat.description || 'Files uploaded through TeleCloud will be stored in this chat/channel.'}
-                          </p>
-
-                          <div className={`flex items-center justify-between pt-2 border-t text-xs ${darkMode ? 'border-slate-800' : 'border-slate-200/60'}`}>
-                            <span className={`font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Storage Channel</span>
-                            <span className={`font-extrabold ${isSelected ? 'text-indigo-400' : 'text-slate-400'}`}>
-                              {isSelected ? '● Currently Active' : 'Click to Select'}
-                            </span>
+                          <div>
+                            <div className="flex items-center space-x-2">
+                              <h4 className={`font-extrabold text-sm ${darkMode ? 'text-white' : 'text-slate-900'}`}>Self (Saved Messages)</h4>
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                darkMode ? 'bg-sky-950 text-sky-300 border-sky-800' : 'bg-sky-100 text-sky-700 border-sky-200'
+                              }`}>
+                                Private & Default
+                              </span>
+                            </div>
+                            <p className={`text-[11px] font-mono mt-0.5 ${darkMode ? 'text-slate-400' : 'text-slate-400'}`}>Destination ID: me</p>
                           </div>
                         </div>
-                      );
-                    })}
+
+                        {storageChat === 'me' && (
+                          <div className="w-6 h-6 rounded-full bg-sky-500 text-white flex items-center justify-center shadow-xs">
+                            <Check className="w-3.5 h-3.5" />
+                          </div>
+                        )}
+                      </div>
+
+                      <p className={`text-xs leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                        Your personal Telegram "Saved Messages" chat. 100% private to your account. Files uploaded here are permanently accessible and never shared with anyone.
+                      </p>
+
+                      <div className={`flex items-center justify-between pt-2 border-t text-xs ${darkMode ? 'border-slate-800' : 'border-slate-200/60'}`}>
+                        <span className="font-bold text-sky-400">Recommended for personal vaults</span>
+                        <span className={`font-extrabold ${storageChat === 'me' ? 'text-sky-400' : 'text-slate-400'}`}>
+                          {storageChat === 'me' ? '● Currently Active' : 'Click to Select'}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* OTHER FETCHED CHATS FROM TELEGRAM DIALOGS */}
+                    {availableChats
+                      .filter((c) => c.id !== 'me')
+                      .map((chat) => {
+                        const isSelected = storageChat === chat.id;
+                        return (
+                          <div
+                            key={chat.id}
+                            onClick={() => selectStorageDestination(chat.id, chat.title)}
+                            className={`cursor-pointer rounded-3xl p-5 border transition flex flex-col justify-between space-y-4 relative ${
+                              isSelected
+                                ? (darkMode ? 'bg-indigo-950/80 border-indigo-500 ring-2 ring-indigo-500/30' : 'bg-gradient-to-br from-indigo-50 to-purple-50/40 border-indigo-400 ring-2 ring-indigo-400/50 shadow-md')
+                                : cardBg
+                            }`}
+                          >
+                            <div className="flex items-start justify-between">
+                              <div className="flex items-center space-x-3">
+                                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shadow-xs ${
+                                  isSelected ? 'bg-indigo-600 text-white' : (darkMode ? 'bg-indigo-950 text-indigo-400' : 'bg-indigo-50 text-indigo-600')
+                                }`}>
+                                  <Radio className="w-5 h-5" />
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="flex items-center space-x-2">
+                                    <h4 className={`font-extrabold text-sm truncate max-w-[160px] ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                                      {chat.title}
+                                    </h4>
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                      darkMode ? 'bg-indigo-950 text-indigo-300 border-indigo-800' : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                                    }`}>
+                                      {chat.badge || 'Channel/Group'}
+                                    </span>
+                                  </div>
+                                  <p className={`text-[11px] font-mono mt-0.5 truncate ${darkMode ? 'text-slate-400' : 'text-slate-400'}`}>
+                                    ID: {chat.id}
+                                  </p>
+                                </div>
+                              </div>
+
+                              {isSelected && (
+                                <div className="w-6 h-6 rounded-full bg-indigo-600 text-white flex items-center justify-center shadow-xs">
+                                  <Check className="w-3.5 h-3.5" />
+                                </div>
+                              )}
+                            </div>
+
+                            <p className={`text-xs leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                              {chat.description || 'Files uploaded through TeleCloud will be stored in this chat/channel.'}
+                            </p>
+
+                            <div className={`flex items-center justify-between pt-2 border-t text-xs ${darkMode ? 'border-slate-800' : 'border-slate-200/60'}`}>
+                              <span className={`font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Storage Channel</span>
+                              <span className={`font-extrabold ${isSelected ? 'text-indigo-400' : 'text-slate-400'}`}>
+                                {isSelected ? '● Currently Active' : 'Click to Select'}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Custom Channel or Group ID Form */}
-              <div className={`p-6 rounded-3xl space-y-4 transition-colors duration-200 ${cardBg}`}>
-                <h4 className={`font-extrabold text-sm flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                  <Layers className="w-4 h-4 text-sky-500" />
-                  <span>Specify Custom Telegram Channel or Group ID</span>
-                </h4>
-                <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                  If you manage a private channel or group not listed above, enter its ID (e.g. <code className="text-sky-400 font-mono font-bold">-1001234567890</code>) or public username. Ensure your Telegram account or bot has admin rights.
-                </p>
+              {!user?.is_bot && (
+                <div className={`p-6 rounded-3xl space-y-4 transition-colors duration-200 ${cardBg}`}>
+                  <h4 className={`font-extrabold text-sm flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    <Layers className="w-4 h-4 text-sky-500" />
+                    <span>Specify Custom Telegram Channel or Group ID</span>
+                  </h4>
+                  <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    If you manage a private channel or group not listed above, enter its ID (e.g. <code className="text-sky-400 font-mono font-bold">-1001234567890</code>) or public username. Ensure your Telegram account has admin rights.
+                  </p>
 
-                <form onSubmit={handleCustomChatSubmit} className="flex flex-col sm:flex-row gap-2.5">
-                  <input
-                    type="text"
-                    value={customChatId}
-                    onChange={(e) => setCustomChatId(e.target.value)}
-                    placeholder="e.g. -1001234567890 or @my_storage_channel"
-                    className={`flex-1 rounded-xl px-4 py-2.5 text-xs font-mono ${inputBg}`}
-                  />
-                  <button
-                    type="submit"
-                    disabled={!customChatId.trim()}
-                    className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 disabled:opacity-50 text-white text-xs font-bold transition shadow-xs flex items-center justify-center space-x-1.5"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>Apply Destination</span>
-                  </button>
-                </form>
-              </div>
+                  <form onSubmit={handleCustomChatSubmit} className="flex flex-col sm:flex-row gap-2.5">
+                    <input
+                      type="text"
+                      value={customChatId}
+                      onChange={(e) => setCustomChatId(e.target.value)}
+                      placeholder="e.g. -1001234567890 or @my_storage_channel"
+                      className={`flex-1 rounded-xl px-4 py-2.5 text-xs font-mono ${inputBg}`}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!customChatId.trim()}
+                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 disabled:opacity-50 text-white text-xs font-bold transition shadow-xs flex items-center justify-center space-x-1.5"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>Apply Destination</span>
+                    </button>
+                  </form>
+                </div>
+              )}
 
               {/* API Integrity & Developer Access Keys Card */}
               <div className={`p-6 rounded-3xl space-y-5 transition-colors duration-200 border ${cardBg}`}>

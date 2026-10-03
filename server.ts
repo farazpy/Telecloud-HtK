@@ -225,22 +225,28 @@ function getShortLink(messageId: number | string, _req?: Request): string {
 }
 
 // Synchronize active Telegram MTProto Session from Python to MySQL (User 30-day & Admin Fallback)
-async function syncSessionToMysql(telegramId?: number | string, explicitSessionStr?: string) {
+async function syncSessionToMysql(telegramId?: number | string, explicitSessionStr?: string, explicitBotToken?: string) {
   try {
     let sessionStr = explicitSessionStr;
     let apiId = 27254692;
     let apiHash = '9f6f826a62b78378292fd224e943cb65';
     let storageChat = 'me';
     let activeUser: any = null;
+    let botToken: string | null = explicitBotToken || null;
 
-    if (!sessionStr) {
+    if (!sessionStr || !botToken) {
       const sessionRes = await forwardToPython('GET', '/session_data');
-      if (sessionRes.status === 200 && sessionRes.data?.session_str) {
-        sessionStr = sessionRes.data.session_str;
-        apiId = sessionRes.data.api_id || apiId;
-        apiHash = sessionRes.data.api_hash || apiHash;
-        storageChat = sessionRes.data.storage_chat || storageChat;
-        activeUser = sessionRes.data.user;
+      if (sessionRes.status === 200) {
+        if (!sessionStr) {
+          sessionStr = sessionRes.data?.session_str;
+        }
+        apiId = sessionRes.data?.api_id || apiId;
+        apiHash = sessionRes.data?.api_hash || apiHash;
+        storageChat = sessionRes.data?.storage_chat || storageChat;
+        activeUser = sessionRes.data?.user;
+        if (!botToken) {
+          botToken = sessionRes.data?.bot_token || null;
+        }
       }
     }
 
@@ -252,6 +258,7 @@ async function syncSessionToMysql(telegramId?: number | string, explicitSessionS
         session_str: sessionStr,
         storage_chat: storageChat,
         active_user: activeUser,
+        bot_token: botToken,
       });
 
       // 2. Persist 30-day user session in MySQL
@@ -261,6 +268,7 @@ async function syncSessionToMysql(telegramId?: number | string, explicitSessionS
           session_str: sessionStr,
           api_id: apiId,
           api_hash: apiHash,
+          bot_token: botToken,
         });
       }
       console.log(`[MySQL Session] Telegram MTProto session synced to MySQL for user #${tgId || 'admin'}.`);
@@ -301,12 +309,18 @@ async function restoreSessionFromMysql(): Promise<boolean> {
     }
 
     console.log('[MySQL Session] Restoring Telegram MTProto session from MySQL database...');
-    const connectRes = await forwardToPython('POST', '/connect', {
+    const connectPayload: any = {
       api_id: saved.api_id || 27254692,
       api_hash: saved.api_hash || '9f6f826a62b78378292fd224e943cb65',
-      string_session: saved.session_str,
       storage_chat: saved.storage_chat || 'me',
-    });
+    };
+    if (saved.bot_token) {
+      connectPayload.bot_token = saved.bot_token;
+    } else {
+      connectPayload.string_session = saved.session_str;
+    }
+
+    const connectRes = await forwardToPython('POST', '/connect', connectPayload);
 
     if (connectRes.status === 200) {
       console.log('[MySQL Session] Telegram MTProto session successfully restored from MySQL!');
@@ -451,10 +465,11 @@ app.post('/api/connect', async (req: Request, res: Response) => {
       username: result.data.user.username,
       storage_chat: req.body.storage_chat || 'me',
       session_str: sessionStr,
+      bot_token: req.body.bot_token || undefined,
     }).catch((e) => console.error('[MySQL] saveUserToDb error:', e));
 
     // Persist session to MySQL (User 30-Day & System Fallback)
-    await syncSessionToMysql(result.data.user.id, sessionStr);
+    await syncSessionToMysql(result.data.user.id, sessionStr, req.body.bot_token);
   }
   res.status(result.status).json(result.data);
 });
