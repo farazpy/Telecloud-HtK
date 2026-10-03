@@ -942,6 +942,23 @@ export interface SystemSettingsMap {
   max_parallel_uploads: string;
   auto_reconnect: string;
   brand_name: string;
+  app_tagline: string;
+  app_logo_url: string;
+  app_favicon_url: string;
+  app_badge_text: string;
+  contact_email: string;
+  contact_phone: string;
+  contact_address: string;
+  support_telegram_url: string;
+  support_discord_url: string;
+  github_url: string;
+  twitter_url: string;
+  copyright_text: string;
+  custom_domain: string;
+  primary_color: string;
+  enable_public_pricing: string;
+  enable_contact_form: string;
+  enable_api_console: string;
 }
 
 const DEFAULT_SYSTEM_SETTINGS: SystemSettingsMap = {
@@ -957,6 +974,23 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettingsMap = {
   max_parallel_uploads: '4',
   auto_reconnect: 'true',
   brand_name: 'TeleCloud Vault',
+  app_tagline: 'Decentralized MTProto Cloud Storage & High-Speed Direct CDN',
+  app_logo_url: '',
+  app_favicon_url: '',
+  app_badge_text: 'MTProto 2.0 Cloud',
+  contact_email: 'support@htknetwork.in',
+  contact_phone: '+91 74985 84149',
+  contact_address: 'Global Technology Park, Server Hub #402',
+  support_telegram_url: 'https://t.me/TeleCloudSupport',
+  support_discord_url: '',
+  github_url: 'https://github.com',
+  twitter_url: 'https://x.com',
+  copyright_text: '© 2026 TeleCloud MTProto Engine. All rights reserved.',
+  custom_domain: 's3.htknetwork.in',
+  primary_color: '#0284c7',
+  enable_public_pricing: 'true',
+  enable_contact_form: 'true',
+  enable_api_console: 'true',
 };
 
 export async function getSystemSettingsFromDb(): Promise<SystemSettingsMap> {

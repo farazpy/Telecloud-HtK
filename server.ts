@@ -605,6 +605,36 @@ app.post('/api/user/delete-account', async (req: Request, res: Response) => {
   }
 });
 
+// Public Settings endpoint (Exposes brand, logo, favicon, contact details safely)
+app.get(['/api/public-settings', '/api/settings/public'], async (_req: Request, res: Response) => {
+  try {
+    const settings = await getSystemSettingsFromDb();
+    const publicData = {
+      brand_name: settings.brand_name || 'TeleCloud Vault',
+      app_tagline: settings.app_tagline || 'Decentralized MTProto Cloud Storage & High-Speed Direct CDN',
+      app_logo_url: settings.app_logo_url || '',
+      app_favicon_url: settings.app_favicon_url || '',
+      app_badge_text: settings.app_badge_text || 'MTProto 2.0 Cloud',
+      contact_email: settings.contact_email || 'support@htknetwork.in',
+      contact_phone: settings.contact_phone || '+91 74985 84149',
+      contact_address: settings.contact_address || 'Global Technology Park, Server Hub #402',
+      support_telegram_url: settings.support_telegram_url || 'https://t.me/TeleCloudSupport',
+      support_discord_url: settings.support_discord_url || '',
+      github_url: settings.github_url || 'https://github.com',
+      twitter_url: settings.twitter_url || 'https://x.com',
+      copyright_text: settings.copyright_text || '© 2026 TeleCloud MTProto Engine. All rights reserved.',
+      custom_domain: settings.custom_domain || process.env.CUSTOM_DOMAIN || 's3.htknetwork.in',
+      primary_color: settings.primary_color || '#0284c7',
+      enable_public_pricing: settings.enable_public_pricing !== 'false',
+      enable_contact_form: settings.enable_contact_form !== 'false',
+      enable_api_console: settings.enable_api_console !== 'false',
+    };
+    return res.json({ success: true, settings: publicData });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ============================================================================
 // ADMIN PANEL API ENDPOINTS (/admin Protected by PIN 9890 / Custom PIN)
 // ============================================================================

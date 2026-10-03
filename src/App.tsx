@@ -171,8 +171,55 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.6.1
-  const APP_VERSION = "v1.6.1";
+  // App Version in Header - Incremented to v1.6.2
+  const APP_VERSION = "v1.6.2";
+
+  // Dynamic Public Branding from MySQL (Logo, Favicon, Title, Contact Info)
+  const [publicBranding, setPublicBranding] = useState<{
+    brand_name?: string;
+    app_tagline?: string;
+    app_logo_url?: string;
+    app_favicon_url?: string;
+    app_badge_text?: string;
+    contact_email?: string;
+    contact_phone?: string;
+    contact_address?: string;
+    support_telegram_url?: string;
+    support_discord_url?: string;
+    github_url?: string;
+    twitter_url?: string;
+    copyright_text?: string;
+    enable_public_pricing?: boolean;
+    enable_contact_form?: boolean;
+    enable_api_console?: boolean;
+  }>({
+    brand_name: 'TeleCloud Vault',
+    app_tagline: 'Decentralized MTProto Cloud Storage & High-Speed Direct CDN',
+    app_badge_text: 'MTProto 2.0 Cloud',
+  });
+
+  const fetchPublicBranding = async () => {
+    try {
+      const res = await safeJsonFetch('/api/public-settings');
+      if (res?.success && res.settings) {
+        setPublicBranding(res.settings);
+        if (res.settings.brand_name) {
+          document.title = `${res.settings.brand_name} - Decentralized Cloud Vault`;
+        }
+        if (res.settings.app_favicon_url) {
+          let link: HTMLLinkElement | null = document.querySelector("link[rel~='icon']");
+          if (!link) {
+            link = document.createElement('link');
+            link.rel = 'icon';
+            document.getElementsByTagName('head')[0].appendChild(link);
+          }
+          link.href = res.settings.app_favicon_url;
+        }
+      }
+    } catch (e) {
+      console.warn('Notice loading public branding:', e);
+    }
+  };
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -632,6 +679,7 @@ export default function App() {
   useEffect(() => {
     checkStatus();
     fetchDeviceConfig();
+    fetchPublicBranding();
   }, []);
 
   useEffect(() => {
@@ -1861,35 +1909,10 @@ export default function App() {
   // =========================================================================
   if (currentRoute === '/admin') {
     return (
-      <div className={`min-h-screen ${darkMode ? 'bg-slate-950 text-slate-100' : 'bg-slate-900 text-slate-100'} font-sans relative`}>
-        {/* Top Header */}
-        <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur-md sticky top-0 z-50 px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2.5 cursor-pointer" onClick={() => { setDashboardTab('overview'); navigate('/'); }}>
-            <div className="w-9 h-9 rounded-2xl bg-gradient-to-tr from-cyan-500 to-blue-600 flex items-center justify-center text-white font-bold shadow-md shadow-cyan-500/20">
-              <ShieldCheck className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-extrabold text-white tracking-tight">TeleCloud Master Admin</span>
-                <span className="px-2 py-0.5 text-[10px] font-mono font-bold rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-400/30">
-                  {APP_VERSION}
-                </span>
-              </div>
-              <p className="text-[10px] text-slate-400">PIN Protected System & MySQL Gateway</p>
-            </div>
-          </div>
-          <button
-            onClick={() => { setDashboardTab('overview'); navigate('/'); }}
-            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs font-semibold text-slate-200 hover:text-white border border-slate-700 transition flex items-center gap-1.5 cursor-pointer"
-          >
-            <span>← Exit to Vault</span>
-          </button>
-        </header>
-
-        <main className="py-6">
-          <AdminPanel onClose={() => { setDashboardTab('overview'); navigate('/'); }} onNavigateHome={() => { setDashboardTab('overview'); navigate('/'); }} />
-        </main>
-      </div>
+      <AdminPanel
+        onClose={() => { setDashboardTab('overview'); navigate('/'); }}
+        onNavigateHome={() => { setDashboardTab('overview'); navigate('/'); }}
+      />
     );
   }
 
@@ -1957,9 +1980,20 @@ export default function App() {
                 onClick={() => navigate('/')}
                 className="flex items-center space-x-2 text-left focus:outline-none group"
               >
-                <span className="font-black text-xl tracking-tight bg-gradient-to-r from-sky-400 to-indigo-500 bg-clip-text text-transparent group-hover:opacity-90 transition">
-                  TeleCloud
-                </span>
+                {publicBranding.app_logo_url ? (
+                  <img
+                    src={publicBranding.app_logo_url}
+                    alt={publicBranding.brand_name || 'Logo'}
+                    className="h-8 max-w-[140px] object-contain rounded"
+                    onError={(e) => {
+                      (e.target as HTMLElement).style.display = 'none';
+                    }}
+                  />
+                ) : (
+                  <span className="font-black text-xl tracking-tight bg-gradient-to-r from-sky-400 to-indigo-500 bg-clip-text text-transparent group-hover:opacity-90 transition">
+                    {publicBranding.brand_name || 'TeleCloud'}
+                  </span>
+                )}
                 <span className="px-2 py-0.5 text-[10px] font-mono font-bold bg-sky-500/10 text-sky-400 border border-sky-500/25 rounded-md">
                   {APP_VERSION}
                 </span>
@@ -2547,14 +2581,27 @@ export default function App() {
           </button>
 
           <div className="flex items-center space-x-2">
-            <div className={`w-8 h-8 sm:w-9 sm:h-9 rounded-2xl bg-gradient-to-tr from-sky-500 via-indigo-500 to-purple-600 flex items-center justify-center shadow-md shadow-sky-500/20 ring-2 flex-shrink-0 ${
-              darkMode ? 'ring-slate-700' : 'ring-sky-100'
-            }`}>
-              <Radio className="w-4 h-4 text-white animate-pulse" />
-            </div>
+            {publicBranding.app_logo_url ? (
+              <img
+                src={publicBranding.app_logo_url}
+                alt={publicBranding.brand_name || 'Logo'}
+                className="h-8 max-w-[120px] object-contain rounded"
+                onError={(e) => {
+                  (e.target as HTMLElement).style.display = 'none';
+                }}
+              />
+            ) : (
+              <div className={`w-8 h-8 sm:w-9 sm:h-9 rounded-2xl bg-gradient-to-tr from-sky-500 via-indigo-500 to-purple-600 flex items-center justify-center shadow-md shadow-sky-500/20 ring-2 flex-shrink-0 ${
+                darkMode ? 'ring-slate-700' : 'ring-sky-100'
+              }`}>
+                <Radio className="w-4 h-4 text-white animate-pulse" />
+              </div>
+            )}
             <div>
               <div className="flex items-center space-x-1.5 sm:space-x-2">
-                <span className={`font-extrabold text-sm sm:text-base tracking-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>TeleCloud</span>
+                <span className={`font-extrabold text-sm sm:text-base tracking-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                  {publicBranding.brand_name || 'TeleCloud'}
+                </span>
                 {/* Header Version Number */}
                 <span className={`px-1.5 sm:px-2 py-0.5 text-[10px] sm:text-xs font-mono font-bold rounded-full shadow-2xs backdrop-blur-sm ${
                   darkMode ? 'bg-sky-500/20 text-sky-300 border border-sky-400/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80'
