@@ -38,6 +38,7 @@ import {
   updateSystemSettingsInDb,
   verifyAdminPin,
   getAdminSystemOverview,
+  purgeUserAccountFromDb,
 } from './server/db.ts';
 
 const app = express();
@@ -559,6 +560,49 @@ app.post('/api/disconnect', async (req: Request, res: Response) => {
   await clearTelegramSystemSessionInDb().catch((e) => console.error('[MySQL] clear error:', e));
   const result = await forwardToPython('POST', '/disconnect');
   res.status(result.status).json(result.data);
+});
+
+app.post('/api/user/delete-account', async (req: Request, res: Response) => {
+  const { telegram_id, delete_telegram_files } = req.body;
+  if (!telegram_id) {
+    return res.status(400).json({ error: 'telegram_id is required' });
+  }
+
+  try {
+    const tgId = String(telegram_id);
+    console.log(`[Delete Account] Starting account deletion for user #${tgId}...`);
+
+    if (delete_telegram_files) {
+      // 1. Fetch all user's files from DB
+      const dbFiles = await getUserFilesFromDb(tgId);
+      console.log(`[Delete Account] Found ${dbFiles.length} files to delete from Telegram.`);
+
+      // 2. Loop through and delete from Telegram via MTProto python service
+      for (const file of dbFiles) {
+        if (file.message_id) {
+          try {
+            await forwardToPython('DELETE', `/files/${file.message_id}`);
+          } catch (err: any) {
+            console.warn(`[Delete Account] Failed to delete message #${file.message_id} from Telegram:`, err.message);
+          }
+        }
+      }
+    }
+
+    // 3. Clear sessions and disconnect client from Python service
+    try {
+      await forwardToPython('POST', '/disconnect');
+    } catch {}
+
+    // 4. Delete user records from MySQL
+    await purgeUserAccountFromDb(tgId);
+    console.log(`[Delete Account] MySQL records successfully purged for user #${tgId}.`);
+
+    return res.json({ success: true, message: 'Account, catalog files, and workspace integrations permanently deleted.' });
+  } catch (err: any) {
+    console.error('[Delete Account Error]:', err);
+    return res.status(500).json({ error: err.message || 'Failed to delete account' });
+  }
 });
 
 // ============================================================================

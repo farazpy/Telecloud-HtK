@@ -171,8 +171,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.5.7
-  const APP_VERSION = "v1.5.7";
+  // App Version in Header - Incremented to v1.5.9
+  const APP_VERSION = "v1.5.9";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -529,6 +529,7 @@ export default function App() {
   const [loginQrDataUrl, setLoginQrDataUrl] = useState<string | null>(null);
   const [loginQrLoading, setLoginQrLoading] = useState<boolean>(false);
   const qrPollTimerRef = useRef<any>(null);
+  const qrRefreshTimerRef = useRef<any>(null);
 
   // Phone login flow
   const [phoneCodeHash, setPhoneCodeHash] = useState<string | null>(null);
@@ -600,6 +601,12 @@ export default function App() {
   const [activeMediaStream, setActiveMediaStream] = useState<StorageFile | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showQrForLink, setShowQrForLink] = useState<string | null>(null);
+
+  // Account Deletion Flow State
+  const [deleteTelegramFiles, setDeleteTelegramFiles] = useState<boolean>(false);
+  const [deleteConfirmationText, setDeleteConfirmationText] = useState<string>('');
+  const [deletingAccount, setDeletingAccount] = useState<boolean>(false);
+  const [showDeleteConfirmation, setShowDeleteConfirmation] = useState<boolean>(false);
 
   // Fetch Old Telegram Files State
   const [isFetchingOldFiles, setIsFetchingOldFiles] = useState<boolean>(false);
@@ -949,6 +956,7 @@ export default function App() {
       if (data.success) {
         setStorageChat(data.storage_chat);
         setTargetChatInput(data.storage_chat);
+        setCustomChatId(data.storage_chat);
         setChatSuccessMessage(`Storage destination updated to "${title || data.entity_name || data.storage_chat}" for ${activeWorkspace?.name || 'active workspace'}`);
         setTimeout(() => setChatSuccessMessage(null), 3500);
         await fetchWorkspaces();
@@ -962,8 +970,13 @@ export default function App() {
     if (e) e.preventDefault();
     if (!customChatId.trim()) return;
     selectStorageDestination(customChatId.trim(), `Custom Chat (${customChatId.trim()})`);
-    setCustomChatId('');
   };
+
+  useEffect(() => {
+    if (storageChat && storageChat !== 'me') {
+      setCustomChatId(storageChat);
+    }
+  }, [storageChat]);
 
   const handleTestConnection = async (chatIdToTest: string) => {
     if (!chatIdToTest.trim()) return;
@@ -1083,10 +1096,12 @@ export default function App() {
     }
   };
 
-  const handleStartQrLogin = async () => {
-    stopQrPolling();
-    setLoginQrLoading(true);
-    setAuthError(null);
+  const handleStartQrLogin = async (isSecret: boolean = false) => {
+    if (!isSecret) {
+      stopQrPolling();
+      setLoginQrLoading(true);
+      setAuthError(null);
+    }
     try {
       const data = await safeJsonFetch('/api/qr/start', {
         method: 'POST',
@@ -1113,35 +1128,40 @@ export default function App() {
         });
         setLoginQrDataUrl(qrImg);
 
-        // Start polling for scan verification
-        qrPollTimerRef.current = setInterval(async () => {
-          try {
-            const checkRes = await safeJsonFetch('/api/qr/check', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ password: twoFaPassword || undefined })
-            });
+        if (!isSecret) {
+          // Start polling for scan verification
+          qrPollTimerRef.current = setInterval(async () => {
+            try {
+              const checkRes = await safeJsonFetch('/api/qr/check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password: twoFaPassword || undefined })
+              });
 
-            if (checkRes.status === 'authorized') {
-              stopQrPolling();
-              await checkStatus();
-              setShowAuthModal(false);
-              setDashboardTab('overview');
-            } else if (checkRes.status === 'requires_password') {
-              setNeeds2FA(true);
-            } else if (checkRes.status === 'expired') {
-              stopQrPolling();
-              setAuthError('QR Code expired. Click "Refresh QR Code" to generate a fresh code.');
+              if (checkRes.status === 'authorized') {
+                stopQrPolling();
+                await checkStatus();
+                setShowAuthModal(false);
+                setDashboardTab('overview');
+              } else if (checkRes.status === 'requires_password') {
+                setNeeds2FA(true);
+              } else if (checkRes.status === 'expired') {
+                // Ignore expired status when we are auto-refreshing in the background anyway
+              }
+            } catch {
+              // Keep polling quietly
             }
-          } catch {
-            // Keep polling quietly
-          }
-        }, 2000);
+          }, 2000);
+        }
       }
     } catch (err: any) {
-      setAuthError(err.message || 'Failed to initialize QR code login');
+      if (!isSecret) {
+        setAuthError(err.message || 'Failed to initialize QR code login');
+      }
     } finally {
-      setLoginQrLoading(false);
+      if (!isSecret) {
+        setLoginQrLoading(false);
+      }
     }
   };
 
@@ -1176,14 +1196,31 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    if (showAuthModal && authMode === 'qr' && !loginQrDataUrl && !connected) {
-      handleStartQrLogin();
+  const stopQrRefresh = () => {
+    if (qrRefreshTimerRef.current) {
+      clearInterval(qrRefreshTimerRef.current);
+      qrRefreshTimerRef.current = null;
     }
-    if (!showAuthModal) {
+  };
+
+  useEffect(() => {
+    if (showAuthModal && authMode === 'qr' && !connected) {
+      stopQrRefresh();
+      handleStartQrLogin(false);
+      
+      // Setup secret background refresher every 20 seconds
+      qrRefreshTimerRef.current = setInterval(() => {
+        handleStartQrLogin(true);
+      }, 20000);
+    } else {
+      stopQrRefresh();
       stopQrPolling();
     }
-  }, [showAuthModal, authMode]);
+    return () => {
+      stopQrRefresh();
+      stopQrPolling();
+    };
+  }, [showAuthModal, authMode, connected]);
 
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1313,6 +1350,49 @@ export default function App() {
       setFiles([]);
     } catch (e) {
       console.error('Error disconnecting', e);
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    if (deleteConfirmationText.trim().toUpperCase() !== 'DELETE') {
+      alert('Please type "DELETE" exactly to confirm account deletion.');
+      return;
+    }
+    if (!user?.id) {
+      alert('User ID not found. Deletion cancelled.');
+      return;
+    }
+
+    setDeletingAccount(true);
+    try {
+      const res = await fetch('/api/user/delete-account', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          telegram_id: user.id,
+          delete_telegram_files: deleteTelegramFiles,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        alert('Your account and all associated system records have been permanently deleted.');
+        setConnected(false);
+        setUser(null);
+        setFiles([]);
+        setWorkspaces([]);
+        setActiveWorkspace(null);
+        localStorage.removeItem('telecloud_user_tg_id');
+        setShowDeleteConfirmation(false);
+        setDeleteConfirmationText('');
+        setDashboardTab('overview');
+        navigate('/');
+      } else {
+        alert(data.error || 'Failed to delete account.');
+      }
+    } catch (err: any) {
+      alert(`Deletion failed: ${err.message}`);
+    } finally {
+      setDeletingAccount(false);
     }
   };
 
@@ -5407,6 +5487,111 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
                     <span>Sign Out & Disconnect Telegram Session</span>
                   </button>
                 </div>
+
+                {/* Danger Zone: Permanent Deletion */}
+                <div className="pt-4 border-t border-rose-900/20 dark:border-rose-800/20 space-y-4">
+                  <div className="flex items-center space-x-2 text-rose-500 font-extrabold text-sm">
+                    <AlertCircle className="w-5 h-5 text-rose-500" />
+                    <span>Danger Zone: Permanent Account Deletion</span>
+                  </div>
+                  <p className={`text-xs leading-relaxed ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Delete your profile and completely purge your active sessions, workspaces, and catalog history from our cloud platform.
+                  </p>
+
+                  {!showDeleteConfirmation ? (
+                    <button
+                      type="button"
+                      onClick={() => setShowDeleteConfirmation(true)}
+                      className={`w-full py-3 rounded-2xl font-bold text-xs border shadow-xs transition flex items-center justify-center space-x-2 ${
+                        darkMode ? 'bg-rose-950/20 hover:bg-rose-950/40 text-rose-400 border-rose-800/40' : 'bg-red-50 hover:bg-red-100/80 text-red-600 border-red-200'
+                      }`}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      <span>Permanently Delete System Account</span>
+                    </button>
+                  ) : (
+                    <div className={`p-5 rounded-2xl border space-y-4 ${
+                      darkMode ? 'bg-rose-950/15 border-rose-900/40' : 'bg-red-50/50 border-red-200/60'
+                    }`}>
+                      <div className="space-y-2 text-xs">
+                        <p className="font-extrabold text-rose-500 flex items-center gap-1.5">
+                          ⚠️ WARNING: THIS IS IRREVERSIBLE
+                        </p>
+                        <p className={`leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                          Proceeding will permanently delete the following assets from our servers:
+                        </p>
+                        <ul className={`list-disc list-inside space-y-1 font-medium ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                          <li>Your user profile record and cloud authentication keys</li>
+                          <li>All of your workspaces (e.g. <strong>{workspaces.map(w => w.name).join(', ') || 'Default'}</strong>)</li>
+                          <li>Database index of all your files (<strong>{files.length}</strong> catalog records)</li>
+                          <li>Your programmatically generated API keys</li>
+                        </ul>
+                      </div>
+
+                      {/* PHYSICAL TELEGRAM FILES REMOVAL OPTION */}
+                      <label className={`flex items-start gap-2.5 p-3 rounded-xl border cursor-pointer select-none transition ${
+                        darkMode ? 'bg-slate-950/40 border-slate-800/60 hover:bg-slate-950/80' : 'bg-white border-slate-200 hover:bg-slate-100/50'
+                      }`}>
+                        <input
+                          type="checkbox"
+                          checked={deleteTelegramFiles}
+                          onChange={(e) => setDeleteTelegramFiles(e.target.checked)}
+                          className="mt-0.5 rounded text-rose-500 focus:ring-rose-500"
+                        />
+                        <div className="text-[11px] leading-relaxed">
+                          <span className={`font-bold block ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                            Also Delete All Original Files from Telegram Chat Storage
+                          </span>
+                          <span className={`text-[10px] block mt-0.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                            Checking this will instruct the MTProto engine to request Telegram to permanently delete all messages/files uploaded through this app from your storage chat (ID: {storageChat}). If unchecked, files are kept in your Telegram chat but purged from this app.
+                          </span>
+                        </div>
+                      </label>
+
+                      {/* TEXT VERIFICATION TO PREVENT ACCIDENTAL CLICKS */}
+                      <div className="space-y-1.5">
+                        <label className={`block text-[11px] font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                          Type <span className="text-rose-500 font-mono font-bold">DELETE</span> to confirm permanent deletion:
+                        </label>
+                        <input
+                          type="text"
+                          value={deleteConfirmationText}
+                          onChange={(e) => setDeleteConfirmationText(e.target.value)}
+                          placeholder="Type DELETE here..."
+                          className={`w-full px-3 py-2 text-xs font-mono rounded-xl border focus:outline-none ${
+                            darkMode ? 'bg-slate-950 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+                          }`}
+                        />
+                      </div>
+
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowDeleteConfirmation(false);
+                            setDeleteConfirmationText('');
+                            setDeleteTelegramFiles(false);
+                          }}
+                          className={`px-4 py-2.5 rounded-xl text-xs font-bold border transition ${
+                            darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+                          }`}
+                        >
+                          Cancel
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={deletingAccount || deleteConfirmationText.toUpperCase() !== 'DELETE'}
+                          onClick={handleDeleteAccount}
+                          className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold transition flex items-center justify-center space-x-1.5 active:scale-95 shadow-md shadow-rose-600/20"
+                        >
+                          {deletingAccount ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                          <span>{deletingAccount ? 'Purging Records...' : 'Permanently Delete My Account'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -6324,7 +6509,7 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
                     <div className="w-[200px] h-[200px] flex flex-col items-center justify-center space-y-2 text-slate-600">
                       <QrCode className="w-10 h-10 text-slate-400" />
                       <button
-                        onClick={handleStartQrLogin}
+                        onClick={() => handleStartQrLogin(false)}
                         className="px-3 py-1.5 bg-sky-500 text-white rounded-xl text-xs font-bold shadow-xs hover:bg-sky-400"
                       >
                         Generate QR Code
@@ -6373,7 +6558,7 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
 
                 <button
                   type="button"
-                  onClick={handleStartQrLogin}
+                  onClick={() => handleStartQrLogin(false)}
                   disabled={loginQrLoading}
                   className={`px-3 py-1.5 rounded-xl border text-xs font-bold transition flex items-center space-x-1.5 ${
                     darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'

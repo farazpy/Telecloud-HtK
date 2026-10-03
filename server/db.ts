@@ -1069,4 +1069,20 @@ export async function getAdminSystemOverview() {
   }
 }
 
+export async function purgeUserAccountFromDb(telegramId: number | string): Promise<boolean> {
+  const tgId = String(telegramId);
+  if (!pool || !isDbConnected) {
+    throw new Error('MySQL database is not connected.');
+  }
+
+  // Delete workspaces
+  await pool.query('DELETE FROM workspaces WHERE telegram_id = ?', [tgId]);
+  // Delete user files
+  await pool.query('DELETE FROM user_files WHERE telegram_id = ?', [tgId]);
+  // Delete user
+  await pool.query('DELETE FROM users WHERE telegram_id = ?', [tgId]);
+
+  return true;
+}
+
 
