@@ -171,10 +171,10 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.6.2
-  const APP_VERSION = "v1.6.2";
+  // App Version in Header - Incremented to v1.6.3
+  const APP_VERSION = "v1.6.3";
 
-  // Dynamic Public Branding from MySQL (Logo, Favicon, Title, Contact Info)
+  // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
     brand_name?: string;
     app_tagline?: string;
@@ -192,10 +192,16 @@ export default function App() {
     enable_public_pricing?: boolean;
     enable_contact_form?: boolean;
     enable_api_console?: boolean;
-  }>({
-    brand_name: 'TeleCloud Vault',
-    app_tagline: 'Decentralized MTProto Cloud Storage & High-Speed Direct CDN',
-    app_badge_text: 'MTProto 2.0 Cloud',
+  }>(() => {
+    try {
+      const cached = localStorage.getItem('telecloud_public_branding');
+      if (cached) return JSON.parse(cached);
+    } catch {}
+    return {
+      brand_name: 'TeleCloud Vault',
+      app_tagline: 'Decentralized MTProto Cloud Storage & High-Speed Direct CDN',
+      app_badge_text: 'MTProto 2.0 Cloud',
+    };
   });
 
   const fetchPublicBranding = async () => {
@@ -203,6 +209,9 @@ export default function App() {
       const res = await safeJsonFetch('/api/public-settings');
       if (res?.success && res.settings) {
         setPublicBranding(res.settings);
+        try {
+          localStorage.setItem('telecloud_public_branding', JSON.stringify(res.settings));
+        } catch {}
         if (res.settings.brand_name) {
           document.title = `${res.settings.brand_name} - Decentralized Cloud Vault`;
         }
@@ -1172,8 +1181,9 @@ export default function App() {
         setLoginQrDataUrl(qrImg);
 
         if (!isSecret) {
-          // Start polling for scan verification
+          // Start polling for scan verification (Paused when tab is hidden to save Cloud Run requests)
           qrPollTimerRef.current = setInterval(async () => {
+            if (document.hidden) return;
             try {
               const checkRes = await safeJsonFetch('/api/qr/check', {
                 method: 'POST',
@@ -1194,7 +1204,7 @@ export default function App() {
             } catch {
               // Keep polling quietly
             }
-          }, 2000);
+          }, 2500);
         }
       }
     } catch (err: any) {
@@ -1251,10 +1261,11 @@ export default function App() {
       stopQrRefresh();
       handleStartQrLogin(false);
       
-      // Setup secret background refresher every 20 seconds
+      // Setup background QR refresher every 25 seconds (Paused when tab is hidden)
       qrRefreshTimerRef.current = setInterval(() => {
+        if (document.hidden) return;
         handleStartQrLogin(true);
-      }, 20000);
+      }, 25000);
     } else {
       stopQrRefresh();
       stopQrPolling();

@@ -441,6 +441,7 @@ app.get('/api/db/status', (_req: Request, res: Response) => {
 });
 
 app.get('/api/device-config', async (_req: Request, res: Response) => {
+  res.setHeader('Cache-Control', 'public, max-age=180, stale-while-revalidate=3600');
   const result = await forwardToPython('GET', '/device_config');
   res.status(result.status).json(result.data);
 });
@@ -605,8 +606,8 @@ app.post('/api/user/delete-account', async (req: Request, res: Response) => {
   }
 });
 
-// Public Settings endpoint (Exposes brand, logo, favicon, contact details safely)
-app.get(['/api/public-settings', '/api/settings/public'], async (_req: Request, res: Response) => {
+// Public Settings endpoint (Exposes brand, logo, favicon, contact details safely with CDN caching)
+app.get(['/api/public-settings', '/api/settings/public'], async (req: Request, res: Response) => {
   try {
     const settings = await getSystemSettingsFromDb();
     const publicData = {
@@ -629,6 +630,15 @@ app.get(['/api/public-settings', '/api/settings/public'], async (_req: Request, 
       enable_contact_form: settings.enable_contact_form !== 'false',
       enable_api_console: settings.enable_api_console !== 'false',
     };
+
+    const etag = `"${crypto.createHash('md5').update(JSON.stringify(publicData)).digest('hex')}"`;
+    res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=86400');
+    res.setHeader('ETag', etag);
+
+    if (req.headers['if-none-match'] === etag) {
+      return res.status(304).end();
+    }
+
     return res.json({ success: true, settings: publicData });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
@@ -1935,8 +1945,21 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      express.static(distPath, {
+        maxAge: '1y',
+        immutable: true,
+        setHeaders: (res, filePath) => {
+          if (filePath.endsWith('.html')) {
+            res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+          } else {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          }
+        },
+      })
+    );
     app.get('*', (_req: Request, res: Response) => {
+      res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
   }
