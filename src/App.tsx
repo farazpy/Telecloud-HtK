@@ -163,8 +163,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.3.8
-  const APP_VERSION = "v1.3.8";
+  // App Version in Header - Incremented to v1.4.7
+  const APP_VERSION = "v1.4.7";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -407,7 +407,7 @@ export default function App() {
   const [customChatId, setCustomChatId] = useState<string>('');
 
   // Settings / Connect form
-  const [authMode, setAuthMode] = useState<'phone' | 'bot' | 'session'>('phone');
+  const [authMode, setAuthMode] = useState<'qr' | 'phone' | 'bot' | 'session'>('qr');
   const [apiId, setApiId] = useState<string>('');
   const [apiHash, setApiHash] = useState<string>('');
   const [botToken, setBotToken] = useState<string>('');
@@ -420,6 +420,11 @@ export default function App() {
   const [targetChatInput, setTargetChatInput] = useState<string>('me');
   const [secretsConfigured, setSecretsConfigured] = useState<boolean>(false);
   
+  // QR Code Login Flow
+  const [loginQrDataUrl, setLoginQrDataUrl] = useState<string | null>(null);
+  const [loginQrLoading, setLoginQrLoading] = useState<boolean>(false);
+  const qrPollTimerRef = useRef<any>(null);
+
   // Phone login flow
   const [phoneCodeHash, setPhoneCodeHash] = useState<string | null>(null);
   const [authCode, setAuthCode] = useState<string>('');
@@ -864,6 +869,111 @@ export default function App() {
     setPhone(full);
   };
 
+  const stopQrPolling = () => {
+    if (qrPollTimerRef.current) {
+      clearInterval(qrPollTimerRef.current);
+      qrPollTimerRef.current = null;
+    }
+  };
+
+  const handleStartQrLogin = async () => {
+    stopQrPolling();
+    setLoginQrLoading(true);
+    setAuthError(null);
+    try {
+      const data = await safeJsonFetch('/api/qr/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_id: apiId || undefined,
+          api_hash: apiHash || undefined,
+          storage_chat: targetChatInput || 'me'
+        })
+      });
+
+      if (data.token_url) {
+        const qrImg = await QRCode.toDataURL(data.token_url, {
+          width: 240,
+          margin: 1,
+          color: {
+            dark: '#0f172a',
+            light: '#ffffff'
+          }
+        });
+        setLoginQrDataUrl(qrImg);
+
+        // Start polling for scan verification
+        qrPollTimerRef.current = setInterval(async () => {
+          try {
+            const checkRes = await safeJsonFetch('/api/qr/check', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ password: twoFaPassword || undefined })
+            });
+
+            if (checkRes.status === 'authorized') {
+              stopQrPolling();
+              await checkStatus();
+              setShowAuthModal(false);
+              setDashboardTab('overview');
+            } else if (checkRes.status === 'requires_password') {
+              setNeeds2FA(true);
+            } else if (checkRes.status === 'expired') {
+              stopQrPolling();
+              setAuthError('QR Code expired. Click "Refresh QR Code" to generate a fresh code.');
+            }
+          } catch {
+            // Keep polling quietly
+          }
+        }, 2000);
+      }
+    } catch (err: any) {
+      setAuthError(err.message || 'Failed to initialize QR code login');
+    } finally {
+      setLoginQrLoading(false);
+    }
+  };
+
+  const handleVerifyQr2FA = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!twoFaPassword.trim()) {
+      setAuthError('Please enter your 2FA cloud password.');
+      return;
+    }
+    setAuthSubmitting(true);
+    setAuthError(null);
+    try {
+      const checkRes = await safeJsonFetch('/api/qr/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: twoFaPassword.trim() })
+      });
+      if (checkRes.status === 'authorized') {
+        stopQrPolling();
+        setNeeds2FA(false);
+        setTwoFaPassword('');
+        await checkStatus();
+        setShowAuthModal(false);
+        setDashboardTab('overview');
+      } else if (checkRes.error) {
+        throw new Error(checkRes.error);
+      }
+    } catch (err: any) {
+      setAuthError(err.message || '2FA Verification failed');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showAuthModal && authMode === 'qr' && !loginQrDataUrl && !connected) {
+      handleStartQrLogin();
+    }
+    if (!showAuthModal) {
+      stopQrPolling();
+    }
+  }, [showAuthModal, authMode]);
+
   const handleConnect = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError(null);
@@ -955,7 +1065,8 @@ export default function App() {
       if (data.error) throw new Error(data.error || 'Verification failed.');
       if (data.requires_password) {
         setNeeds2FA(true);
-        throw new Error('Two-factor authentication (2FA) password required. Please enter your password below.');
+        setAuthError(null);
+        return;
       }
       setPhoneCodeHash(null);
       setAuthCode('');
@@ -2254,144 +2365,150 @@ export default function App() {
           } ${sidebarBg}`}
         >
           {/* Sidebar Menu Items */}
-          <div className="space-y-1.5 overflow-y-auto pr-1 flex-1 scrollbar-thin">
-            <p className="px-3 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 mb-2">
-              Cloud Console
-            </p>
+          <div className="space-y-4 overflow-y-auto pr-1 flex-1 scrollbar-thin">
+            <div>
+              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                Storage Cloud
+              </p>
+              <div className="space-y-1">
+                <button
+                  onClick={() => { setDashboardTab('overview'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                    dashboardTab === 'overview'
+                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                  }`}
+                >
+                  <BarChart3 className={`w-4 h-4 ${dashboardTab === 'overview' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <span>Overview</span>
+                </button>
 
-            <button
-              onClick={() => { setDashboardTab('overview'); setMobileSidebarOpen(false); }}
-              className={`w-full flex items-center space-x-3 px-3 py-2 rounded-2xl text-xs font-bold transition ${
-                dashboardTab === 'overview'
-                  ? (darkMode ? 'bg-indigo-950/80 text-indigo-300 border border-indigo-800/80 shadow-xs' : 'bg-indigo-50/80 text-indigo-900 border border-indigo-200/80 shadow-2xs')
-                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/80 hover:text-white' : 'text-slate-700 hover:bg-slate-100/80 hover:text-slate-900')
-              }`}
-            >
-              <div className={`w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
-                dashboardTab === 'overview' ? 'bg-indigo-500 text-white shadow-xs' : (darkMode ? 'bg-indigo-950/60 text-indigo-400' : 'bg-indigo-50 text-indigo-600')
-              }`}>
-                <BarChart3 className="w-4 h-4" />
+                <button
+                  onClick={() => { setDashboardTab('upload'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                    dashboardTab === 'upload'
+                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                  }`}
+                >
+                  <UploadCloud className={`w-4 h-4 ${dashboardTab === 'upload' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <span>Upload & Link</span>
+                </button>
+
+                <button
+                  onClick={() => { setDashboardTab('vault'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition ${
+                    dashboardTab === 'vault'
+                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                  }`}
+                >
+                  <div className="flex items-center space-x-3">
+                    <HardDrive className={`w-4 h-4 ${dashboardTab === 'vault' ? 'text-sky-500' : 'text-slate-400'}`} />
+                    <span>Files Vault</span>
+                  </div>
+                  {files.length > 0 && (
+                    <span className={`px-2 py-0.5 text-[10px] rounded-md font-mono font-bold ${
+                      dashboardTab === 'vault'
+                        ? (darkMode ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-800')
+                        : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
+                    }`}>
+                      {files.length}
+                    </span>
+                  )}
+                </button>
+
+                <button
+                  onClick={() => { setDashboardTab('streamer'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                    dashboardTab === 'streamer'
+                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                  }`}
+                >
+                  <Film className={`w-4 h-4 ${dashboardTab === 'streamer' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <span>Media Streamer</span>
+                </button>
+
+                <button
+                  onClick={() => { setDashboardTab('links'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                    dashboardTab === 'links'
+                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                  }`}
+                >
+                  <LinkIcon className={`w-4 h-4 ${dashboardTab === 'links' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <span>Direct Links Hub</span>
+                </button>
               </div>
-              <span>Overview & Stats</span>
-            </button>
+            </div>
 
-            {/* Removed Workspaces button as requested. Options are now strictly in header and bottom of sidebar. */}
-
-            <button
-              onClick={() => { setDashboardTab('upload'); setMobileSidebarOpen(false); }}
-              className={`w-full flex items-center space-x-3 px-3 py-2 rounded-2xl text-xs font-bold transition ${
-                dashboardTab === 'upload'
-                  ? (darkMode ? 'bg-sky-950/80 text-sky-300 border border-sky-800/80 shadow-xs' : 'bg-sky-50/80 text-sky-900 border border-sky-200/80 shadow-2xs')
-                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/80 hover:text-white' : 'text-slate-700 hover:bg-slate-100/80 hover:text-slate-900')
-              }`}
-            >
-              <div className={`w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
-                dashboardTab === 'upload' ? 'bg-sky-500 text-white shadow-xs' : (darkMode ? 'bg-sky-950/60 text-sky-400' : 'bg-sky-50 text-sky-600')
-              }`}>
-                <UploadCloud className="w-4 h-4" />
-              </div>
-              <span>Upload & Direct Link</span>
-            </button>
-
-            <button
-              onClick={() => { setDashboardTab('vault'); setMobileSidebarOpen(false); }}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-2xl text-xs font-bold transition ${
-                dashboardTab === 'vault'
-                  ? (darkMode ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-800/80 shadow-xs' : 'bg-emerald-50/80 text-emerald-900 border border-emerald-200/80 shadow-2xs')
-                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/80 hover:text-white' : 'text-slate-700 hover:bg-slate-100/80 hover:text-slate-900')
-              }`}
-            >
-              <div className="flex items-center space-x-3">
-                <div className={`w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
-                  dashboardTab === 'vault' ? 'bg-emerald-500 text-white shadow-xs' : (darkMode ? 'bg-emerald-950/60 text-emerald-400' : 'bg-emerald-50 text-emerald-600')
-                }`}>
-                  <HardDrive className="w-4 h-4" />
+            <div>
+              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                Workspaces
+              </p>
+              <button
+                onClick={() => { setDashboardTab('workspaces'); setMobileSidebarOpen(false); }}
+                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition ${
+                  dashboardTab === 'workspaces'
+                    ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
+                    : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                }`}
+              >
+                <div className="flex items-center space-x-3">
+                  <Layers className={`w-4 h-4 ${dashboardTab === 'workspaces' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <span>All Workspaces</span>
                 </div>
-                <span>Files Vault</span>
-              </div>
-              {files.length > 0 && (
-                <span className={`px-2 py-0.5 text-[10px] rounded-full font-mono font-bold ${
-                  dashboardTab === 'vault' ? (darkMode ? 'bg-emerald-900 text-emerald-200' : 'bg-emerald-200 text-emerald-800') : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
+                <span className={`px-2 py-0.5 text-[10px] rounded-md font-mono font-bold ${
+                  dashboardTab === 'workspaces'
+                    ? (darkMode ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-800')
+                    : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
                 }`}>
-                  {files.length}
+                  {workspaces.length}
                 </span>
-              )}
-            </button>
+              </button>
+            </div>
 
-            <button
-              onClick={() => { setDashboardTab('streamer'); setMobileSidebarOpen(false); }}
-              className={`w-full flex items-center space-x-3 px-3 py-2 rounded-2xl text-xs font-bold transition ${
-                dashboardTab === 'streamer'
-                  ? (darkMode ? 'bg-rose-950/80 text-rose-300 border border-rose-800/80 shadow-xs' : 'bg-rose-50/80 text-rose-900 border border-rose-200/80 shadow-2xs')
-                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/80 hover:text-white' : 'text-slate-700 hover:bg-slate-100/80 hover:text-slate-900')
-              }`}
-            >
-              <div className={`w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
-                dashboardTab === 'streamer' ? 'bg-rose-500 text-white shadow-xs' : (darkMode ? 'bg-rose-950/60 text-rose-400' : 'bg-rose-50 text-rose-600')
-              }`}>
-                <Film className="w-4 h-4" />
+            <div>
+              <p className="px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                Developer & Settings
+              </p>
+              <div className="space-y-1">
+                <button
+                  onClick={() => { setDashboardTab('api'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-bold transition ${
+                    dashboardTab === 'api'
+                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                  }`}
+                >
+                  <div className="flex items-center space-x-3">
+                    <Terminal className={`w-4 h-4 ${dashboardTab === 'api' ? 'text-sky-500' : 'text-slate-400'}`} />
+                    <span>API & Postman</span>
+                  </div>
+                  <span className={`px-1.5 py-0.5 text-[9px] rounded font-mono font-bold ${
+                    dashboardTab === 'api'
+                      ? (darkMode ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-800')
+                      : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
+                  }`}>
+                    REST
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => { setDashboardTab('settings'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center space-x-3 px-3 py-2 rounded-xl text-xs font-bold transition ${
+                    dashboardTab === 'settings'
+                      ? (darkMode ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30' : 'bg-sky-50 text-sky-700 border border-sky-200/80')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/70 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900')
+                  }`}
+                >
+                  <Sliders className={`w-4 h-4 ${dashboardTab === 'settings' ? 'text-sky-500' : 'text-slate-400'}`} />
+                  <span>Storage Destination</span>
+                </button>
               </div>
-              <span>Media Streamer</span>
-            </button>
-
-            <button
-              onClick={() => { setDashboardTab('links'); setMobileSidebarOpen(false); }}
-              className={`w-full flex items-center space-x-3 px-3 py-2 rounded-2xl text-xs font-bold transition ${
-                dashboardTab === 'links'
-                  ? (darkMode ? 'bg-amber-950/80 text-amber-300 border border-amber-800/80 shadow-xs' : 'bg-amber-50/80 text-amber-900 border border-amber-200/80 shadow-2xs')
-                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/80 hover:text-white' : 'text-slate-700 hover:bg-slate-100/80 hover:text-slate-900')
-              }`}
-            >
-              <div className={`w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
-                dashboardTab === 'links' ? 'bg-amber-500 text-white shadow-xs' : (darkMode ? 'bg-amber-950/60 text-amber-400' : 'bg-amber-50 text-amber-600')
-              }`}>
-                <LinkIcon className="w-4 h-4" />
-              </div>
-              <span>Direct Links Hub</span>
-            </button>
-
-            <button
-              onClick={() => { setDashboardTab('api'); setMobileSidebarOpen(false); }}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-2xl text-xs font-bold transition ${
-                dashboardTab === 'api'
-                  ? (darkMode ? 'bg-indigo-950/80 text-indigo-300 border border-indigo-800/80 shadow-xs' : 'bg-indigo-50/80 text-indigo-900 border border-indigo-200/80 shadow-2xs')
-                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/80 hover:text-white' : 'text-slate-700 hover:bg-slate-100/80 hover:text-slate-900')
-              }`}
-            >
-              <div className="flex items-center space-x-3">
-                <div className={`w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
-                  dashboardTab === 'api' ? 'bg-indigo-600 text-white shadow-xs' : (darkMode ? 'bg-indigo-950/60 text-indigo-400' : 'bg-indigo-50 text-indigo-600')
-                }`}>
-                  <Terminal className="w-4 h-4" />
-                </div>
-                <span>API & Simulator</span>
-              </div>
-              <span className={`px-2 py-0.5 text-[9px] rounded-full font-mono font-bold ${
-                dashboardTab === 'api' ? (darkMode ? 'bg-indigo-900 text-indigo-200' : 'bg-indigo-200 text-indigo-800') : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
-              }`}>
-                POSTMAN
-              </span>
-            </button>
-
-            <p className="px-3 text-[10px] font-extrabold uppercase tracking-wider text-slate-400 pt-4 mb-2">
-              Storage Preferences
-            </p>
-
-            <button
-              onClick={() => { setDashboardTab('settings'); setMobileSidebarOpen(false); }}
-              className={`w-full flex items-center space-x-3 px-3 py-2 rounded-2xl text-xs font-bold transition ${
-                dashboardTab === 'settings'
-                  ? (darkMode ? 'bg-teal-950/80 text-teal-300 border border-teal-800/80 shadow-xs' : 'bg-teal-50/80 text-teal-900 border border-teal-200/80 shadow-2xs')
-                  : (darkMode ? 'text-slate-300 hover:bg-slate-800/80 hover:text-white' : 'text-slate-700 hover:bg-slate-100/80 hover:text-slate-900')
-              }`}
-            >
-              <div className={`w-7 h-7 rounded-xl flex items-center justify-center transition-colors ${
-                dashboardTab === 'settings' ? 'bg-teal-500 text-white shadow-xs' : (darkMode ? 'bg-teal-950/60 text-teal-400' : 'bg-teal-50 text-teal-600')
-              }`}>
-                <Sliders className="w-4 h-4" />
-              </div>
-              <span>Storage Destination</span>
-            </button>
+            </div>
           </div>
 
           {/* Sidebar Footer with Storage Meter & Quick Theme Switcher */}
@@ -2667,61 +2784,78 @@ export default function App() {
 
               {/* Stats Cards Grid */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <div className={`p-5 rounded-3xl space-y-2 transition-colors duration-200 ${cardBg}`}>
-                  <div className="flex items-center justify-between">
-                    <span className={`text-xs font-bold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Total Cloud Files</span>
-                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${darkMode ? 'bg-sky-950/80 text-sky-400 border border-sky-800/80' : 'bg-sky-50 text-sky-600'}`}>
+                <div className={`p-4 sm:p-5 rounded-2xl transition-all duration-200 ${cardBg}`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className={`text-xs font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Total Cloud Files</span>
+                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${darkMode ? 'bg-sky-500/10 text-sky-400' : 'bg-sky-50 text-sky-600'}`}>
                       <HardDrive className="w-4 h-4" />
                     </div>
                   </div>
-                  <p className={`text-2xl font-black ${darkMode ? 'text-white' : 'text-slate-900'}`}>{stats?.totalFiles || files.length}</p>
-                  <p className="text-[11px] text-emerald-500 font-semibold">Indexed & Streamable</p>
+                  <p className={`text-2xl font-black font-mono tabular-nums ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {stats?.totalFiles || files.length}
+                  </p>
+                  <p className="text-[11px] text-emerald-500 font-medium mt-1 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block" />
+                    <span>Indexed & Streamable</span>
+                  </p>
                 </div>
 
-                <div className={`p-5 rounded-3xl space-y-2 transition-colors duration-200 ${cardBg}`}>
-                  <div className="flex items-center justify-between">
-                    <span className={`text-xs font-bold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Total Storage Saved</span>
-                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${darkMode ? 'bg-indigo-950/80 text-indigo-400 border border-indigo-800/80' : 'bg-indigo-50 text-indigo-600'}`}>
+                <div className={`p-4 sm:p-5 rounded-2xl transition-all duration-200 ${cardBg}`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className={`text-xs font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Cloud Storage Used</span>
+                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${darkMode ? 'bg-indigo-500/10 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}>
                       <Zap className="w-4 h-4" />
                     </div>
                   </div>
-                  <p className={`text-2xl font-black ${darkMode ? 'text-white' : 'text-slate-900'}`}>{formatBytes(stats?.totalBytes || 0)}</p>
-                  <p className="text-[11px] text-sky-400 font-semibold">Encrypted Cloud Storage</p>
+                  <p className={`text-2xl font-black font-mono tabular-nums ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {formatBytes(stats?.totalBytes || 0)}
+                  </p>
+                  <p className={`text-[11px] font-medium mt-1 ${darkMode ? 'text-sky-400' : 'text-sky-600'}`}>
+                    Encrypted MTProto Storage
+                  </p>
                 </div>
 
-                <div className={`p-5 rounded-3xl space-y-2 transition-colors duration-200 ${cardBg}`}>
-                  <div className="flex items-center justify-between">
-                    <span className={`text-xs font-bold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Vault Link Health</span>
-                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${darkMode ? 'bg-emerald-950/80 text-emerald-400 border border-emerald-800/80' : 'bg-emerald-50 text-emerald-600'}`}>
+                <div className={`p-4 sm:p-5 rounded-2xl transition-all duration-200 ${cardBg}`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className={`text-xs font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>CDN Stream Health</span>
+                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${darkMode ? 'bg-emerald-500/10 text-emerald-400' : 'bg-emerald-50 text-emerald-600'}`}>
                       <ShieldCheck className="w-4 h-4" />
                     </div>
                   </div>
-                  <p className={`text-xl font-black truncate ${darkMode ? 'text-white' : 'text-slate-900'}`}>Online & Ready</p>
-                  <p className="text-[11px] text-emerald-500 font-semibold">High-Speed Streaming</p>
+                  <p className={`text-xl font-bold truncate ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    Online & Ready
+                  </p>
+                  <p className="text-[11px] text-emerald-500 font-medium mt-1">
+                    Byte-range streaming active
+                  </p>
                 </div>
 
-                <div className={`p-5 rounded-3xl space-y-2 transition-colors duration-200 ${cardBg}`}>
-                  <div className="flex items-center justify-between">
-                    <span className={`text-xs font-bold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Storage Destination</span>
-                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${darkMode ? 'bg-amber-950/80 text-amber-400 border border-amber-800/80' : 'bg-amber-50 text-amber-600'}`}>
+                <div className={`p-4 sm:p-5 rounded-2xl transition-all duration-200 ${cardBg}`}>
+                  <div className="flex items-center justify-between mb-3">
+                    <span className={`text-xs font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Storage Target</span>
+                    <div className={`w-8 h-8 rounded-xl flex items-center justify-center ${darkMode ? 'bg-amber-500/10 text-amber-400' : 'bg-amber-50 text-amber-600'}`}>
                       <Radio className="w-4 h-4" />
                     </div>
                   </div>
-                  <p className={`text-xl font-black truncate ${darkMode ? 'text-white' : 'text-slate-900'}`}>{storageChat === 'me' ? 'Self (Saved Messages)' : storageChat}</p>
-                  <button onClick={() => setDashboardTab('settings')} className="text-[11px] text-sky-400 font-semibold hover:underline">Change destination →</button>
+                  <p className={`text-base font-bold font-mono truncate ${darkMode ? 'text-white' : 'text-slate-900'}`} title={storageChat === 'me' ? 'Self (Saved Messages)' : storageChat}>
+                    {storageChat === 'me' ? 'Saved Messages' : storageChat}
+                  </p>
+                  <button onClick={() => setDashboardTab('settings')} className="text-[11px] text-sky-500 font-semibold hover:underline mt-1 text-left block">
+                    Change destination →
+                  </button>
                 </div>
               </div>
 
               {/* Breakdown by Type & Recent Uploads */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* Breakdown */}
-                <div className={`p-6 rounded-3xl space-y-4 transition-colors duration-200 ${cardBg}`}>
-                  <h3 className={`font-extrabold text-sm flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                <div className={`p-4 sm:p-5 rounded-2xl space-y-4 transition-colors duration-200 ${cardBg}`}>
+                  <h3 className={`font-bold text-sm flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
                     <Layers className="w-4 h-4 text-sky-500" />
                     <span>File Categories</span>
                   </h3>
 
-                  <div className="space-y-3">
+                  <div className="space-y-2">
                     {[
                       { key: 'videos', label: 'Videos', icon: Video, color: 'text-indigo-400' },
                       { key: 'images', label: 'Images', icon: ImageIcon, color: 'text-emerald-400' },
@@ -2732,14 +2866,14 @@ export default function App() {
                       const count = stats?.breakdown?.[key]?.count || 0;
                       const bytes = stats?.breakdown?.[key]?.bytes || 0;
                       return (
-                        <div key={key} className={`flex items-center justify-between p-2.5 rounded-2xl text-xs transition-colors duration-200 ${subCardBg}`}>
+                        <div key={key} className={`flex items-center justify-between p-2 rounded-xl text-xs transition-colors duration-200 ${subCardBg}`}>
                           <div className="flex items-center space-x-2.5">
                             <Icon className={`w-4 h-4 ${color}`} />
-                            <span className={`font-bold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>{label}</span>
+                            <span className={`font-semibold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>{label}</span>
                           </div>
-                          <div className="text-right">
+                          <div className="text-right font-mono tabular-nums">
                             <span className={`font-bold ${darkMode ? 'text-white' : 'text-slate-900'}`}>{count}</span>
-                            <span className={`ml-1.5 font-mono text-[10px] ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>({formatBytes(bytes)})</span>
+                            <span className={`ml-1.5 text-[10px] ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>({formatBytes(bytes)})</span>
                           </div>
                         </div>
                       );
@@ -2748,7 +2882,7 @@ export default function App() {
                 </div>
 
                 {/* Recent Uploads Table */}
-                <div className={`lg:col-span-2 p-6 rounded-3xl space-y-4 transition-colors duration-200 ${cardBg}`}>
+                <div className={`lg:col-span-2 p-4 sm:p-5 rounded-2xl space-y-4 transition-colors duration-200 ${cardBg}`}>
                   <div className="flex items-center justify-between">
                     <h3 className={`font-extrabold text-sm flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
                       <HardDrive className="w-4 h-4 text-sky-500" />
@@ -5242,46 +5376,136 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
             </button>
           </div>
 
-          <div className={`grid grid-cols-3 gap-1.5 p-1 rounded-2xl border ${
+          <div className={`grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 rounded-2xl border ${
             darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'
           }`}>
             <button
               type="button"
-              onClick={() => setAuthMode('phone')}
+              onClick={() => { setAuthMode('qr'); handleStartQrLogin(); }}
+              className={`py-2 px-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 ${
+                authMode === 'qr'
+                  ? (darkMode ? 'bg-slate-800 text-white shadow-xs border border-sky-500/30' : 'bg-white text-slate-900 shadow-xs border border-sky-500/30')
+                  : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
+              }`}
+            >
+              <QrCode className="w-3.5 h-3.5 text-sky-400" />
+              <span>QR Scan</span>
+              <span className="text-[9px] px-1 rounded-sm bg-sky-500 text-white uppercase font-bold">Fast</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => { setAuthMode('phone'); stopQrPolling(); }}
               className={`py-2 px-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 ${
                 authMode === 'phone'
                   ? (darkMode ? 'bg-slate-800 text-white shadow-xs' : 'bg-white text-slate-900 shadow-xs')
                   : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
               }`}
             >
-              <Smartphone className="w-3.5 h-3.5 text-sky-400" />
+              <Smartphone className="w-3.5 h-3.5 text-indigo-400" />
               <span>Phone OTP</span>
             </button>
             <button
               type="button"
-              onClick={() => setAuthMode('bot')}
+              onClick={() => { setAuthMode('bot'); stopQrPolling(); }}
               className={`py-2 px-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 ${
                 authMode === 'bot'
                   ? (darkMode ? 'bg-slate-800 text-white shadow-xs' : 'bg-white text-slate-900 shadow-xs')
                   : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
               }`}
             >
-              <Bot className="w-3.5 h-3.5 text-indigo-400" />
+              <Bot className="w-3.5 h-3.5 text-purple-400" />
               <span>Bot Token</span>
             </button>
             <button
               type="button"
-              onClick={() => setAuthMode('session')}
+              onClick={() => { setAuthMode('session'); stopQrPolling(); }}
               className={`py-2 px-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 ${
                 authMode === 'session'
                   ? (darkMode ? 'bg-slate-800 text-white shadow-xs' : 'bg-white text-slate-900 shadow-xs')
                   : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
               }`}
             >
-              <Key className="w-3.5 h-3.5 text-purple-400" />
+              <Key className="w-3.5 h-3.5 text-amber-400" />
               <span>Session String</span>
             </button>
           </div>
+
+          {authMode === 'qr' && (
+            <div className="space-y-4 text-center">
+              <div className={`p-5 rounded-3xl border flex flex-col items-center justify-center space-y-4 ${subCardBg}`}>
+                <div className="relative p-3 rounded-2xl bg-white shadow-xl">
+                  {loginQrLoading ? (
+                    <div className="w-[200px] h-[200px] flex flex-col items-center justify-center space-y-2 text-slate-600">
+                      <RefreshCw className="w-8 h-8 animate-spin text-sky-500" />
+                      <p className="text-xs font-bold">Generating QR Code...</p>
+                    </div>
+                  ) : loginQrDataUrl ? (
+                    <img src={loginQrDataUrl} alt="Telegram QR Login" className="w-[200px] h-[200px] rounded-lg" />
+                  ) : (
+                    <div className="w-[200px] h-[200px] flex flex-col items-center justify-center space-y-2 text-slate-600">
+                      <QrCode className="w-10 h-10 text-slate-400" />
+                      <button
+                        onClick={handleStartQrLogin}
+                        className="px-3 py-1.5 bg-sky-500 text-white rounded-xl text-xs font-bold shadow-xs hover:bg-sky-400"
+                      >
+                        Generate QR Code
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-1 text-left w-full max-w-xs text-xs">
+                  <p className={`font-extrabold ${darkMode ? 'text-white' : 'text-slate-800'}`}>How to scan & connect:</p>
+                  <ol className={`space-y-1 list-decimal list-inside text-[11px] ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                    <li>Open <strong>Telegram</strong> on your phone</li>
+                    <li>Go to <strong>Settings → Devices</strong></li>
+                    <li>Tap <strong>"Link Desktop Device"</strong> and scan this QR code</li>
+                  </ol>
+                </div>
+
+                {needs2FA && (
+                  <form onSubmit={handleVerifyQr2FA} className="w-full max-w-xs space-y-2 pt-3 border-t border-slate-200 dark:border-slate-800 text-left animate-in fade-in duration-200">
+                    <div className="flex items-center space-x-2 text-indigo-400 font-bold text-xs">
+                      <Lock className="w-4 h-4 text-indigo-500" />
+                      <span>Two-Factor Authentication (2FA)</span>
+                    </div>
+                    <p className={`text-[11px] leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                      QR scan recognized! Your Telegram account requires your 2FA cloud password to complete sign-in:
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="password"
+                        required
+                        value={twoFaPassword}
+                        onChange={(e) => setTwoFaPassword(e.target.value)}
+                        placeholder="Your 2FA cloud password"
+                        className={`flex-1 rounded-xl px-3 py-2 text-xs font-mono ${inputBg}`}
+                      />
+                      <button
+                        type="submit"
+                        disabled={authSubmitting || !twoFaPassword.trim()}
+                        className="px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-600 text-white rounded-xl text-xs font-bold shadow-md hover:from-emerald-400 hover:to-teal-500 transition active:scale-95"
+                      >
+                        {authSubmitting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : 'Confirm'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleStartQrLogin}
+                  disabled={loginQrLoading}
+                  className={`px-3 py-1.5 rounded-xl border text-xs font-bold transition flex items-center space-x-1.5 ${
+                    darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                  }`}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loginQrLoading ? 'animate-spin' : ''}`} />
+                  <span>Refresh QR Code</span>
+                </button>
+              </div>
+            </div>
+          )}
 
           <form onSubmit={handleConnect} className="space-y-4">
             {authMode === 'phone' && (
@@ -5442,21 +5666,41 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
             )}
 
             {authMode === 'bot' && (
-              <div>
-                <label className={`block text-xs font-bold mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
-                  Telegram Bot Token
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={botToken}
-                  onChange={(e) => setBotToken(e.target.value)}
-                  placeholder="e.g. 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
-                  className={`w-full border rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 shadow-xs ${
-                    darkMode ? 'bg-slate-950 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
-                  }`}
-                />
-                <p className={`text-[11px] mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>From @BotFather on Telegram.</p>
+              <div className="space-y-3">
+                <div>
+                  <label className={`block text-xs font-bold mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                    Telegram Bot Token
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={botToken}
+                    onChange={(e) => setBotToken(e.target.value)}
+                    placeholder="e.g. 123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+                    className={`w-full border rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 shadow-xs ${
+                      darkMode ? 'bg-slate-950 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
+                    }`}
+                  />
+                  <p className={`text-[11px] mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>From @BotFather on Telegram.</p>
+                </div>
+
+                <div>
+                  <label className={`block text-xs font-bold mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                    Storage Destination Channel / Chat ID
+                  </label>
+                  <input
+                    type="text"
+                    value={targetChatInput === 'me' ? '' : targetChatInput}
+                    onChange={(e) => setTargetChatInput(e.target.value.trim() || 'me')}
+                    placeholder="e.g. -1001234567890 or @my_storage_channel"
+                    className={`w-full border rounded-xl px-4 py-2.5 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 shadow-xs ${
+                      darkMode ? 'bg-slate-950 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
+                    }`}
+                  />
+                  <p className={`text-[10px] mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Telegram bots store files in a Channel or Group where the bot is added as an Administrator.
+                  </p>
+                </div>
               </div>
             )}
 
@@ -5479,15 +5723,27 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
             )}
 
             {authError && (
-              <div className={`p-3.5 rounded-xl border text-xs flex items-center space-x-2 ${
+              <div className={`p-3.5 rounded-2xl border text-xs space-y-2.5 ${
                 darkMode ? 'bg-rose-950/60 border-rose-800 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-700'
               }`}>
-                <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                <span>{authError}</span>
+                <div className="flex items-start space-x-2">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span className="leading-relaxed">{authError}</span>
+                </div>
+                {authMode !== 'qr' && (
+                  <button
+                    type="button"
+                    onClick={() => { setAuthMode('qr'); handleStartQrLogin(); }}
+                    className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs shadow-xs flex items-center justify-center space-x-1.5 transition active:scale-95"
+                  >
+                    <QrCode className="w-3.5 h-3.5" />
+                    <span>⚡ Switch to QR Code Scan (Recommended & Instant)</span>
+                  </button>
+                )}
               </div>
             )}
 
-            {!phoneCodeHash && (
+            {authMode !== 'qr' && !phoneCodeHash && (
               <button
                 type="submit"
                 disabled={authSubmitting}

@@ -266,8 +266,8 @@ app.post('/api/send_code', async (req: Request, res: Response) => {
   const payload = {
     ...req.body,
     phone,
-    api_id: req.body.api_id || process.env.TELEGRAM_API_ID || 27254692,
-    api_hash: req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65',
+    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
+    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
     storage_chat: req.body.storage_chat || 'me',
   };
   const result = await forwardToPython('POST', '/send_code', payload);
@@ -279,7 +279,12 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
   if (phone && !phone.startsWith('+')) {
     phone = `+${phone}`;
   }
-  const payload = { ...req.body, phone };
+  const payload = {
+    ...req.body,
+    phone,
+    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
+    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+  };
   const result = await forwardToPython('POST', '/sign_in', payload);
   if (result.status === 200 && result.data?.user) {
     await saveUserToDb({
@@ -294,6 +299,32 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
   res.status(result.status).json(result.data);
 });
 
+app.post(['/api/qr/start', '/api/telegram/qr/start'], async (req: Request, res: Response) => {
+  const payload = {
+    ...req.body,
+    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
+    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+    storage_chat: req.body.storage_chat || 'me',
+  };
+  const result = await forwardToPython('POST', '/qr/start', payload);
+  res.status(result.status).json(result.data);
+});
+
+app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: Response) => {
+  const result = await forwardToPython('POST', '/qr/check', req.body);
+  if (result.status === 200 && result.data?.user) {
+    await saveUserToDb({
+      telegram_id: result.data.user.id,
+      first_name: result.data.user.first_name,
+      last_name: result.data.user.last_name,
+      username: result.data.user.username,
+      phone: result.data.user.phone || '',
+      storage_chat: 'me',
+    }).catch((e) => console.error('[MySQL] user save error:', e));
+  }
+  res.status(result.status).json(result.data);
+});
+
 app.post('/api/disconnect', async (_req: Request, res: Response) => {
   const result = await forwardToPython('POST', '/disconnect');
   res.status(result.status).json(result.data);
@@ -301,25 +332,30 @@ app.post('/api/disconnect', async (_req: Request, res: Response) => {
 
 // Workspace endpoints (Multi-workspace per Telegram account in MySQL)
 app.get(['/api/workspaces', '/api/v1/workspaces'], async (req: Request, res: Response) => {
-  let tgId = req.query.telegram_id as string;
-  if (!tgId) {
-    const auth = await authenticateApiRequest(req);
-    if (auth.authenticated && auth.user) {
-      tgId = auth.user.telegram_id;
+  try {
+    let tgId = req.query.telegram_id as string;
+    if (!tgId) {
+      const auth = await authenticateApiRequest(req);
+      if (auth.authenticated && auth.user) {
+        tgId = auth.user.telegram_id;
+      }
     }
-  }
-  if (!tgId) {
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
-  }
-  if (!tgId) {
-    res.json({ workspaces: [], active_workspace_id: null });
-    return;
-  }
+    if (!tgId) {
+      const statusRes = await forwardToPython('GET', '/status');
+      tgId = statusRes.data?.user?.id;
+    }
+    if (!tgId) {
+      res.json({ workspaces: [], active_workspace_id: null });
+      return;
+    }
 
-  const result = await getWorkspacesFromDb(tgId);
-  const activeWs = result.workspaces.find((w) => w.id === result.active_workspace_id) || result.workspaces[0] || null;
-  res.json({ ...result, active_workspace: activeWs });
+    const result = await getWorkspacesFromDb(tgId);
+    const activeWs = result.workspaces.find((w) => w.id === result.active_workspace_id) || result.workspaces[0] || null;
+    res.json({ ...result, active_workspace: activeWs });
+  } catch (err: any) {
+    console.error('[Workspaces] error in /api/workspaces:', err);
+    res.json({ workspaces: [], active_workspace_id: null, error: err.message });
+  }
 });
 
 app.post('/api/workspaces', async (req: Request, res: Response): Promise<void> => {
@@ -601,7 +637,7 @@ app.post('/api/files/rename', async (req: Request, res: Response): Promise<void>
       direct_link: directDownloadUrl,
     });
   } else {
-    res.status(404).json({ error: result.error || 'Failed to rename file' });
+    res.status(404).json({ error: (result as any).error || 'Failed to rename file' });
   }
 });
 
@@ -1064,249 +1100,241 @@ app.all('/api/v1/verify', async (req: Request, res: Response): Promise<void> => 
 app.post('/api/upload', handleUploadMiddleware, handleSecureUpload);
 app.post('/api/v1/upload', handleUploadMiddleware, handleSecureUpload);
 
-// Direct Access Download / Stream Endpoint
-app.get('/api/download/:messageId/:filename?', async (req: Request, res: Response): Promise<void> => {
-  const { messageId } = req.params;
+const CDN_CACHE_DIR = path.resolve(process.cwd(), 'data', 'cdn_cache');
+if (!fs.existsSync(CDN_CACHE_DIR)) {
+  fs.mkdirSync(CDN_CACHE_DIR, { recursive: true });
+}
 
-  try {
-    // Check for password protection in Database
-    const file = await getFileByMessageId(messageId);
-    if (file && file.download_password) {
-      const providedPassword = req.query.password || req.headers['x-download-password'] || '';
-      if (providedPassword !== file.download_password) {
-        // Return a gorgeous HTML password prompt
-        res.setHeader('Content-Type', 'text/html');
-        res.status(403).send(`
-          <!DOCTYPE html>
-          <html lang="en" class="h-full">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Password Protected File - TeleCloud</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet">
-            <style>
-              body { font-family: 'Plus Jakarta Sans', sans-serif; }
-            </style>
-          </head>
-          <body class="bg-slate-950 text-slate-100 flex items-center justify-center min-h-full p-4">
-            <div class="max-w-md w-full p-8 rounded-3xl bg-slate-900 border border-slate-800 shadow-2xl space-y-6 text-center">
-              <div class="w-16 h-14 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center mx-auto border border-sky-500/20">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                </svg>
-              </div>
-              <div class="space-y-2">
-                <h1 class="text-xl font-extrabold text-white">Password Protected File</h1>
-                <p class="text-xs text-slate-400 truncate max-w-xs mx-auto">File: ${file.file_name}</p>
-                <p class="text-xs text-slate-500 font-medium">This secure file is encrypted in your personal cloud. Enter the access password to retrieve or stream this file.</p>
-              </div>
-              
-              <form method="GET" class="space-y-4">
-                <input type="password" name="password" required placeholder="Enter download password" 
-                  class="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm focus:outline-none focus:border-sky-500 text-center font-bold tracking-widest" />
-                <button type="submit" 
-                  class="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold text-sm transition active:scale-95">
-                  Decrypt & Download Stream
-                </button>
-              </form>
-              <div class="text-[10px] text-slate-600 font-mono uppercase tracking-wider">POWERED BY TELECLOUD ENGINE</div>
-            </div>
-          </body>
-          </html>
-        `);
-        return;
-      }
-    }
+// Global High-Performance Public CDN Streaming Engine
+async function streamCdnFile(
+  messageId: string | number,
+  req: Request,
+  res: Response,
+  options?: { customFileName?: string; downloadPassword?: string | null; storageChat?: string }
+): Promise<void> {
+  const msgId = String(messageId);
 
-    const pyUrl = `${PY_BASE}/stream/${messageId}`;
-    const headers: Record<string, string> = {};
-    if (req.headers.range) {
-      headers['Range'] = req.headers.range;
-    }
+  // Set global public CDN CORS & caching headers for direct embedding & streaming
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition, ETag');
+  res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
-    const pyRes = await fetch(pyUrl, {
-      method: 'GET',
-      headers,
-    });
-
-    if (!pyRes.ok && pyRes.status !== 206) {
-      const errText = await pyRes.text();
-      res.status(pyRes.status).send(errText);
-      return;
-    }
-
-    res.status(pyRes.status);
-    
-    const contentType = pyRes.headers.get('content-type');
-    const contentLength = pyRes.headers.get('content-length');
-    const contentRange = pyRes.headers.get('content-range');
-    const acceptRanges = pyRes.headers.get('accept-ranges');
-    const contentDisposition = pyRes.headers.get('content-disposition');
-
-    if (contentType) res.setHeader('Content-Type', contentType);
-    if (contentLength) res.setHeader('Content-Length', contentLength);
-    if (contentRange) res.setHeader('Content-Range', contentRange);
-    if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
-    if (contentDisposition) {
-      res.setHeader('Content-Disposition', contentDisposition);
-    } else if (req.params.filename) {
-      res.setHeader('Content-Disposition', `inline; filename="${req.params.filename}"`);
-    }
-
-    if (!pyRes.body) {
-      res.end();
-      return;
-    }
-
-    // Pipe the web readable stream to express response
-    const reader = pyRes.body.getReader();
-    const pump = async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
-        }
-        res.end();
-      } catch (streamErr) {
-        console.error('[Stream Error]', streamErr);
-        res.end();
-      }
-    };
-    pump();
-  } catch (err: any) {
-    res.status(500).send(`Error downloading file: ${err.message}`);
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
   }
+
+  // 1. Resolve file metadata from MySQL if available
+  let file = await getFileByMessageId(msgId);
+  const fileName = options?.customFileName || file?.file_name || `file_${msgId}`;
+  const mimeType = file?.mime_type || 'application/octet-stream';
+  const targetStorageChat = options?.storageChat || file?.storage_chat || '';
+
+  // 2. Check Password Protection
+  const requiredPassword = options?.downloadPassword !== undefined ? options.downloadPassword : file?.download_password;
+  if (requiredPassword) {
+    const providedPassword = req.query.password || req.headers['x-download-password'] || '';
+    if (providedPassword !== requiredPassword) {
+      res.setHeader('Content-Type', 'text/html');
+      res.status(403).send(`
+        <!DOCTYPE html>
+        <html lang="en" class="h-full">
+        <head>
+          <meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1.0">
+          <title>Password Protected File - TeleCloud CDN</title>
+          <script src="https://cdn.tailwindcss.com"></script>
+        </head>
+        <body class="bg-slate-950 text-slate-100 flex items-center justify-center min-h-full p-4">
+          <div class="max-w-md w-full p-8 rounded-3xl bg-slate-900 border border-slate-800 shadow-2xl space-y-6 text-center">
+            <h1 class="text-xl font-extrabold text-white">Password Protected File</h1>
+            <p class="text-xs text-slate-400 truncate max-w-xs mx-auto">File: ${fileName}</p>
+            <form method="GET" class="space-y-4">
+              <input type="password" name="password" required placeholder="Enter download password" 
+                class="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm focus:outline-none focus:border-sky-500 text-center font-bold tracking-widest" />
+              <button type="submit" 
+                class="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold text-sm transition active:scale-95">
+                Decrypt & Stream File
+              </button>
+            </form>
+          </div>
+        </body>
+        </html>
+      `);
+      return;
+    }
+  }
+
+  // 3. Check Local Disk Cache for Instant 0ms Latency CDN Delivery
+  const cachePath = path.join(CDN_CACHE_DIR, `${msgId}.bin`);
+  if (fs.existsSync(cachePath)) {
+    try {
+      const stat = fs.statSync(cachePath);
+      if (stat.size > 0) {
+        const range = req.headers.range;
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Accept-Ranges', 'bytes');
+        res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
+        res.setHeader('ETag', `"${msgId}-${stat.size}"`);
+
+        if (range) {
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
+          const chunksize = end - start + 1;
+          res.status(206);
+          res.setHeader('Content-Range', `bytes ${start}-${end}/${stat.size}`);
+          res.setHeader('Content-Length', chunksize);
+
+          if (req.method === 'HEAD') {
+            res.end();
+            return;
+          }
+
+          const fileStream = fs.createReadStream(cachePath, { start, end });
+          fileStream.pipe(res);
+          return;
+        } else {
+          res.status(200);
+          res.setHeader('Content-Length', stat.size);
+
+          if (req.method === 'HEAD') {
+            res.end();
+            return;
+          }
+
+          const fileStream = fs.createReadStream(cachePath);
+          fileStream.pipe(res);
+          return;
+        }
+      }
+    } catch (cacheErr) {
+      console.warn('[CDN Cache Read Error]', cacheErr);
+    }
+  }
+
+  // 4. Stream directly from Telegram MTProto with Auto-Retry
+  const pyUrl = `${PY_BASE}/stream/${msgId}?storage_chat=${encodeURIComponent(targetStorageChat)}`;
+  const headers: Record<string, string> = {};
+  if (req.headers.range) {
+    headers['Range'] = req.headers.range;
+  }
+
+  let pyRes: any = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      pyRes = await fetch(pyUrl, {
+        method: req.method === 'HEAD' ? 'HEAD' : 'GET',
+        headers,
+      });
+      if (pyRes.ok || pyRes.status === 206) {
+        break;
+      }
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 600));
+      }
+    } catch (fetchErr) {
+      if (attempt === 2) throw fetchErr;
+      await new Promise((r) => setTimeout(r, 600));
+    }
+  }
+
+  if (!pyRes || (!pyRes.ok && pyRes.status !== 206)) {
+    const errText = pyRes ? await pyRes.text() : 'Service Unavailable';
+    res.status(pyRes ? pyRes.status : 503).send(errText);
+    return;
+  }
+
+  res.status(pyRes.status);
+  const contentType = pyRes.headers.get('content-type') || mimeType;
+  const contentLength = pyRes.headers.get('content-length');
+  const contentRange = pyRes.headers.get('content-range');
+  const acceptRanges = pyRes.headers.get('accept-ranges') || 'bytes';
+  const contentDisposition = pyRes.headers.get('content-disposition') || `inline; filename="${fileName}"`;
+
+  res.setHeader('Content-Type', contentType);
+  if (contentLength) res.setHeader('Content-Length', contentLength);
+  if (contentRange) res.setHeader('Content-Range', contentRange);
+  res.setHeader('Accept-Ranges', acceptRanges);
+  res.setHeader('Content-Disposition', contentDisposition);
+
+  if (req.method === 'HEAD' || !pyRes.body) {
+    res.end();
+    return;
+  }
+
+  // Write full downloads to CDN disk cache for future instant delivery
+  let cacheStream: fs.WriteStream | null = null;
+  const tmpCachePath = path.join(CDN_CACHE_DIR, `${msgId}.tmp`);
+  if (pyRes.status === 200) {
+    try {
+      cacheStream = fs.createWriteStream(tmpCachePath);
+    } catch {}
+  }
+
+  const reader = pyRes.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(value);
+      if (cacheStream) {
+        cacheStream.write(value);
+      }
+    }
+    res.end();
+    if (cacheStream) {
+      cacheStream.end();
+      fs.rename(tmpCachePath, cachePath, () => {});
+    }
+  } catch (streamErr) {
+    console.error('[CDN Stream Error]', streamErr);
+    if (cacheStream) {
+      cacheStream.end();
+      fs.unlink(tmpCachePath, () => {});
+    }
+    res.end();
+  }
+}
+
+// Direct Access Download / Stream Endpoints with CDN support
+app.options(['/api/download/:messageId/:filename?', '/f/:file_id', '/stream/:message_id'], (_req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.status(204).end();
 });
 
-// Direct Shortlink Slug Service (s3.htknetwork.in/f/{file_id})
+app.head('/api/download/:messageId/:filename?', async (req: Request, res: Response): Promise<void> => {
+  await streamCdnFile(req.params.messageId, req, res, { customFileName: req.params.filename });
+});
+
+app.get('/api/download/:messageId/:filename?', async (req: Request, res: Response): Promise<void> => {
+  await streamCdnFile(req.params.messageId, req, res, { customFileName: req.params.filename });
+});
+
+// Direct Shortlink Slug Service (s3.htknetwork.in/f/{file_id}) - Fully Public CDN
+app.head('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
+  const { file_id } = req.params;
+  let messageId = file_id;
+  if (!/^\d+$/.test(file_id)) {
+    const num = parseInt(file_id, 36);
+    if (!isNaN(num)) messageId = String(num);
+  }
+  await streamCdnFile(messageId, req, res);
+});
+
 app.get('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
   const { file_id } = req.params;
   let messageId = file_id;
-  
   if (!/^\d+$/.test(file_id)) {
-    // Convert from base36 to base10 messageId
     const num = parseInt(file_id, 36);
-    if (!isNaN(num)) {
-      messageId = String(num);
-    }
+    if (!isNaN(num)) messageId = String(num);
   }
-
-  try {
-    const file = await getFileByMessageId(messageId);
-    if (!file) {
-      res.status(404).send('File not found in database');
-      return;
-    }
-    
-    if (file.download_password) {
-      const providedPassword = req.query.password || req.headers['x-download-password'] || '';
-      if (providedPassword !== file.download_password) {
-        // Return a gorgeous HTML password prompt
-        res.setHeader('Content-Type', 'text/html');
-        res.status(403).send(`
-          <!DOCTYPE html>
-          <html lang="en" class="h-full">
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Password Protected File - TeleCloud</title>
-            <script src="https://cdn.tailwindcss.com"></script>
-            <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap" rel="stylesheet">
-            <style>
-              body { font-family: 'Plus Jakarta Sans', sans-serif; }
-            </style>
-          </head>
-          <body class="bg-slate-950 text-slate-100 flex items-center justify-center min-h-full p-4">
-            <div class="max-w-md w-full p-8 rounded-3xl bg-slate-900 border border-slate-800 shadow-2xl space-y-6 text-center">
-              <div class="w-16 h-14 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center mx-auto border border-sky-500/20">
-                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                </svg>
-              </div>
-              <div class="space-y-2">
-                <h1 class="text-xl font-extrabold text-white">Password Protected File</h1>
-                <p class="text-xs text-slate-400 truncate max-w-xs mx-auto">File: ${file.file_name}</p>
-                <p class="text-xs text-slate-500 font-medium">This secure file is encrypted in your personal cloud. Enter the access password to retrieve or stream this file.</p>
-              </div>
-              
-              <form method="GET" class="space-y-4">
-                <input type="password" name="password" required placeholder="Enter download password" 
-                  class="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm focus:outline-none focus:border-sky-500 text-center font-bold tracking-widest" />
-                <button type="submit" 
-                  class="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 font-extrabold text-sm transition active:scale-95">
-                  Decrypt & Download Stream
-                </button>
-              </form>
-              <div class="text-[10px] text-slate-600 font-mono uppercase tracking-wider">POWERED BY TELECLOUD ENGINE</div>
-            </div>
-          </body>
-          </html>
-        `);
-        return;
-      }
-    }
-
-    const pyUrl = `${PY_BASE}/stream/${messageId}`;
-    const headers: Record<string, string> = {};
-    if (req.headers.range) {
-      headers['Range'] = req.headers.range;
-    }
-
-    const pyRes = await fetch(pyUrl, {
-      method: 'GET',
-      headers,
-    });
-
-    if (!pyRes.ok && pyRes.status !== 206) {
-      const errText = await pyRes.text();
-      res.status(pyRes.status).send(errText);
-      return;
-    }
-
-    res.status(pyRes.status);
-    
-    const contentType = pyRes.headers.get('content-type');
-    const contentLength = pyRes.headers.get('content-length');
-    const contentRange = pyRes.headers.get('content-range');
-    const acceptRanges = pyRes.headers.get('accept-ranges');
-    const contentDisposition = pyRes.headers.get('content-disposition');
-
-    if (contentType) res.setHeader('Content-Type', contentType);
-    if (contentLength) res.setHeader('Content-Length', contentLength);
-    if (contentRange) res.setHeader('Content-Range', contentRange);
-    if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
-    
-    if (contentDisposition) {
-      res.setHeader('Content-Disposition', contentDisposition);
-    } else {
-      res.setHeader('Content-Disposition', `inline; filename="${file.file_name}"`);
-    }
-
-    if (!pyRes.body) {
-      res.end();
-      return;
-    }
-
-    const reader = pyRes.body.getReader();
-    const pump = async () => {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
-        }
-        res.end();
-      } catch (streamErr) {
-        console.error('[Stream Error]', streamErr);
-        res.end();
-      }
-    };
-    pump();
-  } catch (err: any) {
-    res.status(500).send(`Error downloading file: ${err.message}`);
-  }
+  await streamCdnFile(messageId, req, res);
 });
 
 // Provide standalone Python script download
