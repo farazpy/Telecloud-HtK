@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import QRCode from 'qrcode';
 import {
   UploadCloud,
@@ -54,6 +54,9 @@ import {
   X,
   Sun,
   Moon,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
   ExternalLink as LinkExternal
 } from 'lucide-react';
 import { ApiConsolePage } from './components/ApiConsolePage';
@@ -163,8 +166,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.4.7
-  const APP_VERSION = "v1.4.7";
+  // App Version in Header - Incremented to v1.4.8
+  const APP_VERSION = "v1.4.8";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -458,6 +461,27 @@ export default function App() {
   const [loadingFiles, setLoadingFiles] = useState<boolean>(false);
   const [fileSearch, setFileSearch] = useState<string>('');
   const [fileTypeFilter, setFileTypeFilter] = useState<string>('all');
+  
+  // File Sorting State: date_desc, date_asc, name_asc, name_desc, size_desc, size_asc
+  type FileSortKey = 'date_desc' | 'date_asc' | 'name_asc' | 'name_desc' | 'size_desc' | 'size_asc';
+  const [fileSort, setFileSort] = useState<FileSortKey>('date_desc');
+  const [sortDropdownOpen, setSortDropdownOpen] = useState<boolean>(false);
+  const sortDropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleSortClickOutside = (event: MouseEvent) => {
+      if (sortDropdownRef.current && !sortDropdownRef.current.contains(event.target as Node)) {
+        setSortDropdownOpen(false);
+      }
+    };
+    if (sortDropdownOpen) {
+      document.addEventListener('mousedown', handleSortClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleSortClickOutside);
+    };
+  }, [sortDropdownOpen]);
+
   const [editingFile, setEditingFile] = useState<StorageFile | null>(null);
   const [newFileNameInput, setNewFileNameInput] = useState<string>('');
   const [renamingLoading, setRenamingLoading] = useState<boolean>(false);
@@ -1456,6 +1480,43 @@ export default function App() {
     if (fileTypeFilter === 'documents') return file.mime_type.includes('pdf') || file.mime_type.includes('text') || file.mime_type.includes('doc');
     return true;
   });
+
+  const sortedFiles = useMemo(() => {
+    return [...filteredFiles].sort((a, b) => {
+      if (fileSort === 'name_asc') {
+        return (a.file_name || '').localeCompare(b.file_name || '', undefined, { numeric: true, sensitivity: 'base' });
+      }
+      if (fileSort === 'name_desc') {
+        return (b.file_name || '').localeCompare(a.file_name || '', undefined, { numeric: true, sensitivity: 'base' });
+      }
+      if (fileSort === 'size_asc') {
+        return (Number(a.file_size) || 0) - (Number(b.file_size) || 0);
+      }
+      if (fileSort === 'size_desc') {
+        return (Number(b.file_size) || 0) - (Number(a.file_size) || 0);
+      }
+      if (fileSort === 'date_asc') {
+        const timeA = new Date(a.created_at || a.date || 0).getTime() || Number(a.message_id) || 0;
+        const timeB = new Date(b.created_at || b.date || 0).getTime() || Number(b.message_id) || 0;
+        return timeA - timeB;
+      }
+      // 'date_desc' (default: newest first)
+      const timeA = new Date(a.created_at || a.date || 0).getTime() || Number(a.message_id) || 0;
+      const timeB = new Date(b.created_at || b.date || 0).getTime() || Number(b.message_id) || 0;
+      return timeB - timeA;
+    });
+  }, [filteredFiles, fileSort]);
+
+  const SORT_OPTIONS: { id: FileSortKey; label: string; field: 'name' | 'size' | 'date'; order: 'asc' | 'desc'; iconLabel: string }[] = [
+    { id: 'date_desc', label: 'Upload Date (Newest first)', field: 'date', order: 'desc', iconLabel: 'Date: Newest' },
+    { id: 'date_asc', label: 'Upload Date (Oldest first)', field: 'date', order: 'asc', iconLabel: 'Date: Oldest' },
+    { id: 'name_asc', label: 'File Name (A → Z)', field: 'name', order: 'asc', iconLabel: 'Name: A → Z' },
+    { id: 'name_desc', label: 'File Name (Z → A)', field: 'name', order: 'desc', iconLabel: 'Name: Z → A' },
+    { id: 'size_desc', label: 'File Size (Largest first)', field: 'size', order: 'desc', iconLabel: 'Size: Largest' },
+    { id: 'size_asc', label: 'File Size (Smallest first)', field: 'size', order: 'asc', iconLabel: 'Size: Smallest' },
+  ];
+
+  const currentSortObj = SORT_OPTIONS.find((s) => s.id === fileSort) || SORT_OPTIONS[0];
 
   const selectedFiles = files.filter((f) => selectedFileIds.includes(f.message_id));
   const selectedTotalBytes = selectedFiles.reduce((acc, f) => acc + (Number(f.file_size) || 0), 0);
@@ -3551,20 +3612,170 @@ export default function App() {
                     )}
                   </div>
 
-                  <div className="flex items-center space-x-1 self-start sm:self-auto overflow-x-auto w-full sm:w-auto pb-1 sm:pb-0">
-                    {['all', 'images', 'videos', 'audio', 'documents'].map((cat) => (
+                  <div className="flex items-center space-x-2 self-start sm:self-auto overflow-x-auto w-full sm:w-auto pb-1 sm:pb-0">
+                    <div className="flex items-center space-x-1">
+                      {['all', 'images', 'videos', 'audio', 'documents'].map((cat) => (
+                        <button
+                          key={cat}
+                          onClick={() => setFileTypeFilter(cat)}
+                          className={`px-3 py-1 text-xs rounded-xl capitalize font-semibold transition whitespace-nowrap ${
+                            fileTypeFilter === cat
+                              ? 'bg-sky-500 text-white shadow-xs'
+                              : (darkMode ? 'text-slate-400 hover:text-white bg-slate-800' : 'text-slate-600 hover:text-slate-900 bg-slate-100')
+                          }`}
+                        >
+                          {cat}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Sorting Dropdown Component */}
+                    <div className="relative flex-shrink-0" ref={sortDropdownRef}>
                       <button
-                        key={cat}
-                        onClick={() => setFileTypeFilter(cat)}
-                        className={`px-3 py-1 text-xs rounded-xl capitalize font-semibold transition whitespace-nowrap ${
-                          fileTypeFilter === cat
-                            ? 'bg-sky-500 text-white shadow-xs'
-                            : (darkMode ? 'text-slate-400 hover:text-white bg-slate-800' : 'text-slate-600 hover:text-slate-900 bg-slate-100')
+                        type="button"
+                        onClick={() => setSortDropdownOpen((prev) => !prev)}
+                        className={`px-3 py-1 text-xs rounded-xl font-bold border shadow-xs flex items-center space-x-1.5 transition whitespace-nowrap ${
+                          sortDropdownOpen
+                            ? 'ring-2 ring-sky-500 border-sky-500 bg-sky-500 text-white'
+                            : darkMode
+                            ? 'bg-slate-900 hover:bg-slate-800 text-slate-200 border-slate-700'
+                            : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
                         }`}
+                        title="Sort files by Name, Size, or Upload Date"
+                        aria-label="Sort files"
                       >
-                        {cat}
+                        <ArrowUpDown className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Sort:</span>
+                        <span>{currentSortObj.iconLabel}</span>
+                        <ChevronDown className={`w-3 h-3 transition-transform duration-200 ${sortDropdownOpen ? 'rotate-180' : ''}`} />
                       </button>
-                    ))}
+
+                      {sortDropdownOpen && (
+                        <div
+                          className={`absolute right-0 mt-2 w-64 rounded-2xl p-2 shadow-2xl border z-50 animate-in fade-in zoom-in-95 duration-150 ${
+                            darkMode ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-900'
+                          }`}
+                        >
+                          <div className={`px-2.5 py-1.5 text-[10px] font-mono uppercase tracking-wider font-bold border-b mb-1 flex items-center justify-between ${
+                            darkMode ? 'text-slate-400 border-slate-800' : 'text-slate-500 border-slate-100'
+                          }`}>
+                            <span>Sort Files By</span>
+                            <span className="text-[9px] lowercase opacity-75">asc / desc</span>
+                          </div>
+
+                          {/* Group: Upload Date */}
+                          <div className="mb-1.5">
+                            <div className="px-2.5 py-1 text-[10px] font-bold text-sky-500 uppercase tracking-wider">
+                              Upload Date
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { setFileSort('date_desc'); setSortDropdownOpen(false); }}
+                              className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs flex items-center justify-between transition ${
+                                fileSort === 'date_desc'
+                                  ? (darkMode ? 'bg-sky-950/80 text-sky-400 font-bold' : 'bg-sky-50 text-sky-700 font-bold')
+                                  : (darkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-700')
+                              }`}
+                            >
+                              <div className="flex items-center space-x-2">
+                                <ArrowDown className="w-3.5 h-3.5 text-slate-400" />
+                                <span>Newest first (Descending)</span>
+                              </div>
+                              {fileSort === 'date_desc' && <Check className="w-3.5 h-3.5 text-sky-500" />}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setFileSort('date_asc'); setSortDropdownOpen(false); }}
+                              className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs flex items-center justify-between transition ${
+                                fileSort === 'date_asc'
+                                  ? (darkMode ? 'bg-sky-950/80 text-sky-400 font-bold' : 'bg-sky-50 text-sky-700 font-bold')
+                                  : (darkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-700')
+                              }`}
+                            >
+                              <div className="flex items-center space-x-2">
+                                <ArrowUp className="w-3.5 h-3.5 text-slate-400" />
+                                <span>Oldest first (Ascending)</span>
+                              </div>
+                              {fileSort === 'date_asc' && <Check className="w-3.5 h-3.5 text-sky-500" />}
+                            </button>
+                          </div>
+
+                          {/* Group: File Name */}
+                          <div className="mb-1.5">
+                            <div className="px-2.5 py-1 text-[10px] font-bold text-indigo-500 uppercase tracking-wider">
+                              File Name
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { setFileSort('name_asc'); setSortDropdownOpen(false); }}
+                              className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs flex items-center justify-between transition ${
+                                fileSort === 'name_asc'
+                                  ? (darkMode ? 'bg-indigo-950/80 text-indigo-400 font-bold' : 'bg-indigo-50 text-indigo-700 font-bold')
+                                  : (darkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-700')
+                              }`}
+                            >
+                              <div className="flex items-center space-x-2">
+                                <ArrowUp className="w-3.5 h-3.5 text-slate-400" />
+                                <span>Name: A → Z (Ascending)</span>
+                              </div>
+                              {fileSort === 'name_asc' && <Check className="w-3.5 h-3.5 text-indigo-500" />}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setFileSort('name_desc'); setSortDropdownOpen(false); }}
+                              className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs flex items-center justify-between transition ${
+                                fileSort === 'name_desc'
+                                  ? (darkMode ? 'bg-indigo-950/80 text-indigo-400 font-bold' : 'bg-indigo-50 text-indigo-700 font-bold')
+                                  : (darkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-700')
+                              }`}
+                            >
+                              <div className="flex items-center space-x-2">
+                                <ArrowDown className="w-3.5 h-3.5 text-slate-400" />
+                                <span>Name: Z → A (Descending)</span>
+                              </div>
+                              {fileSort === 'name_desc' && <Check className="w-3.5 h-3.5 text-indigo-500" />}
+                            </button>
+                          </div>
+
+                          {/* Group: File Size */}
+                          <div>
+                            <div className="px-2.5 py-1 text-[10px] font-bold text-emerald-500 uppercase tracking-wider">
+                              File Size
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => { setFileSort('size_desc'); setSortDropdownOpen(false); }}
+                              className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs flex items-center justify-between transition ${
+                                fileSort === 'size_desc'
+                                  ? (darkMode ? 'bg-emerald-950/80 text-emerald-400 font-bold' : 'bg-emerald-50 text-emerald-700 font-bold')
+                                  : (darkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-700')
+                              }`}
+                            >
+                              <div className="flex items-center space-x-2">
+                                <ArrowDown className="w-3.5 h-3.5 text-slate-400" />
+                                <span>Largest first (Descending)</span>
+                              </div>
+                              {fileSort === 'size_desc' && <Check className="w-3.5 h-3.5 text-emerald-500" />}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => { setFileSort('size_asc'); setSortDropdownOpen(false); }}
+                              className={`w-full text-left px-2.5 py-1.5 rounded-xl text-xs flex items-center justify-between transition ${
+                                fileSort === 'size_asc'
+                                  ? (darkMode ? 'bg-emerald-950/80 text-emerald-400 font-bold' : 'bg-emerald-50 text-emerald-700 font-bold')
+                                  : (darkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-700')
+                              }`}
+                            >
+                              <div className="flex items-center space-x-2">
+                                <ArrowUp className="w-3.5 h-3.5 text-slate-400" />
+                                <span>Smallest first (Ascending)</span>
+                              </div>
+                              {fileSort === 'size_asc' && <Check className="w-3.5 h-3.5 text-emerald-500" />}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -3590,7 +3801,7 @@ export default function App() {
               ) : viewMode === 'grid' ? (
                 /* Card Grid View with Checkboxes */
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                  {filteredFiles.map((file) => {
+                  {sortedFiles.map((file) => {
                     const isSelected = selectedFileIds.includes(file.message_id);
                     return (
                       <div
@@ -3741,16 +3952,61 @@ export default function App() {
                             />
                           </th>
                           <th className="py-3.5 px-4">File ID</th>
-                          <th className="py-3.5 px-4">File Name</th>
+                          <th
+                            onClick={() => setFileSort((prev) => (prev === 'name_asc' ? 'name_desc' : 'name_asc'))}
+                            className="py-3.5 px-4 cursor-pointer select-none hover:text-sky-500 transition group"
+                            title="Click to sort by File Name (Ascending / Descending)"
+                          >
+                            <div className="flex items-center space-x-1.5">
+                              <span>File Name</span>
+                              {fileSort === 'name_asc' ? (
+                                <ArrowUp className="w-3.5 h-3.5 text-sky-500" />
+                              ) : fileSort === 'name_desc' ? (
+                                <ArrowDown className="w-3.5 h-3.5 text-sky-500" />
+                              ) : (
+                                <ArrowUpDown className="w-3 h-3 opacity-30 group-hover:opacity-75 transition-opacity" />
+                              )}
+                            </div>
+                          </th>
                           <th className="py-3.5 px-4">Workspace</th>
-                          <th className="py-3.5 px-4">Size</th>
+                          <th
+                            onClick={() => setFileSort((prev) => (prev === 'size_desc' ? 'size_asc' : 'size_desc'))}
+                            className="py-3.5 px-4 cursor-pointer select-none hover:text-sky-500 transition group"
+                            title="Click to sort by File Size (Largest / Smallest)"
+                          >
+                            <div className="flex items-center space-x-1.5">
+                              <span>Size</span>
+                              {fileSort === 'size_desc' ? (
+                                <ArrowDown className="w-3.5 h-3.5 text-sky-500" />
+                              ) : fileSort === 'size_asc' ? (
+                                <ArrowUp className="w-3.5 h-3.5 text-sky-500" />
+                              ) : (
+                                <ArrowUpDown className="w-3 h-3 opacity-30 group-hover:opacity-75 transition-opacity" />
+                              )}
+                            </div>
+                          </th>
                           <th className="py-3.5 px-4">Type</th>
-                          <th className="py-3.5 px-4">Upload Date</th>
+                          <th
+                            onClick={() => setFileSort((prev) => (prev === 'date_desc' ? 'date_asc' : 'date_desc'))}
+                            className="py-3.5 px-4 cursor-pointer select-none hover:text-sky-500 transition group"
+                            title="Click to sort by Upload Date (Newest / Oldest)"
+                          >
+                            <div className="flex items-center space-x-1.5">
+                              <span>Upload Date</span>
+                              {fileSort === 'date_desc' ? (
+                                <ArrowDown className="w-3.5 h-3.5 text-sky-500" />
+                              ) : fileSort === 'date_asc' ? (
+                                <ArrowUp className="w-3.5 h-3.5 text-sky-500" />
+                              ) : (
+                                <ArrowUpDown className="w-3 h-3 opacity-30 group-hover:opacity-75 transition-opacity" />
+                              )}
+                            </div>
+                          </th>
                           <th className="py-3.5 px-4 text-right">Actions</th>
                         </tr>
                       </thead>
                       <tbody className={`divide-y ${darkMode ? 'divide-slate-800' : 'divide-slate-100'}`}>
-                        {filteredFiles.map((file) => {
+                        {sortedFiles.map((file) => {
                           const isSelected = selectedFileIds.includes(file.message_id);
                           return (
                             <tr
