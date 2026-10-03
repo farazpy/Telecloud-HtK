@@ -869,21 +869,34 @@ class TelethonManager:
             "session_type": session_type
         }
 
-    async def list_files(self, limit: int = 50):
-        await self.ensure_connected()
-        if not self.client or not self.is_connected:
+    async def list_files(self, limit: int = 100, storage_chat: Optional[str] = None, session_str: Optional[str] = None):
+        target_chat = (storage_chat or self.storage_chat or "me").strip()
+        active_client = None
+
+        if session_str and str(session_str).strip():
+            try:
+                active_client = await self.get_client_for_session(session_str)
+            except Exception as e:
+                logger.warning(f"User session get client notice for list_files: {e}")
+
+        if not active_client:
+            await self.ensure_connected()
+            if self.client and self.is_connected:
+                active_client = self.client
+
+        if not active_client:
             return []
 
         # Bot accounts cannot call iter_messages/GetHistoryRequest without special peer cache
-        if self.active_user and self.active_user.get("is_bot"):
+        if self.active_user and self.active_user.get("is_bot") and active_client == self.client:
             return []
 
         files = []
         try:
-            entity = await self.get_target_entity()
-            async for msg in self.client.iter_messages(entity, limit=limit):
+            entity = await self.resolve_entity_for_client(active_client, target_chat)
+            async for msg in active_client.iter_messages(entity, limit=limit):
                 if msg.media:
-                    file_name = "unknown"
+                    file_name = f"file_{msg.id}.bin"
                     file_size = 0
                     mime_type = "application/octet-stream"
 
@@ -907,10 +920,10 @@ class TelethonManager:
                         "mime_type": mime_type,
                         "caption": msg.text or "",
                         "date": msg.date.isoformat() if msg.date else "",
-                        "storage_chat": str(self.storage_chat)
+                        "storage_chat": str(target_chat)
                     })
         except Exception as e:
-            logger.warning(f"Notice listing MTProto history: {e}")
+            logger.warning(f"Notice listing MTProto history for '{target_chat}': {e}")
 
         return files
 
@@ -1155,10 +1168,25 @@ async def handle_upload(request: web.Request):
 
 async def handle_list_files(request: web.Request):
     try:
-        files = await manager.list_files()
+        limit = int(request.query.get("limit", 100))
+        chat_param = request.query.get("storage_chat") or request.query.get("chat_id")
+        user_session = request.query.get("session_str") or request.query.get("user_session")
+        files = await manager.list_files(limit=limit, storage_chat=chat_param, session_str=user_session)
         return web.json_response({"files": files})
     except Exception as e:
         logger.exception("Error listing files")
+        return web.json_response({"error": str(e)}, status=500)
+
+async def handle_fetch_history(request: web.Request):
+    try:
+        data = await request.json() if request.can_read_body else {}
+        limit = int(data.get("limit", 300))
+        storage_chat = data.get("storage_chat")
+        session_str = data.get("session_str")
+        files = await manager.list_files(limit=limit, storage_chat=storage_chat, session_str=session_str)
+        return web.json_response({"success": True, "count": len(files), "files": files})
+    except Exception as e:
+        logger.exception("Error in handle_fetch_history")
         return web.json_response({"error": str(e)}, status=500)
 
 async def handle_delete_file(request: web.Request):
@@ -1376,6 +1404,7 @@ def init_app():
     app.router.add_get("/api/py/dialogs", handle_list_dialogs)
     app.router.add_post("/api/py/upload", handle_upload)
     app.router.add_get("/api/py/files", handle_list_files)
+    app.router.add_post("/api/py/fetch_history", handle_fetch_history)
     app.router.add_delete("/api/py/files/{message_id}", handle_delete_file)
     app.router.add_get("/api/py/stream/{message_id}", handle_stream_file)
 

@@ -171,8 +171,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.5.3
-  const APP_VERSION = "v1.5.3";
+  // App Version in Header - Incremented to v1.5.4
+  const APP_VERSION = "v1.5.4";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -599,6 +599,10 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showQrForLink, setShowQrForLink] = useState<string | null>(null);
 
+  // Fetch Old Telegram Files State
+  const [isFetchingOldFiles, setIsFetchingOldFiles] = useState<boolean>(false);
+  const [fetchOldFilesStatus, setFetchOldFilesStatus] = useState<string | null>(null);
+
   useEffect(() => {
     checkStatus();
     fetchDeviceConfig();
@@ -896,6 +900,40 @@ export default function App() {
       console.warn('Could not fetch files:', e.message || e);
     } finally {
       setLoadingFiles(false);
+    }
+  };
+
+  const handleFetchOldFiles = async () => {
+    setIsFetchingOldFiles(true);
+    setFetchOldFilesStatus(null);
+    try {
+      const targetWsId = activeWorkspace?.id || null;
+      const targetChat = activeWorkspace?.storage_chat || storageChat || 'me';
+      const res = await fetch('/api/files/fetch-telegram', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          telegram_id: user?.id,
+          workspace_id: targetWsId,
+          storage_chat: targetChat,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data.success) {
+        await fetchFiles();
+        await fetchStats();
+        await fetchWorkspaces();
+        setFetchOldFilesStatus(
+          data.message || `Successfully imported ${data.imported_count || 0} historical files from Telegram into MySQL!`
+        );
+        setTimeout(() => setFetchOldFilesStatus(null), 6000);
+      } else {
+        alert(data.error || 'Failed to scan channel media from Telegram.');
+      }
+    } catch (err: any) {
+      alert(`Error scanning channel history: ${err.message}`);
+    } finally {
+      setIsFetchingOldFiles(false);
     }
   };
 
@@ -1587,8 +1625,15 @@ export default function App() {
   };
 
   const filteredFiles = files.filter((file) => {
-    // Multi-Workspace Filter
-    if (vaultWorkspaceFilter !== 'all') {
+    // Multi-Workspace Filter: If user is inside a workspace, filter automatically to active workspace
+    if (activeWorkspace) {
+      const belongsToActive =
+        String(file.workspace_id) === String(activeWorkspace.id) ||
+        (!file.workspace_id && activeWorkspace.is_default);
+      if (!belongsToActive) {
+        return false;
+      }
+    } else if (vaultWorkspaceFilter !== 'all') {
       if (String(file.workspace_id) !== String(vaultWorkspaceFilter)) {
         return false;
       }
@@ -3705,12 +3750,24 @@ export default function App() {
               {/* Header with Search and View Mode Switcher */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div>
-                  <h2 className={`text-lg font-extrabold flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                    <HardDrive className="w-5 h-5 text-sky-500" />
-                    <span>Files Vault</span>
-                  </h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className={`text-lg font-extrabold flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                      <HardDrive className="w-5 h-5 text-sky-500" />
+                      <span>Files Vault</span>
+                    </h2>
+                    {activeWorkspace && (
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-purple-500/15 text-purple-400 border border-purple-500/30">
+                        {activeWorkspace.name}
+                      </span>
+                    )}
+                  </div>
                   <p className={`text-xs mt-0.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                     Storage registry for Telegram Account ID: <span className="text-sky-400 font-mono font-bold">{user?.id}</span>
+                    {activeWorkspace && (
+                      <span className="ml-1.5 opacity-80">
+                        • Channel / Destination: <strong className="font-mono text-slate-300">{activeWorkspace.storage_chat === 'me' ? 'Saved Messages' : activeWorkspace.storage_chat}</strong>
+                      </span>
+                    )}
                   </p>
                 </div>
 
@@ -3733,6 +3790,18 @@ export default function App() {
                   </div>
 
                   <button
+                    onClick={handleFetchOldFiles}
+                    disabled={isFetchingOldFiles}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold border shadow-xs flex items-center space-x-1.5 transition cursor-pointer disabled:opacity-50 ${
+                      darkMode ? 'bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border-sky-500/30' : 'bg-sky-50 hover:bg-sky-100 text-sky-700 border-sky-200'
+                    }`}
+                    title="Scan Telegram channel history and import old files into MySQL"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isFetchingOldFiles ? 'animate-spin text-sky-400' : 'text-sky-500'}`} />
+                    <span>{isFetchingOldFiles ? 'Scanning...' : 'Fetch Old Files'}</span>
+                  </button>
+
+                  <button
                     onClick={fetchFiles}
                     className={`px-3.5 py-2 rounded-xl text-xs font-bold border shadow-xs flex items-center space-x-1.5 transition ${
                       darkMode ? 'bg-slate-900 hover:bg-slate-800 text-slate-200 border-slate-800' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
@@ -3743,6 +3812,14 @@ export default function App() {
                   </button>
                 </div>
               </div>
+
+              {/* Status Banner when Old Files are Fetched */}
+              {fetchOldFilesStatus && (
+                <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl flex items-center gap-3 text-emerald-400 text-xs font-semibold animate-fade-in">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>{fetchOldFilesStatus}</span>
+                </div>
+              )}
 
               {/* Bulk Action Bar (when files are selected) */}
               {selectedFileIds.length > 0 && (
@@ -3791,43 +3868,45 @@ export default function App() {
 
               {/* Filter Tabs and Workspace Pills */}
               <div className="space-y-3">
-                {/* Workspace Filter Pills */}
-                <div className="flex items-center space-x-2 overflow-x-auto pb-2 scrollbar-none touch-pan-x -mx-1 px-1">
-                  <span className={`text-xs font-bold whitespace-nowrap ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Workspace:</span>
-                  <button
-                    onClick={() => setVaultWorkspaceFilter('all')}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap flex items-center space-x-1.5 flex-shrink-0 ${
-                      vaultWorkspaceFilter === 'all'
-                        ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-xs'
-                        : (darkMode ? 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800' : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200')
-                    }`}
-                  >
-                    <Layers className="w-3.5 h-3.5" />
-                    <span>All Workspaces ({files.length})</span>
-                  </button>
-                  {workspaces.map((w) => {
-                    const wsFilesCount = files.filter(
-                      (f) => String(f.workspace_id) === String(w.id) || (!f.workspace_id && w.is_default)
-                    ).length;
-                    return (
-                      <button
-                        key={w.id}
-                        onClick={() => setVaultWorkspaceFilter(String(w.id))}
-                        className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap flex items-center space-x-1.5 flex-shrink-0 ${
-                          vaultWorkspaceFilter === String(w.id)
-                            ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-xs'
-                            : (darkMode ? 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800' : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200')
-                        }`}
-                      >
-                        <span>{w.name}</span>
-                        <span className={`text-[10px] px-1 py-0.2 rounded font-mono font-bold ${
-                          darkMode ? 'bg-slate-800 text-slate-300' : 'bg-slate-100 text-slate-600'
-                        }`}>ID #{w.id}</span>
-                        <span className="text-[10px] opacity-80 font-mono">({wsFilesCount})</span>
-                      </button>
-                    );
-                  })}
-                </div>
+                {/* Workspace Filter Pills: Only shown if user is NOT in a dedicated workspace */}
+                {!activeWorkspace && (
+                  <div className="flex items-center space-x-2 overflow-x-auto pb-2 scrollbar-none touch-pan-x -mx-1 px-1">
+                    <span className={`text-xs font-bold whitespace-nowrap ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Workspace:</span>
+                    <button
+                      onClick={() => setVaultWorkspaceFilter('all')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap flex items-center space-x-1.5 flex-shrink-0 ${
+                        vaultWorkspaceFilter === 'all'
+                          ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-xs'
+                          : (darkMode ? 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800' : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200')
+                      }`}
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>All Workspaces ({files.length})</span>
+                    </button>
+                    {workspaces.map((w) => {
+                      const wsFilesCount = files.filter(
+                        (f) => String(f.workspace_id) === String(w.id) || (!f.workspace_id && w.is_default)
+                      ).length;
+                      return (
+                        <button
+                          key={w.id}
+                          onClick={() => setVaultWorkspaceFilter(String(w.id))}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap flex items-center space-x-1.5 flex-shrink-0 ${
+                            vaultWorkspaceFilter === String(w.id)
+                              ? 'bg-gradient-to-r from-sky-500 to-indigo-600 text-white shadow-xs'
+                              : (darkMode ? 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800' : 'bg-white hover:bg-slate-50 text-slate-700 border border-slate-200')
+                          }`}
+                        >
+                          <span>{w.name}</span>
+                          <span className={`text-[10px] px-1 py-0.2 rounded font-mono font-bold ${
+                            darkMode ? 'bg-slate-800 text-slate-300' : 'bg-slate-100 text-slate-600'
+                          }`}>ID #{w.id}</span>
+                          <span className="text-[10px] opacity-80 font-mono">({wsFilesCount})</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
 
                 <div className={`flex flex-col sm:flex-row items-center justify-between gap-3 p-3 rounded-2xl transition-colors duration-200 ${cardBg}`}>
                   <div className="flex items-center space-x-2 w-full sm:w-auto">
@@ -4029,16 +4108,31 @@ export default function App() {
                   <p className={`text-sm font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>Querying Telegram Cloud Storage...</p>
                 </div>
               ) : filteredFiles.length === 0 ? (
-                <div className={`p-12 text-center rounded-3xl ${cardBg}`}>
-                  <HardDrive className="w-10 h-10 text-slate-500 mx-auto mb-3" />
-                  <p className={`text-base font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>No files found</p>
-                  <p className={`text-xs mt-1 mb-4 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Upload a file to save it to your cloud storage vault.</p>
-                  <button
-                    onClick={() => setDashboardTab('upload')}
-                    className="px-4 py-2 bg-gradient-to-r from-sky-500 to-indigo-600 text-white rounded-xl text-xs font-bold shadow-md"
-                  >
-                    Upload File
-                  </button>
+                <div className={`p-12 text-center rounded-3xl ${cardBg} space-y-4`}>
+                  <HardDrive className="w-12 h-12 text-slate-500 mx-auto" />
+                  <div>
+                    <p className={`text-base font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>No files found</p>
+                    <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                      Upload a new file or fetch and import historical files from your linked Telegram chat ({activeWorkspace?.storage_chat || storageChat || 'Saved Messages'}).
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                    <button
+                      onClick={() => setDashboardTab('upload')}
+                      className="px-5 py-2.5 bg-sky-500 hover:bg-sky-400 text-slate-950 rounded-xl text-xs font-bold shadow-md shadow-sky-500/20 transition active:scale-95 flex items-center space-x-2 cursor-pointer"
+                    >
+                      <UploadCloud className="w-4 h-4" />
+                      <span>Upload File</span>
+                    </button>
+                    <button
+                      onClick={handleFetchOldFiles}
+                      disabled={isFetchingOldFiles}
+                      className="px-5 py-2.5 bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white rounded-xl text-xs font-bold shadow-md shadow-sky-500/20 transition active:scale-95 flex items-center space-x-2 disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${isFetchingOldFiles ? 'animate-spin' : ''}`} />
+                      <span>{isFetchingOldFiles ? 'Scanning Telegram...' : 'Fetch Old Files from Telegram'}</span>
+                    </button>
+                  </div>
                 </div>
               ) : viewMode === 'grid' ? (
                 /* Card Grid View with Checkboxes */

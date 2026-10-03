@@ -866,6 +866,112 @@ app.get(['/api/user/files', '/api/v1/files'], async (req: Request, res: Response
   res.json({ files: formattedFiles, total: formattedFiles.length });
 });
 
+// Fetch & Import historical Telegram files from channel / chat into MySQL database
+app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: Request, res: Response) => {
+  try {
+    let tgId = req.body?.telegram_id || (req.query.telegram_id as string);
+    if (!tgId) {
+      const auth = await authenticateApiRequest(req);
+      if (auth.authenticated && auth.user) {
+        tgId = auth.user.telegram_id;
+      }
+    }
+    if (!tgId) {
+      const statusRes = await forwardToPython('GET', '/status');
+      tgId = statusRes.data?.user?.id;
+    }
+    if (!tgId) {
+      return res.status(401).json({ success: false, error: 'Telegram authentication required to fetch channel files.' });
+    }
+
+    const workspaceId = req.body?.workspace_id ? Number(req.body.workspace_id) : null;
+    let storageChat = req.body?.storage_chat;
+    let workspaceName: string | null = null;
+
+    if (workspaceId) {
+      const wsList = await getWorkspacesFromDb(tgId);
+      const matched = wsList.workspaces.find((w) => w.id === workspaceId);
+      if (matched) {
+        storageChat = matched.storage_chat || storageChat || 'me';
+        workspaceName = matched.name;
+      }
+    }
+
+    if (!storageChat) {
+      const activeWs = await getActiveWorkspaceFromDb(tgId);
+      storageChat = activeWs?.storage_chat || 'me';
+      if (!workspaceId && activeWs) {
+        workspaceName = activeWs.name;
+      }
+    }
+
+    // Retrieve active Telegram MTProto session for user from MySQL
+    const userSessionRecord = await getUserTelegramSessionFromDb(tgId);
+    const sessionStr = userSessionRecord?.session_str || undefined;
+
+    console.log(`[Fetch Telegram] Scanning chat '${storageChat}' for user #${tgId} (workspace: ${workspaceName || 'Default'})...`);
+
+    // Call Python Telethon service to scan MTProto history
+    const pyRes = await forwardToPython('POST', '/fetch_history', {
+      storage_chat: storageChat,
+      session_str: sessionStr,
+      limit: 300,
+    });
+
+    if (!pyRes.data || !Array.isArray(pyRes.data.files)) {
+      return res.status(500).json({
+        success: false,
+        error: pyRes.data?.error || 'Failed to retrieve media history from Telegram.',
+      });
+    }
+
+    const fetchedFiles = pyRes.data.files;
+    let importedCount = 0;
+
+    for (const f of fetchedFiles) {
+      if (!f.message_id) continue;
+      try {
+        await saveFileToDb({
+          telegram_id: tgId,
+          message_id: f.message_id,
+          workspace_id: workspaceId,
+          workspace_name: workspaceName,
+          file_name: f.file_name || `file_${f.message_id}.bin`,
+          original_name: f.file_name || `file_${f.message_id}.bin`,
+          file_size: Number(f.file_size || 0),
+          mime_type: f.mime_type || 'application/octet-stream',
+          caption: f.caption || '',
+          storage_chat: storageChat,
+          direct_link: '',
+        });
+        importedCount++;
+      } catch (saveErr: any) {
+        console.warn(`[Fetch Telegram] Notice saving file #${f.message_id}:`, saveErr.message);
+      }
+    }
+
+    // Retrieve updated files list from MySQL for the user and workspace
+    const dbFiles = await getUserFilesFromDb(tgId, workspaceId || undefined);
+    const formatted = dbFiles.map((file) => ({
+      ...file,
+      direct_link: getShortLink(file.message_id, req),
+    }));
+
+    return res.json({
+      success: true,
+      imported_count: importedCount,
+      total_found: fetchedFiles.length,
+      storage_chat: storageChat,
+      workspace_id: workspaceId,
+      files: formatted,
+      message: `Successfully scanned and imported ${importedCount} old files from Telegram into MySQL!`,
+    });
+  } catch (err: any) {
+    console.error('[Fetch Telegram Error]:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // Analytics and stats for dashboard (workspace-aware)
 app.get('/api/user/stats', async (req: Request, res: Response) => {
   let tgId = req.query.telegram_id as string;
