@@ -97,6 +97,7 @@ interface StorageFile {
   created_at?: string;
   direct_link?: string;
   telegram_link?: string;
+  file_slug?: string;
 }
 
 export interface Workspace {
@@ -171,8 +172,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.6.3
-  const APP_VERSION = "v1.6.3";
+  // App Version in Header - Incremented to v1.6.4
+  const APP_VERSION = "v1.6.4";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -1782,18 +1783,13 @@ export default function App() {
 
   const copyToClipboard = (text: string, id: string) => {
     let formattedText = text;
-    // Intercept and convert standard download links to same domain with /f/ slug
-    if (text && (text.includes('/api/download/') || text.includes('localhost') || text.includes('run.app') || text.includes('htknetwork'))) {
+    // If text is already a full direct link with unique /f/ slug, preserve directly
+    if (text && text.includes('/f/')) {
+      formattedText = text;
+    } else if (text && text.includes('/api/download/')) {
       const match = text.match(/\/api\/download\/([0-9]+)/);
       if (match && match[1]) {
-        const shortId = getFileShortId(match[1]);
-        formattedText = `${window.location.origin}/f/${shortId}`;
-      } else if (text.startsWith('http') && !text.includes('/f/')) {
-        // Fallback or generic convert if shortId is present as digits
-        const numericId = text.replace(/[^0-9]/g, '');
-        if (numericId && numericId.length >= 4) {
-          formattedText = `${window.location.origin}/f/${getFileShortId(numericId)}`;
-        }
+        formattedText = `${window.location.origin}/api/download/${match[1]}`;
       }
     }
     navigator.clipboard.writeText(formattedText);

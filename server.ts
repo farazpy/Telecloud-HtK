@@ -28,6 +28,7 @@ import {
   regenerateUserApiKey,
   verifyWorkspaceBelongsToUser,
   getFileByMessageId,
+  getFileBySlugOrId,
   getTelegramSystemSessionFromDb,
   saveTelegramSystemSessionToDb,
   clearTelegramSystemSessionInDb,
@@ -219,10 +220,22 @@ async function forwardToPython(
   return { status: 503, data: { error: 'Telegram MTProto service unavailable' } };
 }
 
-function getShortLink(messageId: number | string, _req?: Request): string {
-  const shortId = Number(messageId).toString(36).toUpperCase();
+function getShortLink(file: any, _req?: Request): string {
   const domain = process.env.CUSTOM_DOMAIN || 's3.htknetwork.in';
-  return `https://${domain}/f/${shortId}`;
+  if (typeof file === 'object' && file !== null) {
+    if (file.file_slug) {
+      return `https://${domain}/f/${file.file_slug}`;
+    }
+    if (file.id) {
+      const shortId = Number(file.id).toString(36).toLowerCase();
+      return `https://${domain}/f/${shortId}`;
+    }
+    if (file.message_id) {
+      return `https://${domain}/f/${file.message_id}`;
+    }
+  }
+  const slugOrId = String(file || '').trim();
+  return `https://${domain}/f/${slugOrId}`;
 }
 
 // Synchronize active Telegram MTProto Session from Python to MySQL (User 30-day & Admin Fallback)
@@ -959,7 +972,7 @@ app.get(['/api/user/files', '/api/v1/files'], async (req: Request, res: Response
   const formattedFiles = dbFiles.map(file => {
     return {
       ...file,
-      direct_link: getShortLink(file.message_id, req)
+      direct_link: getShortLink(file, req)
     };
   });
   res.json({ files: formattedFiles, total: formattedFiles.length });
@@ -1053,7 +1066,7 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
     const dbFiles = await getUserFilesFromDb(tgId, workspaceId || undefined);
     const formatted = dbFiles.map((file) => ({
       ...file,
-      direct_link: getShortLink(file.message_id, req),
+      direct_link: getShortLink(file, req),
     }));
 
     return res.json({
@@ -1673,12 +1686,12 @@ if (!fs.existsSync(CDN_CACHE_DIR)) {
 
 // Global High-Performance Public CDN Streaming Engine
 async function streamCdnFile(
-  messageId: string | number,
+  slugOrMessageId: string | number,
   req: Request,
   res: Response,
   options?: { customFileName?: string; downloadPassword?: string | null; storageChat?: string }
 ): Promise<void> {
-  const msgId = String(messageId);
+  const identifier = String(slugOrMessageId).trim();
 
   // Set global public CDN CORS & caching headers for direct embedding & streaming
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1693,8 +1706,9 @@ async function streamCdnFile(
     return;
   }
 
-  // 1. Resolve file metadata from MySQL if available
-  let file = await getFileByMessageId(msgId);
+  // 1. Resolve file metadata from MySQL by unique slug, auto-increment id, or message_id
+  let file = await getFileBySlugOrId(identifier);
+  const msgId = file?.message_id ? String(file.message_id) : identifier;
   const fileName = options?.customFileName || file?.file_name || `file_${msgId}`;
   const mimeType = file?.mime_type || 'application/octet-stream';
   const targetStorageChat = options?.storageChat || file?.storage_chat || '';
@@ -1890,25 +1904,13 @@ app.get('/api/download/:messageId/:filename?', async (req: Request, res: Respons
   await streamCdnFile(req.params.messageId, req, res, { customFileName: req.params.filename });
 });
 
-// Direct Shortlink Slug Service (s3.htknetwork.in/f/{file_id}) - Fully Public CDN
+// Direct Shortlink Slug Service (s3.htknetwork.in/f/{slug}) - Fully Public CDN with unique file slugs
 app.head('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
-  const { file_id } = req.params;
-  let messageId = file_id;
-  if (!/^\d+$/.test(file_id)) {
-    const num = parseInt(file_id, 36);
-    if (!isNaN(num)) messageId = String(num);
-  }
-  await streamCdnFile(messageId, req, res);
+  await streamCdnFile(req.params.file_id, req, res);
 });
 
 app.get('/f/:file_id', async (req: Request, res: Response): Promise<void> => {
-  const { file_id } = req.params;
-  let messageId = file_id;
-  if (!/^\d+$/.test(file_id)) {
-    const num = parseInt(file_id, 36);
-    if (!isNaN(num)) messageId = String(num);
-  }
-  await streamCdnFile(messageId, req, res);
+  await streamCdnFile(req.params.file_id, req, res);
 });
 
 // Provide standalone Python script download
