@@ -123,10 +123,13 @@ export async function initDb() {
     try { await pool.query(`ALTER TABLE users ADD COLUMN active_workspace_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN api_key VARCHAR(128) UNIQUE DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN session_str TEXT DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE users MODIFY COLUMN session_str TEXT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN session_expires_at DATETIME DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN session_status VARCHAR(50) DEFAULT 'active';`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN session_api_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN session_api_hash VARCHAR(100) DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE users ADD COLUMN last_active_at DATETIME DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE users ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_name VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN download_password VARCHAR(255) DEFAULT NULL;`); } catch {}
@@ -495,6 +498,7 @@ export async function saveUserToDb(user: {
   phone?: string;
   storage_chat?: string;
   api_key?: string;
+  session_str?: string;
 }) {
   const tgId = BigInt(user.telegram_id);
   const firstName = user.first_name || '';
@@ -502,6 +506,7 @@ export async function saveUserToDb(user: {
   const username = user.username || '';
   const phone = user.phone || '';
   const storageChat = user.storage_chat || 'me';
+  const sessionStr = user.session_str || null;
 
   if (!pool || !isDbConnected) {
     console.warn('[MySQL Warning] saveUserToDb called while MySQL is disconnected.');
@@ -509,17 +514,18 @@ export async function saveUserToDb(user: {
   }
 
   const [existing] = await pool.query(
-    `SELECT api_key FROM users WHERE telegram_id = ?`,
+    `SELECT api_key, session_str FROM users WHERE telegram_id = ?`,
     [tgId.toString()]
   );
   let apiKey = (existing as any[])[0]?.api_key || user.api_key;
   if (!apiKey) {
     apiKey = generateApiKey();
   }
+  const effectiveSessionStr = sessionStr || (existing as any[])[0]?.session_str || null;
 
   await pool.query(
-    `INSERT INTO users (telegram_id, first_name, last_name, username, phone, storage_chat, api_key, last_login)
-     VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+    `INSERT INTO users (telegram_id, first_name, last_name, username, phone, storage_chat, api_key, session_str, session_status, session_expires_at, last_login)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())
      ON DUPLICATE KEY UPDATE
        first_name = VALUES(first_name),
        last_name = VALUES(last_name),
@@ -527,8 +533,11 @@ export async function saveUserToDb(user: {
        phone = VALUES(phone),
        storage_chat = VALUES(storage_chat),
        api_key = COALESCE(api_key, VALUES(api_key)),
+       session_str = COALESCE(VALUES(session_str), session_str),
+       session_status = 'active',
+       session_expires_at = COALESCE(session_expires_at, DATE_ADD(NOW(), INTERVAL 30 DAY)),
        last_login = NOW()`,
-    [tgId.toString(), firstName, lastName, username, phone, storageChat, apiKey]
+    [tgId.toString(), firstName, lastName, username, phone, storageChat, apiKey, effectiveSessionStr]
   );
   return { success: true, api_key: apiKey };
 }
@@ -790,23 +799,36 @@ export async function saveUserTelegramSessionInDb(
   if (!pool || !isDbConnected) return false;
   try {
     const tgId = String(telegramId);
+    
+    // Primary guaranteed update: update session_str and 30-day expiration
     await pool.query(
       `UPDATE users 
        SET session_str = ?,
-           session_api_id = ?,
-           session_api_hash = ?,
            session_status = 'active',
            session_expires_at = DATE_ADD(NOW(), INTERVAL 30 DAY),
-           last_active_at = NOW(),
-           updated_at = NOW()
+           last_login = NOW()
        WHERE telegram_id = ?`,
       [
         sessionData.session_str,
-        sessionData.api_id || 27254692,
-        sessionData.api_hash || '9f6f826a62b78378292fd224e943cb65',
         tgId,
       ]
     );
+
+    // Optional column update (does not fail if columns don't exist yet)
+    try {
+      await pool.query(
+        `UPDATE users 
+         SET session_api_id = ?,
+             session_api_hash = ?
+         WHERE telegram_id = ?`,
+        [
+          sessionData.api_id || 27254692,
+          sessionData.api_hash || '9f6f826a62b78378292fd224e943cb65',
+          tgId
+        ]
+      );
+    } catch {}
+
     console.log(`[MySQL] User #${tgId} Telegram session securely saved with 30-day validity.`);
     return true;
   } catch (err: any) {

@@ -220,29 +220,45 @@ function getShortLink(messageId: number | string, _req?: Request): string {
 }
 
 // Synchronize active Telegram MTProto Session from Python to MySQL (User 30-day & Admin Fallback)
-async function syncSessionToMysql(telegramId?: number | string) {
+async function syncSessionToMysql(telegramId?: number | string, explicitSessionStr?: string) {
   try {
-    const sessionRes = await forwardToPython('GET', '/session_data');
-    if (sessionRes.status === 200 && sessionRes.data?.session_str) {
+    let sessionStr = explicitSessionStr;
+    let apiId = 27254692;
+    let apiHash = '9f6f826a62b78378292fd224e943cb65';
+    let storageChat = 'me';
+    let activeUser: any = null;
+
+    if (!sessionStr) {
+      const sessionRes = await forwardToPython('GET', '/session_data');
+      if (sessionRes.status === 200 && sessionRes.data?.session_str) {
+        sessionStr = sessionRes.data.session_str;
+        apiId = sessionRes.data.api_id || apiId;
+        apiHash = sessionRes.data.api_hash || apiHash;
+        storageChat = sessionRes.data.storage_chat || storageChat;
+        activeUser = sessionRes.data.user;
+      }
+    }
+
+    if (sessionStr) {
       // 1. Persist to system admin fallback session
       await saveTelegramSystemSessionToDb({
-        api_id: sessionRes.data.api_id,
-        api_hash: sessionRes.data.api_hash,
-        session_str: sessionRes.data.session_str,
-        storage_chat: sessionRes.data.storage_chat,
-        active_user: sessionRes.data.user,
+        api_id: apiId,
+        api_hash: apiHash,
+        session_str: sessionStr,
+        storage_chat: storageChat,
+        active_user: activeUser,
       });
 
       // 2. Persist 30-day user session in MySQL
-      const tgId = telegramId || sessionRes.data.user?.id;
+      const tgId = telegramId || activeUser?.id;
       if (tgId) {
         await saveUserTelegramSessionInDb(tgId, {
-          session_str: sessionRes.data.session_str,
-          api_id: sessionRes.data.api_id,
-          api_hash: sessionRes.data.api_hash,
+          session_str: sessionStr,
+          api_id: apiId,
+          api_hash: apiHash,
         });
       }
-      console.log('[MySQL Session] Telegram MTProto session synced to MySQL (Admin & User 30-Day validity).');
+      console.log(`[MySQL Session] Telegram MTProto session synced to MySQL for user #${tgId || 'admin'}.`);
     }
   } catch (err: any) {
     console.warn('[MySQL Session] Notice syncing session to MySQL:', err.message);
@@ -301,6 +317,11 @@ app.get('/api/status', async (req: Request, res: Response) => {
 
   if (queryTgId) {
     const uSess = await getUserTelegramSessionFromDb(queryTgId);
+    if (!uSess?.session_str && result.data?.connected && String(result.data?.user?.id) === String(queryTgId)) {
+      // Auto-heal session string in MySQL if user is already connected in Python
+      await syncSessionToMysql(queryTgId);
+    }
+
     if (uSess) {
       if (uSess.is_expired || uSess.session_status === 'disconnected') {
         connectivityLost = true;
@@ -335,6 +356,9 @@ app.get('/api/status', async (req: Request, res: Response) => {
         }
       }
     }
+  } else if (result.data?.connected && result.data?.user?.id) {
+    // Sync current active session to admin/user in MySQL quietly
+    syncSessionToMysql(result.data.user.id).catch(() => {});
   }
 
   if (result.status === 200 && result.data && result.data.user) {
@@ -378,6 +402,16 @@ app.get('/api/db/status', (_req: Request, res: Response) => {
   res.json(getDbStatus());
 });
 
+app.get('/api/device-config', async (_req: Request, res: Response) => {
+  const result = await forwardToPython('GET', '/device_config');
+  res.status(result.status).json(result.data);
+});
+
+app.post('/api/device-config', async (req: Request, res: Response) => {
+  const result = await forwardToPython('POST', '/device_config', req.body);
+  res.status(result.status).json(result.data);
+});
+
 app.post('/api/connect', async (req: Request, res: Response) => {
   const payload = {
     ...req.body,
@@ -387,15 +421,17 @@ app.post('/api/connect', async (req: Request, res: Response) => {
   };
   const result = await forwardToPython('POST', '/connect', payload);
   if (result.status === 200 && result.data?.user) {
+    const sessionStr = result.data.session_str || req.body.string_session || undefined;
     await saveUserToDb({
       telegram_id: result.data.user.id,
       first_name: result.data.user.first_name,
       username: result.data.user.username,
       storage_chat: req.body.storage_chat || 'me',
+      session_str: sessionStr,
     }).catch((e) => console.error('[MySQL] saveUserToDb error:', e));
 
     // Persist session to MySQL (User 30-Day & System Fallback)
-    await syncSessionToMysql(result.data.user.id);
+    await syncSessionToMysql(result.data.user.id, sessionStr);
   }
   res.status(result.status).json(result.data);
 });
@@ -429,6 +465,7 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
   };
   const result = await forwardToPython('POST', '/sign_in', payload);
   if (result.status === 200 && result.data?.user) {
+    const sessionStr = result.data.session_str || undefined;
     await saveUserToDb({
       telegram_id: result.data.user.id,
       first_name: result.data.user.first_name,
@@ -436,10 +473,11 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
       username: result.data.user.username,
       phone: result.data.user.phone || phone,
       storage_chat: 'me',
+      session_str: sessionStr,
     }).catch((e) => console.error('[MySQL] user save error:', e));
 
     // Persist 30-day session to MySQL
-    await syncSessionToMysql(result.data.user.id);
+    await syncSessionToMysql(result.data.user.id, sessionStr);
   }
   res.status(result.status).json(result.data);
 });
@@ -458,6 +496,7 @@ app.post(['/api/qr/start', '/api/telegram/qr/start'], async (req: Request, res: 
 app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: Response) => {
   const result = await forwardToPython('POST', '/qr/check', req.body);
   if (result.status === 200 && result.data?.user) {
+    const sessionStr = result.data.session_str || undefined;
     await saveUserToDb({
       telegram_id: result.data.user.id,
       first_name: result.data.user.first_name,
@@ -465,10 +504,11 @@ app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: 
       username: result.data.user.username,
       phone: result.data.user.phone || '',
       storage_chat: 'me',
+      session_str: sessionStr,
     }).catch((e) => console.error('[MySQL] user save error:', e));
 
     // Persist session to MySQL on successful QR authorization (30-day user session + admin fallback)
-    await syncSessionToMysql(result.data.user.id);
+    await syncSessionToMysql(result.data.user.id, sessionStr);
   }
   res.status(result.status).json(result.data);
 });

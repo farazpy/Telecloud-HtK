@@ -25,6 +25,10 @@ import {
   AlertCircle,
   Eye,
   Smartphone,
+  Laptop,
+  Monitor,
+  MapPin,
+  Cpu,
   Bot,
   Layers,
   ChevronRight,
@@ -166,8 +170,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.5.0
-  const APP_VERSION = "v1.5.0";
+  // App Version in Header - Incremented to v1.5.2
+  const APP_VERSION = "v1.5.2";
 
   // Routing State for Public Marketing Pages & Deep Links
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
@@ -396,6 +400,95 @@ export default function App() {
     }
   };
 
+  // Custom Device Identity & Location / Proxy State (Avoid "PC 64bit" in Telegram)
+  const [deviceModel, setDeviceModel] = useState<string>('TeleCloud Vault');
+  const [systemVersion, setSystemVersion] = useState<string>('macOS Sonoma 14.5');
+  const [deviceAppVersion, setDeviceAppVersion] = useState<string>('TeleCloud Vault v1.5.1');
+  const [proxyUrl, setProxyUrl] = useState<string>('');
+  const [serverLocation, setServerLocation] = useState<{ ip?: string; city?: string; region?: string; country?: string; country_code?: string; org?: string } | null>(null);
+  const [savingDeviceConfig, setSavingDeviceConfig] = useState<boolean>(false);
+  const [deviceSuccessMsg, setDeviceSuccessMsg] = useState<string | null>(null);
+  const [showAdvancedDeviceLogin, setShowAdvancedDeviceLogin] = useState<boolean>(false);
+
+  const DEVICE_PRESETS = [
+    {
+      name: 'TeleCloud Cloud Vault',
+      device: 'TeleCloud Vault',
+      system: 'macOS Sonoma 14.5',
+      app: 'TeleCloud Vault v1.5.1',
+      badge: 'Default Recommended',
+      icon: 'cloud'
+    },
+    {
+      name: 'Apple MacBook Pro',
+      device: 'MacBook Pro 16"',
+      system: 'macOS Sonoma 14.5',
+      app: 'Telegram Desktop 5.4.1',
+      badge: 'macOS Desktop',
+      icon: 'laptop'
+    },
+    {
+      name: 'Apple iPhone 16 Pro',
+      device: 'iPhone 16 Pro Max',
+      system: 'iOS 18.0',
+      app: 'Telegram iOS 11.1',
+      badge: 'Apple iOS',
+      icon: 'smartphone'
+    },
+    {
+      name: 'Windows 11 Workstation',
+      device: 'Windows Workstation',
+      system: 'Windows 11 Pro',
+      app: 'Telegram Desktop 5.4.1',
+      badge: 'Windows PC',
+      icon: 'monitor'
+    },
+    {
+      name: 'Samsung Galaxy S24',
+      device: 'Samsung Galaxy S24 Ultra',
+      system: 'Android 14',
+      app: 'Telegram Android 10.14',
+      badge: 'Android Device',
+      icon: 'smartphone'
+    }
+  ];
+
+  const fetchDeviceConfig = async () => {
+    try {
+      const res = await safeJsonFetch('/api/device-config');
+      if (res?.device_model) setDeviceModel(res.device_model);
+      if (res?.system_version) setSystemVersion(res.system_version);
+      if (res?.app_version) setDeviceAppVersion(res.app_version);
+      if (res?.proxy_url) setProxyUrl(res.proxy_url);
+      if (res?.location) setServerLocation(res.location);
+    } catch (e) {
+      console.warn('Notice fetching device config:', e);
+    }
+  };
+
+  const handleSaveDeviceConfig = async () => {
+    setSavingDeviceConfig(true);
+    try {
+      const res = await safeJsonFetch('/api/device-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          device_model: deviceModel,
+          system_version: systemVersion,
+          app_version: deviceAppVersion,
+          proxy_url: proxyUrl,
+        }),
+      });
+      if (res?.location) setServerLocation(res.location);
+      setDeviceSuccessMsg('Device & Location identity saved! New Telegram sessions will appear with this custom device.');
+      setTimeout(() => setDeviceSuccessMsg(null), 5000);
+    } catch (e: any) {
+      console.error('Error saving device config:', e);
+    } finally {
+      setSavingDeviceConfig(false);
+    }
+  };
+
   // Available Chats for Visual Storage Destination Picker
   const [availableChats, setAvailableChats] = useState<StorageChatOption[]>([
     {
@@ -503,6 +596,7 @@ export default function App() {
 
   useEffect(() => {
     checkStatus();
+    fetchDeviceConfig();
   }, []);
 
   useEffect(() => {
@@ -512,6 +606,7 @@ export default function App() {
       fetchStats();
       fetchAvailableChats();
       fetchUserApiKey();
+      fetchDeviceConfig();
     }
   }, [connected, user]);
 
@@ -922,7 +1017,11 @@ export default function App() {
         body: JSON.stringify({
           api_id: apiId || undefined,
           api_hash: apiHash || undefined,
-          storage_chat: targetChatInput || 'me'
+          storage_chat: targetChatInput || 'me',
+          device_model: deviceModel || undefined,
+          system_version: systemVersion || undefined,
+          app_version: deviceAppVersion || undefined,
+          proxy_url: proxyUrl || undefined
         })
       });
 
@@ -1026,7 +1125,11 @@ export default function App() {
             api_id: apiId || undefined,
             api_hash: apiHash || undefined,
             bot_token: botToken,
-            storage_chat: targetChatInput || 'me'
+            storage_chat: targetChatInput || 'me',
+            device_model: deviceModel || undefined,
+            system_version: systemVersion || undefined,
+            app_version: deviceAppVersion || undefined,
+            proxy_url: proxyUrl || undefined
           })
         });
         if (data.error) throw new Error(data.error || 'Failed to connect bot.');
@@ -1044,7 +1147,11 @@ export default function App() {
             api_id: apiId || undefined,
             api_hash: apiHash || undefined,
             string_session: stringSession,
-            storage_chat: targetChatInput || 'me'
+            storage_chat: targetChatInput || 'me',
+            device_model: deviceModel || undefined,
+            system_version: systemVersion || undefined,
+            app_version: deviceAppVersion || undefined,
+            proxy_url: proxyUrl || undefined
           })
         });
         if (data.error) throw new Error(data.error || 'Failed to connect session.');
@@ -1067,7 +1174,11 @@ export default function App() {
             api_id: apiId || undefined,
             api_hash: apiHash || undefined,
             phone: fullPhone,
-            storage_chat: targetChatInput || 'me'
+            storage_chat: targetChatInput || 'me',
+            device_model: deviceModel || undefined,
+            system_version: systemVersion || undefined,
+            app_version: deviceAppVersion || undefined,
+            proxy_url: proxyUrl || undefined
           })
         });
         if (data.error) throw new Error(data.error || 'Failed to send OTP code.');
@@ -4793,6 +4904,211 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
                 </div>
               </div>
 
+              {/* Telegram Session Device Identity & Login Location Card */}
+              <div className={`p-6 rounded-3xl space-y-6 transition-colors duration-200 border ${cardBg}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-4">
+                  <div className="flex items-center space-x-3">
+                    <div className={`w-10 h-10 rounded-2xl flex items-center justify-center border shadow-xs ${
+                      darkMode ? 'bg-indigo-950/80 text-indigo-400 border-indigo-800' : 'bg-indigo-50 text-indigo-600 border-indigo-200'
+                    }`}>
+                      <Laptop className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center space-x-2">
+                        <h4 className={`font-extrabold text-base ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                          Telegram Device & Location Identity
+                        </h4>
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                          darkMode ? 'bg-indigo-950 text-indigo-300 border-indigo-800' : 'bg-indigo-50 text-indigo-700 border-indigo-200'
+                        }`}>
+                          Custom MTProto Identity
+                        </span>
+                      </div>
+                      <p className={`text-xs mt-0.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                        Configure how your sessions appear on your phone inside <strong>Telegram → Settings → Devices</strong> (no generic "PC 64bit").
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleSaveDeviceConfig}
+                    disabled={savingDeviceConfig}
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-xs font-bold shadow-md shadow-sky-500/20 flex items-center space-x-1.5 transition active:scale-95 shrink-0 self-start sm:self-auto"
+                  >
+                    {savingDeviceConfig ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                    <span>{savingDeviceConfig ? 'Saving...' : 'Save Device Identity'}</span>
+                  </button>
+                </div>
+
+                {deviceSuccessMsg && (
+                  <div className={`p-4 rounded-2xl text-xs font-bold flex items-center space-x-2 shadow-xs border animate-in fade-in duration-200 ${
+                    darkMode ? 'bg-emerald-950/80 border-emerald-800 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  }`}>
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                    <span>{deviceSuccessMsg}</span>
+                  </div>
+                )}
+
+                {/* 1-Click Device Presets */}
+                <div className="space-y-2">
+                  <label className={`block text-xs font-bold uppercase tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    1-Click Device Presets
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
+                    {DEVICE_PRESETS.map((preset) => {
+                      const isSelected = deviceModel === preset.device;
+                      return (
+                        <button
+                          key={preset.name}
+                          type="button"
+                          onClick={() => {
+                            setDeviceModel(preset.device);
+                            setSystemVersion(preset.system);
+                            setDeviceAppVersion(preset.app);
+                          }}
+                          className={`p-3 rounded-2xl border text-left transition flex flex-col justify-between space-y-2 relative active:scale-95 ${
+                            isSelected
+                              ? (darkMode ? 'bg-sky-500/15 border-sky-500/60 ring-1 ring-sky-500/40 text-white' : 'bg-sky-50 border-sky-400 ring-1 ring-sky-400 text-slate-900')
+                              : (darkMode ? 'bg-slate-900/60 border-slate-800 hover:border-slate-700 text-slate-300' : 'bg-white border-slate-200 hover:border-slate-300 text-slate-700')
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-base">
+                              {preset.icon === 'laptop' ? '💻' : preset.icon === 'smartphone' ? '📱' : '🚀'}
+                            </span>
+                            {isSelected && (
+                              <span className="w-2 h-2 rounded-full bg-sky-400 ring-2 ring-sky-400/30" />
+                            )}
+                          </div>
+                          <div>
+                            <p className="font-extrabold text-xs truncate">{preset.name}</p>
+                            <p className="text-[10px] text-slate-400 font-mono truncate">{preset.device}</p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Custom Device Identity Input Fields */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 pt-1">
+                  <div>
+                    <label className={`block text-xs font-bold mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                      Device Model Name
+                    </label>
+                    <input
+                      type="text"
+                      value={deviceModel}
+                      onChange={(e) => setDeviceModel(e.target.value)}
+                      placeholder="e.g. MacBook Pro 16 or TeleCloud Vault"
+                      className={`w-full rounded-xl px-3.5 py-2.5 text-xs font-mono ${inputBg}`}
+                    />
+                    <p className={`text-[10px] mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                      Replaces "PC 64bit" in your Telegram Devices list.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className={`block text-xs font-bold mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                      System Version / OS
+                    </label>
+                    <input
+                      type="text"
+                      value={systemVersion}
+                      onChange={(e) => setSystemVersion(e.target.value)}
+                      placeholder="e.g. macOS Sonoma 14.5 or Windows 11"
+                      className={`w-full rounded-xl px-3.5 py-2.5 text-xs font-mono ${inputBg}`}
+                    />
+                    <p className={`text-[10px] mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                      OS version displayed below the device title.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className={`block text-xs font-bold mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                      App Name & Version
+                    </label>
+                    <input
+                      type="text"
+                      value={deviceAppVersion}
+                      onChange={(e) => setDeviceAppVersion(e.target.value)}
+                      placeholder="e.g. TeleCloud Vault v1.5.1"
+                      className={`w-full rounded-xl px-3.5 py-2.5 text-xs font-mono ${inputBg}`}
+                    />
+                    <p className={`text-[10px] mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                      Client application build signature.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Login Location & Egress Network Information */}
+                <div className={`p-4 rounded-2xl border space-y-3 ${subCardBg}`}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="flex items-center space-x-2.5">
+                      <div className="p-2 rounded-xl bg-sky-500/10 text-sky-400">
+                        <MapPin className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h5 className={`text-xs font-extrabold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                          Login Geo-Location & Public Egress IP
+                        </h5>
+                        <p className={`text-[11px] ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                          Current server network location: <strong className="text-sky-400">{serverLocation?.city || 'Cloud Datacenter'}, {serverLocation?.country || 'Global'}</strong> ({serverLocation?.ip || 'Detecting...'}) {serverLocation?.org ? `• ${serverLocation.org}` : ''}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <p className={`text-[11px] leading-relaxed ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+                    Telegram calculates the location in your Devices list from the public IP connecting to MTProto servers. If you want your Telegram Active Session to appear in a specific country (e.g. United States, Germany, Singapore), enter an optional SOCKS5 or HTTP proxy below:
+                  </p>
+
+                  <div>
+                    <label className={`block text-[11px] font-bold mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                      Optional Proxy URL for Custom IP / Location (SOCKS5 / HTTP)
+                    </label>
+                    <input
+                      type="text"
+                      value={proxyUrl}
+                      onChange={(e) => setProxyUrl(e.target.value)}
+                      placeholder="e.g. socks5://username:password@104.28.12.34:1080 or http://proxy.host:8080"
+                      className={`w-full rounded-xl px-3.5 py-2 text-xs font-mono ${inputBg}`}
+                    />
+                  </div>
+                </div>
+
+                {/* Live Telegram Active Session Preview */}
+                <div className={`p-4 rounded-2xl border ${darkMode ? 'bg-slate-950/70 border-slate-800' : 'bg-slate-100/90 border-slate-200'}`}>
+                  <span className={`text-[10px] font-bold uppercase tracking-wider block mb-2 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Live Preview: How It Looks in Your Phone's Telegram App (Settings → Devices)
+                  </span>
+                  <div className={`p-3.5 rounded-xl border flex items-center justify-between ${
+                    darkMode ? 'bg-slate-900 border-slate-700 text-white' : 'bg-white border-slate-200 text-slate-900'
+                  }`}>
+                    <div className="flex items-center space-x-3">
+                      <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-400 to-indigo-600 text-white flex items-center justify-center font-bold text-sm shadow-md">
+                        {deviceModel.toLowerCase().includes('phone') ? <Smartphone className="w-5 h-5" /> : <Laptop className="w-5 h-5" />}
+                      </div>
+                      <div>
+                        <div className="flex items-center space-x-2">
+                          <p className="font-extrabold text-xs">{deviceModel || 'TeleCloud Vault'}</p>
+                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/20 text-emerald-400">
+                            Active
+                          </span>
+                        </div>
+                        <p className={`text-[11px] ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                          {deviceAppVersion || 'TeleCloud Vault v1.5.1'}, {systemVersion || 'macOS Sonoma 14.5'}
+                        </p>
+                        <p className={`text-[10px] font-mono ${darkMode ? 'text-sky-300' : 'text-sky-600'}`}>
+                          📍 {serverLocation?.city || 'Cloud'}, {serverLocation?.country || 'Global'} • {serverLocation?.ip || 'Server IP'}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-semibold text-emerald-400 font-mono">online</span>
+                  </div>
+                </div>
+              </div>
+
               {/* Connected Telegram Profile & Sign Out */}
               <div className={`p-6 rounded-3xl space-y-4 transition-colors duration-200 ${cardBg}`}>
                 <h4 className={`font-extrabold text-sm ${darkMode ? 'text-white' : 'text-slate-900'}`}>Connected Telegram Account</h4>
@@ -5722,6 +6038,102 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
               <Key className="w-3.5 h-3.5 text-amber-400" />
               <span>Session String</span>
             </button>
+          </div>
+
+          {/* Active Session Device & Location Indicator Bar */}
+          <div className={`p-3 rounded-2xl border transition-all text-xs ${subCardBg}`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-2">
+                <div className="w-6 h-6 rounded-lg bg-sky-500/20 text-sky-400 flex items-center justify-center">
+                  <Laptop className="w-3.5 h-3.5" />
+                </div>
+                <div>
+                  <span className={`text-[10px] font-bold uppercase tracking-wider ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Active Session Device:
+                  </span>
+                  <p className="font-extrabold text-xs text-sky-400">
+                    {deviceModel} • <span className="font-mono text-[10px] text-slate-400">{systemVersion}</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAdvancedDeviceLogin(!showAdvancedDeviceLogin)}
+                className={`px-2.5 py-1 rounded-lg border text-[10px] font-bold transition flex items-center space-x-1 ${
+                  darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-200'
+                }`}
+              >
+                <Sliders className="w-3 h-3" />
+                <span>{showAdvancedDeviceLogin ? 'Close' : 'Customize Device'}</span>
+              </button>
+            </div>
+
+            {showAdvancedDeviceLogin && (
+              <div className="mt-3 pt-3 border-t border-slate-200/50 dark:border-slate-800 space-y-3 animate-in fade-in duration-200">
+                <div>
+                  <label className={`block text-[10px] font-bold uppercase mb-1.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Choose Device Preset (Displays on Phone Settings → Devices):
+                  </label>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                    {DEVICE_PRESETS.map((p) => (
+                      <button
+                        key={p.name}
+                        type="button"
+                        onClick={() => {
+                          setDeviceModel(p.device);
+                          setSystemVersion(p.system);
+                          setDeviceAppVersion(p.app);
+                        }}
+                        className={`p-2 rounded-xl border text-left text-[11px] font-bold transition flex items-center justify-between ${
+                          deviceModel === p.device
+                            ? 'bg-sky-500/20 text-sky-300 border-sky-500/50'
+                            : (darkMode ? 'bg-slate-900 border-slate-800 text-slate-300' : 'bg-white border-slate-200 text-slate-700')
+                        }`}
+                      >
+                        <span className="truncate">{p.name}</span>
+                        {deviceModel === p.device && <Check className="w-3 h-3 text-sky-400 shrink-0" />}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-left">
+                  <div>
+                    <label className={`block text-[10px] font-bold mb-1 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+                      Custom Device Name:
+                    </label>
+                    <input
+                      type="text"
+                      value={deviceModel}
+                      onChange={(e) => setDeviceModel(e.target.value)}
+                      placeholder="e.g. MacBook Pro 16"
+                      className={`w-full rounded-xl px-2.5 py-1.5 text-xs font-mono ${inputBg}`}
+                    />
+                  </div>
+                  <div>
+                    <label className={`block text-[10px] font-bold mb-1 ${darkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+                      Custom OS / System:
+                    </label>
+                    <input
+                      type="text"
+                      value={systemVersion}
+                      onChange={(e) => setSystemVersion(e.target.value)}
+                      placeholder="e.g. macOS Sonoma 14.5"
+                      className={`w-full rounded-xl px-2.5 py-1.5 text-xs font-mono ${inputBg}`}
+                    />
+                  </div>
+                </div>
+
+                {serverLocation && (
+                  <div className={`p-2 rounded-xl text-[10px] font-mono flex items-center space-x-1.5 ${
+                    darkMode ? 'bg-slate-950 text-slate-400' : 'bg-slate-100 text-slate-600'
+                  }`}>
+                    <MapPin className="w-3 h-3 text-sky-400 shrink-0" />
+                    <span>Location: {serverLocation.city || 'Cloud'}, {serverLocation.country || 'Global'} ({serverLocation.ip || 'Server IP'})</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {authMode === 'qr' && (

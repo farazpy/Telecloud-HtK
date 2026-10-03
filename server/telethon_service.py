@@ -10,8 +10,14 @@ import json
 import asyncio
 import mimetypes
 import logging
+import urllib.parse
 from typing import Optional, Dict, Any
 from pathlib import Path
+
+try:
+    import socks
+except ImportError:
+    socks = None
 
 from aiohttp import web
 from telethon import TelegramClient, utils
@@ -42,6 +48,34 @@ DATA_DIR = Path("./data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 CONFIG_FILE = DATA_DIR / "config.json"
 
+def parse_proxy(proxy_url: Optional[str]):
+    if not proxy_url or not str(proxy_url).strip() or not socks:
+        return None
+    try:
+        raw = str(proxy_url).strip()
+        parsed = urllib.parse.urlparse(raw)
+        scheme = (parsed.scheme or "socks5").lower()
+        if scheme in ("socks5", "socks5h"):
+            proxy_type = socks.SOCKS5
+        elif scheme in ("socks4", "socks4a"):
+            proxy_type = socks.SOCKS4
+        elif scheme in ("http", "https"):
+            proxy_type = socks.HTTP
+        else:
+            return None
+        
+        host = parsed.hostname
+        port = parsed.port or (1080 if "socks" in scheme else 8080)
+        username = parsed.username
+        password = parsed.password
+        
+        if username and password:
+            return (proxy_type, host, port, True, username, password)
+        return (proxy_type, host, port)
+    except Exception as e:
+        logger.warning(f"Error parsing proxy '{proxy_url}': {e}")
+        return None
+
 class TelethonManager:
     def __init__(self):
         self.client: Optional[TelegramClient] = None
@@ -55,6 +89,14 @@ class TelethonManager:
         self.active_user: Optional[Dict[str, Any]] = None
         self.is_connected = False
         self.user_clients: Dict[str, TelegramClient] = {}
+
+        # Custom Device Identity & Location/Proxy Configuration
+        self.device_model: str = "TeleCloud Vault"
+        self.system_version: str = "macOS Sonoma 14.5"
+        self.app_version: str = "TeleCloud Vault v1.5.1"
+        self.lang_code: str = "en"
+        self.system_lang_code: str = "en"
+        self.proxy_url: str = ""
 
         # QR Login state
         self.qr_client: Optional[TelegramClient] = None
@@ -90,6 +132,12 @@ class TelethonManager:
                     self.api_hash = cfg.get("api_hash") or self.api_hash
                     self.session_str = cfg.get("session_str")
                     self.storage_chat = cfg.get("storage_chat", "me")
+                    self.device_model = cfg.get("device_model") or os.environ.get("TELEGRAM_DEVICE_MODEL") or "TeleCloud Vault"
+                    self.system_version = cfg.get("system_version") or os.environ.get("TELEGRAM_SYSTEM_VERSION") or "macOS Sonoma 14.5"
+                    self.app_version = cfg.get("app_version") or os.environ.get("TELEGRAM_APP_VERSION") or "TeleCloud Vault v1.5.1"
+                    self.lang_code = cfg.get("lang_code") or "en"
+                    self.system_lang_code = cfg.get("system_lang_code") or "en"
+                    self.proxy_url = cfg.get("proxy_url") or os.environ.get("TELEGRAM_PROXY_URL") or ""
             except Exception as e:
                 logger.error(f"Error loading config: {e}")
 
@@ -100,10 +148,69 @@ class TelethonManager:
                     "api_id": self.api_id,
                     "api_hash": self.api_hash,
                     "session_str": self.session_str,
-                    "storage_chat": self.storage_chat
+                    "storage_chat": self.storage_chat,
+                    "device_model": self.device_model,
+                    "system_version": self.system_version,
+                    "app_version": self.app_version,
+                    "lang_code": self.lang_code,
+                    "system_lang_code": self.system_lang_code,
+                    "proxy_url": self.proxy_url
                 }, f, indent=2)
         except Exception as e:
             logger.error(f"Error saving config: {e}")
+
+    def create_telegram_client(
+        self,
+        session,
+        api_id: Optional[int] = None,
+        api_hash: Optional[str] = None,
+        loop=None,
+        device_model: Optional[str] = None,
+        system_version: Optional[str] = None,
+        app_version: Optional[str] = None,
+        connection_retries: int = 5,
+        retry_delay: int = 1,
+        timeout: int = 20
+    ) -> TelegramClient:
+        dev = (device_model or self.device_model or "TeleCloud Vault").strip()
+        sys_ver = (system_version or self.system_version or "macOS Sonoma 14.5").strip()
+        app_ver = (app_version or self.app_version or "TeleCloud Vault v1.5.1").strip()
+        proxy = parse_proxy(self.proxy_url)
+
+        return TelegramClient(
+            session,
+            api_id or self.api_id or 27254692,
+            api_hash or self.api_hash or "9f6f826a62b78378292fd224e943cb65",
+            device_model=dev,
+            system_version=sys_ver,
+            app_version=app_ver,
+            system_lang_code=self.system_lang_code,
+            lang_code=self.lang_code,
+            proxy=proxy,
+            loop=loop,
+            connection_retries=connection_retries,
+            retry_delay=retry_delay,
+            timeout=timeout
+        )
+
+    async def get_egress_location(self) -> Dict[str, Any]:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2.5)) as session:
+                async with session.get("https://ipapi.co/json/") as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return {
+                            "ip": data.get("ip"),
+                            "city": data.get("city"),
+                            "region": data.get("region"),
+                            "country": data.get("country_name"),
+                            "country_code": data.get("country_code"),
+                            "org": data.get("org")
+                        }
+        except Exception:
+            pass
+        return {"ip": "Direct MTProto IP", "city": "Datacenter", "country": "Telegram DC", "country_code": "GLOBAL"}
 
     async def ensure_connected(self):
         try:
@@ -139,10 +246,8 @@ class TelethonManager:
                     current_loop = None
 
                 logger.info("Initializing saved Telegram client session on active loop...")
-                self.client = TelegramClient(
+                self.client = self.create_telegram_client(
                     StringSession(self.session_str),
-                    self.api_id,
-                    self.api_hash,
                     loop=current_loop
                 )
                 await self.client.connect()
@@ -186,7 +291,7 @@ class TelethonManager:
                 current_loop = None
 
             session = StringSession()
-            client = TelegramClient(session, api_id, api_hash, loop=current_loop)
+            client = self.create_telegram_client(session, api_id=api_id, api_hash=api_hash, loop=current_loop)
             await client.start(bot_token=bot_token)
             
             me = await client.get_me()
@@ -203,7 +308,7 @@ class TelethonManager:
                 "is_bot": True
             }
             self.save_config()
-            return {"success": True, "user": self.active_user}
+            return {"success": True, "user": self.active_user, "session_str": self.session_str}
         except Exception as e:
             logger.error(f"Error connecting bot: {e}")
             raise e
@@ -221,7 +326,7 @@ class TelethonManager:
             except RuntimeError:
                 current_loop = None
 
-            client = TelegramClient(StringSession(session_str), api_id, api_hash, loop=current_loop)
+            client = self.create_telegram_client(StringSession(session_str), api_id=api_id, api_hash=api_hash, loop=current_loop)
             await client.connect()
             if not await client.is_user_authorized():
                 raise ValueError("Session string is invalid or expired.")
@@ -242,7 +347,7 @@ class TelethonManager:
                 "phone": getattr(me, "phone", "")
             }
             self.save_config()
-            return {"success": True, "user": self.active_user}
+            return {"success": True, "user": self.active_user, "session_str": self.session_str}
         except Exception as e:
             logger.error(f"Error connecting session string: {e}")
             raise e
@@ -278,10 +383,8 @@ class TelethonManager:
             except RuntimeError:
                 current_loop = None
 
-            user_client = TelegramClient(
+            user_client = self.create_telegram_client(
                 StringSession(clean_session),
-                self.api_id,
-                self.api_hash,
                 loop=current_loop,
                 connection_retries=3,
                 retry_delay=1,
@@ -342,7 +445,7 @@ class TelethonManager:
             current_loop = None
 
         session = StringSession()
-        client = TelegramClient(session, api_id, api_hash, loop=current_loop)
+        client = self.create_telegram_client(session, api_id=api_id, api_hash=api_hash, loop=current_loop)
         await client.connect()
 
         try:
@@ -390,10 +493,10 @@ class TelethonManager:
 
         if not self.client or not self.client.is_connected():
             if self.phone_session_str and self.api_id and self.api_hash:
-                self.client = TelegramClient(StringSession(self.phone_session_str), self.api_id, self.api_hash, loop=current_loop)
+                self.client = self.create_telegram_client(StringSession(self.phone_session_str), loop=current_loop)
                 await self.client.connect()
             elif self.session_str and self.api_id and self.api_hash:
-                self.client = TelegramClient(StringSession(self.session_str), self.api_id, self.api_hash, loop=current_loop)
+                self.client = self.create_telegram_client(StringSession(self.session_str), loop=current_loop)
                 await self.client.connect()
             else:
                 raise ValueError("No active Telegram connection. Please request verification code first.")
@@ -428,7 +531,7 @@ class TelethonManager:
                 "phone": getattr(me, "phone", "")
             }
             self.save_config()
-            return {"success": True, "user": self.active_user}
+            return {"success": True, "user": self.active_user, "session_str": self.session_str}
         except PhoneCodeInvalidError:
             raise ValueError("Invalid verification code. Please check the code in your Telegram app and try again.")
         except PhoneCodeExpiredError:
@@ -463,7 +566,7 @@ class TelethonManager:
                 current_loop = None
 
             session = StringSession()
-            self.qr_client = TelegramClient(session, api_id, api_hash, loop=current_loop)
+            self.qr_client = self.create_telegram_client(session, api_id=api_id, api_hash=api_hash, loop=current_loop)
             await self.qr_client.connect()
             self.qr_login_obj = await self.qr_client.qr_login()
             self.api_id = api_id
@@ -545,14 +648,14 @@ class TelethonManager:
                 }
                 self.save_config()
                 self.qr_status = "authorized"
-                return {"status": "authorized", "user": self.active_user}
+                return {"status": "authorized", "user": self.active_user, "session_str": self.session_str}
             except Exception as e:
                 logger.error(f"2FA sign in error during QR login: {e}")
                 return {"status": "requires_password", "error": str(e)}
 
         # 2. Check if background wait task reported authorized
         if getattr(self, "qr_status", None) == "authorized":
-            return {"status": "authorized", "user": self.qr_user or self.active_user}
+            return {"status": "authorized", "user": self.qr_user or self.active_user, "session_str": self.session_str}
 
         if getattr(self, "qr_status", None) == "requires_password":
             return {"status": "requires_password", "message": "Two-factor authentication (2FA) password required."}
@@ -579,7 +682,7 @@ class TelethonManager:
                     self.save_config()
                     self.qr_status = "authorized"
                     logger.info(f"QR safety check confirmed authorization for: {self.active_user.get('first_name')}")
-                    return {"status": "authorized", "user": self.active_user}
+                    return {"status": "authorized", "user": self.active_user, "session_str": self.session_str}
         except SessionPasswordNeededError:
             self.qr_status = "requires_password"
             return {"status": "requires_password", "message": "Two-factor authentication (2FA) password required."}
@@ -831,8 +934,47 @@ async def handle_status(request: web.Request):
         "api_id": manager.api_id,
         "api_hash": manager.api_hash,
         "storage_chat": manager.storage_chat,
-        "user": manager.active_user
+        "user": manager.active_user,
+        "device_model": manager.device_model,
+        "system_version": manager.system_version,
+        "app_version": manager.app_version,
+        "proxy_url": manager.proxy_url
     })
+
+async def handle_get_device_config(request: web.Request):
+    location = await manager.get_egress_location()
+    return web.json_response({
+        "device_model": manager.device_model,
+        "system_version": manager.system_version,
+        "app_version": manager.app_version,
+        "proxy_url": manager.proxy_url,
+        "location": location
+    })
+
+async def handle_update_device_config(request: web.Request):
+    try:
+        data = await request.json() if request.can_read_body else {}
+        if "device_model" in data and str(data["device_model"]).strip():
+            manager.device_model = str(data["device_model"]).strip()
+        if "system_version" in data and str(data["system_version"]).strip():
+            manager.system_version = str(data["system_version"]).strip()
+        if "app_version" in data and str(data["app_version"]).strip():
+            manager.app_version = str(data["app_version"]).strip()
+        if "proxy_url" in data:
+            manager.proxy_url = str(data["proxy_url"]).strip()
+        manager.save_config()
+        location = await manager.get_egress_location()
+        return web.json_response({
+            "success": True,
+            "device_model": manager.device_model,
+            "system_version": manager.system_version,
+            "app_version": manager.app_version,
+            "proxy_url": manager.proxy_url,
+            "location": location
+        })
+    except Exception as e:
+        logger.error(f"Error in handle_update_device_config: {e}")
+        return web.json_response({"error": str(e)}, status=400)
 
 async def handle_session_data(request: web.Request):
     await manager.ensure_connected()
@@ -843,7 +985,11 @@ async def handle_session_data(request: web.Request):
         "session_str": manager.session_str,
         "storage_chat": manager.storage_chat,
         "is_connected": manager.is_connected,
-        "user": manager.active_user
+        "user": manager.active_user,
+        "device_model": manager.device_model,
+        "system_version": manager.system_version,
+        "app_version": manager.app_version,
+        "proxy_url": manager.proxy_url
     })
 
 async def handle_connect(request: web.Request):
@@ -852,6 +998,16 @@ async def handle_connect(request: web.Request):
         api_id = int(data.get("api_id") or manager.api_id or 27254692)
         api_hash = str(data.get("api_hash") or manager.api_hash or "9f6f826a62b78378292fd224e943cb65").strip()
         storage_chat = data.get("storage_chat", manager.storage_chat or "me")
+
+        if data.get("device_model"):
+            manager.device_model = str(data["device_model"]).strip()
+        if data.get("system_version"):
+            manager.system_version = str(data["system_version"]).strip()
+        if data.get("app_version"):
+            manager.app_version = str(data["app_version"]).strip()
+        if "proxy_url" in data:
+            manager.proxy_url = str(data["proxy_url"]).strip()
+        manager.save_config()
 
         if "bot_token" in data:
             res = await manager.connect_bot(api_id, api_hash, data["bot_token"].strip(), storage_chat)
@@ -872,6 +1028,16 @@ async def handle_send_code(request: web.Request):
         api_hash = str(data.get("api_hash") or manager.api_hash or "9f6f826a62b78378292fd224e943cb65").strip()
         phone = str(data.get("phone", "")).strip()
         storage_chat = data.get("storage_chat", manager.storage_chat or "me")
+
+        if data.get("device_model"):
+            manager.device_model = str(data["device_model"]).strip()
+        if data.get("system_version"):
+            manager.system_version = str(data["system_version"]).strip()
+        if data.get("app_version"):
+            manager.app_version = str(data["app_version"]).strip()
+        if "proxy_url" in data:
+            manager.proxy_url = str(data["proxy_url"]).strip()
+        manager.save_config()
 
         if not phone:
             return web.json_response({"error": "Phone number is required."}, status=400)
@@ -912,6 +1078,16 @@ async def handle_qr_start(request: web.Request):
         api_id = int(data.get("api_id") or manager.api_id or 27254692)
         api_hash = str(data.get("api_hash") or manager.api_hash or "9f6f826a62b78378292fd224e943cb65").strip()
         storage_chat = data.get("storage_chat", manager.storage_chat or "me")
+
+        if data.get("device_model"):
+            manager.device_model = str(data["device_model"]).strip()
+        if data.get("system_version"):
+            manager.system_version = str(data["system_version"]).strip()
+        if data.get("app_version"):
+            manager.app_version = str(data["app_version"]).strip()
+        if "proxy_url" in data:
+            manager.proxy_url = str(data["proxy_url"]).strip()
+        manager.save_config()
 
         res = await manager.start_qr_login(api_id, api_hash, storage_chat)
         return web.json_response(res)
@@ -1186,6 +1362,8 @@ def init_app():
     app.on_cleanup.append(on_cleanup)
 
     app.router.add_get("/api/py/status", handle_status)
+    app.router.add_get("/api/py/device_config", handle_get_device_config)
+    app.router.add_post("/api/py/device_config", handle_update_device_config)
     app.router.add_get("/api/py/session_data", handle_session_data)
     app.router.add_post("/api/py/verify_session", handle_verify_session)
     app.router.add_post("/api/py/connect", handle_connect)
