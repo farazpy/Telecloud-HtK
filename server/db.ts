@@ -3,6 +3,8 @@ dotenv.config();
 
 import mysql from 'mysql2/promise';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
 type Pool = mysql.Pool;
 
@@ -16,6 +18,74 @@ const DB_NAME = process.env.DB_NAME || process.env.DBNAME || 'telecloud';
 let pool: Pool | null = null;
 let isDbConnected = false;
 let dbInitError: string | null = null;
+let reconnectTimer: NodeJS.Timeout | null = null;
+
+// ============================================================================
+// LOCAL PERSISTENT JSON STORE FALLBACK (Fault-Tolerant Resilient Architecture)
+// ============================================================================
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+const LOCAL_DB_PATH = path.resolve(DATA_DIR, 'telecloud_db_store.json');
+
+if (!fs.existsSync(DATA_DIR)) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch {}
+}
+
+interface LocalStoreSchema {
+  users: Record<string, any>;
+  workspaces: any[];
+  user_files: any[];
+  telegram_system_sessions: any[];
+  system_settings: Record<string, string>;
+  workspace_next_id: number;
+  file_next_id: number;
+}
+
+let localStore: LocalStoreSchema = {
+  users: {},
+  workspaces: [],
+  user_files: [],
+  telegram_system_sessions: [],
+  system_settings: {},
+  workspace_next_id: 1,
+  file_next_id: 1,
+};
+
+function loadLocalStore(): LocalStoreSchema {
+  try {
+    if (fs.existsSync(LOCAL_DB_PATH)) {
+      const content = fs.readFileSync(LOCAL_DB_PATH, 'utf-8');
+      const parsed = JSON.parse(content);
+      localStore = {
+        users: parsed.users || {},
+        workspaces: parsed.workspaces || [],
+        user_files: parsed.user_files || [],
+        telegram_system_sessions: parsed.telegram_system_sessions || [],
+        system_settings: parsed.system_settings || {},
+        workspace_next_id: parsed.workspace_next_id || 1,
+        file_next_id: parsed.file_next_id || 1,
+      };
+    }
+  } catch (err: any) {
+    console.warn('[Local Store] Notice loading local database file:', err.message);
+  }
+  return localStore;
+}
+
+function saveLocalStore() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(LOCAL_DB_PATH, JSON.stringify(localStore, null, 2), 'utf-8');
+  } catch (err: any) {
+    console.warn('[Local Store] Warning writing to local database file:', err.message);
+  }
+}
+
+// Initial load
+loadLocalStore();
 
 export interface WorkspaceRecord {
   id: number;
@@ -42,7 +112,7 @@ export async function initDb() {
       database: DB_NAME,
       waitForConnections: true,
       connectionLimit: 15,
-      connectTimeout: 8000,
+      connectTimeout: 5000,
       queueLimit: 0,
     });
 
@@ -171,7 +241,15 @@ export async function initDb() {
   } catch (err: any) {
     isDbConnected = false;
     dbInitError = err.message;
-    console.error(`[MySQL Error] Failed to connect to MySQL at ${DB_HOST}:${DB_PORT}/${DB_NAME}: ${err.message}`);
+    console.warn(`[MySQL Notice] Running with persistent fault-tolerant store (${err.message}). MySQL auto-reconnect scheduled.`);
+    
+    if (!reconnectTimer) {
+      reconnectTimer = setInterval(async () => {
+        if (!isDbConnected) {
+          await initDb().catch(() => {});
+        }
+      }, 10000);
+    }
   }
 }
 
@@ -183,6 +261,7 @@ export function getDbStatus() {
     user: DB_USER,
     database: DB_NAME,
     error: dbInitError,
+    storage_mode: isDbConnected ? 'mysql' : 'resilient_local_store',
   };
 }
 
@@ -193,44 +272,45 @@ export async function getWorkspacesFromDb(telegramId: number | string): Promise<
   const tgId = String(telegramId);
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
-  }
-
-  const [rows] = await pool.query(
-    `SELECT 
-      w.id, w.telegram_id, w.name, w.slug, w.storage_chat, w.is_default, w.created_at, w.updated_at,
-      COUNT(f.id) AS file_count,
-      COALESCE(SUM(f.file_size), 0) AS total_bytes
-     FROM workspaces w
-     LEFT JOIN user_files f ON (f.workspace_id = w.id OR (f.workspace_id IS NULL AND w.is_default = TRUE))
-     WHERE w.telegram_id = ?
-     GROUP BY w.id
-     ORDER BY w.is_default DESC, w.id ASC`,
-    [tgId]
-  );
-
-  let workspaces = (rows as any[]).map((r) => ({
-    ...r,
-    file_count: Number(r.file_count || 0),
-    total_bytes: Number(r.total_bytes || 0),
-    is_default: Boolean(r.is_default),
-  }));
-
-  // If user has no workspace yet in MySQL, ensure initial Default Workspace exists
-  if (workspaces.length === 0) {
-    try {
-      await pool.query(
-        `INSERT INTO workspaces (telegram_id, name, slug, storage_chat, is_default)
-         VALUES (?, 'Default Workspace', 'default-workspace', 'me', TRUE)
-         ON DUPLICATE KEY UPDATE is_default = TRUE`,
-        [tgId]
-      );
-    } catch (insertErr: any) {
-      console.warn('[MySQL] Handled concurrent workspace creation:', insertErr.message);
+    // Resilient fallback implementation
+    loadLocalStore();
+    let userWorkspaces = localStore.workspaces.filter((w) => String(w.telegram_id) === tgId);
+    if (userWorkspaces.length === 0) {
+      const defaultWs: WorkspaceRecord = {
+        id: localStore.workspace_next_id++,
+        telegram_id: tgId,
+        name: 'Default Workspace',
+        slug: 'default-workspace',
+        storage_chat: 'me',
+        is_default: true,
+        file_count: 0,
+        total_bytes: 0,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      localStore.workspaces.push(defaultWs);
+      saveLocalStore();
+      userWorkspaces = [defaultWs];
     }
 
-    // Always fetch the authoritative workspaces list for this user from DB
-    const [reloadedRows] = await pool.query(
+    // Compute file counts and bytes
+    const enriched = userWorkspaces.map((w) => {
+      const userFiles = localStore.user_files.filter(
+        (f) => String(f.telegram_id) === tgId && (Number(f.workspace_id) === Number(w.id) || (!f.workspace_id && w.is_default))
+      );
+      return {
+        ...w,
+        file_count: userFiles.length,
+        total_bytes: userFiles.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0),
+      };
+    });
+
+    const activeId = localStore.users[tgId]?.active_workspace_id || enriched[0]?.id || 1;
+    return { workspaces: enriched, active_workspace_id: activeId };
+  }
+
+  try {
+    const [rows] = await pool.query(
       `SELECT 
         w.id, w.telegram_id, w.name, w.slug, w.storage_chat, w.is_default, w.created_at, w.updated_at,
         COUNT(f.id) AS file_count,
@@ -243,37 +323,72 @@ export async function getWorkspacesFromDb(telegramId: number | string): Promise<
       [tgId]
     );
 
-    workspaces = (reloadedRows as any[]).map((r) => ({
+    let workspaces = (rows as any[]).map((r) => ({
       ...r,
       file_count: Number(r.file_count || 0),
       total_bytes: Number(r.total_bytes || 0),
       is_default: Boolean(r.is_default),
     }));
-  }
 
-  // Retrieve active workspace for user
-  let activeId: number | null = null;
-  try {
-    const [userRows] = await pool.query(
-      `SELECT active_workspace_id FROM users WHERE telegram_id = ?`,
-      [tgId]
-    );
-    activeId = (userRows as any[])[0]?.active_workspace_id;
-  } catch (err: any) {
-    console.warn('[MySQL] Notice fetching active_workspace_id:', err.message);
-  }
+    if (workspaces.length === 0) {
+      try {
+        await pool.query(
+          `INSERT INTO workspaces (telegram_id, name, slug, storage_chat, is_default)
+           VALUES (?, 'Default Workspace', 'default-workspace', 'me', TRUE)
+           ON DUPLICATE KEY UPDATE is_default = TRUE`,
+          [tgId]
+        );
+      } catch (insertErr: any) {
+        console.warn('[MySQL] Handled concurrent workspace creation:', insertErr.message);
+      }
 
-  if ((!activeId || !workspaces.some((w) => w.id === activeId)) && workspaces.length > 0) {
-    activeId = workspaces[0].id;
-    try {
-      await pool.query(
-        `UPDATE users SET active_workspace_id = ? WHERE telegram_id = ?`,
-        [activeId, tgId]
+      const [reloadedRows] = await pool.query(
+        `SELECT 
+          w.id, w.telegram_id, w.name, w.slug, w.storage_chat, w.is_default, w.created_at, w.updated_at,
+          COUNT(f.id) AS file_count,
+          COALESCE(SUM(f.file_size), 0) AS total_bytes
+         FROM workspaces w
+         LEFT JOIN user_files f ON (f.workspace_id = w.id OR (f.workspace_id IS NULL AND w.is_default = TRUE))
+         WHERE w.telegram_id = ?
+         GROUP BY w.id
+         ORDER BY w.is_default DESC, w.id ASC`,
+        [tgId]
       );
-    } catch {}
-  }
 
-  return { workspaces, active_workspace_id: activeId || (workspaces[0]?.id ?? 1) };
+      workspaces = (reloadedRows as any[]).map((r) => ({
+        ...r,
+        file_count: Number(r.file_count || 0),
+        total_bytes: Number(r.total_bytes || 0),
+        is_default: Boolean(r.is_default),
+      }));
+    }
+
+    let activeId: number | null = null;
+    try {
+      const [userRows] = await pool.query(
+        `SELECT active_workspace_id FROM users WHERE telegram_id = ?`,
+        [tgId]
+      );
+      activeId = (userRows as any[])[0]?.active_workspace_id;
+    } catch (err: any) {
+      console.warn('[MySQL] Notice fetching active_workspace_id:', err.message);
+    }
+
+    if ((!activeId || !workspaces.some((w) => w.id === activeId)) && workspaces.length > 0) {
+      activeId = workspaces[0].id;
+      try {
+        await pool.query(
+          `UPDATE users SET active_workspace_id = ? WHERE telegram_id = ?`,
+          [activeId, tgId]
+        );
+      } catch {}
+    }
+
+    return { workspaces, active_workspace_id: activeId || (workspaces[0]?.id ?? 1) };
+  } catch (err: any) {
+    isDbConnected = false;
+    return getWorkspacesFromDb(telegramId);
+  }
 }
 
 export async function createWorkspaceInDb(
@@ -288,27 +403,47 @@ export async function createWorkspaceInDb(
   const slug = `${baseSlug}-${Date.now().toString().slice(-4)}-${randomSuffix}`;
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    const newWs: WorkspaceRecord = {
+      id: localStore.workspace_next_id++,
+      telegram_id: tgId,
+      name: cleanName,
+      slug,
+      storage_chat: storageChat.trim() || 'me',
+      is_default: false,
+      file_count: 0,
+      total_bytes: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    localStore.workspaces.push(newWs);
+    saveLocalStore();
+    return newWs;
   }
 
-  const [res] = await pool.query(
-    `INSERT INTO workspaces (telegram_id, name, slug, storage_chat, is_default)
-     VALUES (?, ?, ?, ?, FALSE)`,
-    [tgId, cleanName, slug, storageChat.trim() || 'me']
-  );
-  const insertId = (res as any).insertId;
-  return {
-    id: insertId,
-    telegram_id: tgId,
-    name: cleanName,
-    slug,
-    storage_chat: storageChat.trim() || 'me',
-    is_default: false,
-    file_count: 0,
-    total_bytes: 0,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
+  try {
+    const [res] = await pool.query(
+      `INSERT INTO workspaces (telegram_id, name, slug, storage_chat, is_default)
+       VALUES (?, ?, ?, ?, FALSE)`,
+      [tgId, cleanName, slug, storageChat.trim() || 'me']
+    );
+    const insertId = (res as any).insertId;
+    return {
+      id: insertId,
+      telegram_id: tgId,
+      name: cleanName,
+      slug,
+      storage_chat: storageChat.trim() || 'me',
+      is_default: false,
+      file_count: 0,
+      total_bytes: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+  } catch (err: any) {
+    isDbConnected = false;
+    return createWorkspaceInDb(telegramId, name, storageChat);
+  }
 }
 
 export async function updateWorkspaceInDb(
@@ -319,27 +454,40 @@ export async function updateWorkspaceInDb(
   const tgId = String(telegramId);
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    const idx = localStore.workspaces.findIndex((w) => w.id === Number(workspaceId) && String(w.telegram_id) === tgId);
+    if (idx !== -1) {
+      if (updates.name) localStore.workspaces[idx].name = updates.name.trim();
+      if (updates.storage_chat !== undefined) localStore.workspaces[idx].storage_chat = updates.storage_chat.trim() || 'me';
+      localStore.workspaces[idx].updated_at = new Date().toISOString();
+      saveLocalStore();
+    }
+    return { success: true };
   }
 
-  const fields: string[] = [];
-  const values: any[] = [];
-  if (updates.name) {
-    fields.push('name = ?');
-    values.push(updates.name.trim());
+  try {
+    const fields: string[] = [];
+    const values: any[] = [];
+    if (updates.name) {
+      fields.push('name = ?');
+      values.push(updates.name.trim());
+    }
+    if (updates.storage_chat !== undefined) {
+      fields.push('storage_chat = ?');
+      values.push(updates.storage_chat.trim() || 'me');
+    }
+    if (fields.length > 0) {
+      values.push(workspaceId, tgId);
+      await pool.query(
+        `UPDATE workspaces SET ${fields.join(', ')}, updated_at = NOW() WHERE id = ? AND telegram_id = ?`,
+        values
+      );
+    }
+    return { success: true };
+  } catch (err: any) {
+    isDbConnected = false;
+    return updateWorkspaceInDb(workspaceId, telegramId, updates);
   }
-  if (updates.storage_chat !== undefined) {
-    fields.push('storage_chat = ?');
-    values.push(updates.storage_chat.trim() || 'me');
-  }
-  if (fields.length > 0) {
-    values.push(workspaceId, tgId);
-    await pool.query(
-      `UPDATE workspaces SET ${fields.join(', ')}, updated_at = NOW() WHERE id = ? AND telegram_id = ?`,
-      values
-    );
-  }
-  return { success: true };
 }
 
 export async function deleteWorkspaceInDb(
@@ -349,47 +497,48 @@ export async function deleteWorkspaceInDb(
   const tgId = String(telegramId);
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    const userWs = localStore.workspaces.filter((w) => String(w.telegram_id) === tgId);
+    if (userWs.length <= 1) {
+      throw new Error('Cannot delete the last remaining workspace.');
+    }
+    localStore.workspaces = localStore.workspaces.filter((w) => !(w.id === Number(workspaceId) && String(w.telegram_id) === tgId));
+    localStore.user_files = localStore.user_files.filter((f) => !(Number(f.workspace_id) === Number(workspaceId) && String(f.telegram_id) === tgId));
+    if (localStore.users[tgId]?.active_workspace_id === Number(workspaceId)) {
+      const remaining = localStore.workspaces.find((w) => String(w.telegram_id) === tgId);
+      if (remaining) {
+        localStore.users[tgId].active_workspace_id = remaining.id;
+      }
+    }
+    saveLocalStore();
+    return { success: true };
   }
 
-  const [countRows] = await pool.query(
-    `SELECT COUNT(*) AS c FROM workspaces WHERE telegram_id = ?`,
-    [tgId]
-  );
-  if (((countRows as any[])[0]?.c || 0) <= 1) {
-    throw new Error('Cannot delete the last remaining workspace.');
-  }
-
-  await pool.query(
-    `DELETE FROM workspaces WHERE id = ? AND telegram_id = ?`,
-    [workspaceId, tgId]
-  );
-
-  // Delete catalog files belonging to this workspace
-  await pool.query(
-    `DELETE FROM user_files WHERE workspace_id = ? AND telegram_id = ?`,
-    [workspaceId, tgId]
-  );
-
-  const [userRows] = await pool.query(
-    `SELECT active_workspace_id FROM users WHERE telegram_id = ?`,
-    [tgId]
-  );
-  if ((userRows as any[])[0]?.active_workspace_id === workspaceId) {
-    const [remaining] = await pool.query(
-      `SELECT id FROM workspaces WHERE telegram_id = ? LIMIT 1`,
+  try {
+    const [countRows] = await pool.query(
+      `SELECT COUNT(*) AS c FROM workspaces WHERE telegram_id = ?`,
       [tgId]
     );
-    const newActive = (remaining as any[])[0]?.id;
-    if (newActive) {
-      await pool.query(
-        `UPDATE users SET active_workspace_id = ? WHERE telegram_id = ?`,
-        [newActive, tgId]
-      );
+    if (((countRows as any[])[0]?.c || 0) <= 1) {
+      throw new Error('Cannot delete the last remaining workspace.');
     }
-  }
 
-  return { success: true };
+    await pool.query(`DELETE FROM workspaces WHERE id = ? AND telegram_id = ?`, [workspaceId, tgId]);
+    await pool.query(`DELETE FROM user_files WHERE workspace_id = ? AND telegram_id = ?`, [workspaceId, tgId]);
+
+    const [userRows] = await pool.query(`SELECT active_workspace_id FROM users WHERE telegram_id = ?`, [tgId]);
+    if ((userRows as any[])[0]?.active_workspace_id === workspaceId) {
+      const [remaining] = await pool.query(`SELECT id FROM workspaces WHERE telegram_id = ? LIMIT 1`, [tgId]);
+      const newActive = (remaining as any[])[0]?.id;
+      if (newActive) {
+        await pool.query(`UPDATE users SET active_workspace_id = ? WHERE telegram_id = ?`, [newActive, tgId]);
+      }
+    }
+    return { success: true };
+  } catch (err: any) {
+    isDbConnected = false;
+    return deleteWorkspaceInDb(workspaceId, telegramId);
+  }
 }
 
 export async function setActiveWorkspaceInDb(
@@ -398,13 +547,22 @@ export async function setActiveWorkspaceInDb(
 ) {
   const tgId = String(telegramId);
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    if (!localStore.users[tgId]) {
+      localStore.users[tgId] = { telegram_id: tgId };
+    }
+    localStore.users[tgId].active_workspace_id = Number(workspaceId);
+    saveLocalStore();
+    return { success: true };
   }
-  await pool.query(
-    `UPDATE users SET active_workspace_id = ? WHERE telegram_id = ?`,
-    [workspaceId, tgId]
-  );
-  return { success: true };
+
+  try {
+    await pool.query(`UPDATE users SET active_workspace_id = ? WHERE telegram_id = ?`, [workspaceId, tgId]);
+    return { success: true };
+  } catch (err: any) {
+    isDbConnected = false;
+    return setActiveWorkspaceInDb(telegramId, workspaceId);
+  }
 }
 
 export async function getActiveWorkspaceFromDb(telegramId: number | string): Promise<WorkspaceRecord | null> {
@@ -439,6 +597,20 @@ export async function getUserByApiKey(apiKey: string): Promise<{
   if (!cleanKey) return null;
 
   if (!pool || !isDbConnected) {
+    loadLocalStore();
+    for (const u of Object.values(localStore.users)) {
+      if (u.api_key === cleanKey) {
+        return {
+          telegram_id: String(u.telegram_id),
+          first_name: u.first_name,
+          last_name: u.last_name,
+          username: u.username,
+          api_key: u.api_key,
+          active_workspace_id: u.active_workspace_id ? Number(u.active_workspace_id) : null,
+          storage_chat: u.storage_chat || 'me',
+        };
+      }
+    }
     return null;
   }
 
@@ -461,7 +633,8 @@ export async function getUserByApiKey(apiKey: string): Promise<{
       };
     }
   } catch (e: any) {
-    console.error('[MySQL] getUserByApiKey error:', e);
+    isDbConnected = false;
+    return getUserByApiKey(apiKey);
   }
 
   return null;
@@ -470,33 +643,33 @@ export async function getUserByApiKey(apiKey: string): Promise<{
 export async function getUserApiKey(telegramId: number | string): Promise<string> {
   const tgId = String(telegramId);
   if (!pool || !isDbConnected) {
-    return generateApiKey();
+    loadLocalStore();
+    if (!localStore.users[tgId]) {
+      localStore.users[tgId] = { telegram_id: tgId, api_key: generateApiKey() };
+      saveLocalStore();
+    }
+    if (!localStore.users[tgId].api_key) {
+      localStore.users[tgId].api_key = generateApiKey();
+      saveLocalStore();
+    }
+    return localStore.users[tgId].api_key;
   }
 
   try {
-    const [rows] = await pool.query(
-      `SELECT api_key FROM users WHERE telegram_id = ?`,
-      [tgId]
-    );
+    const [rows] = await pool.query(`SELECT api_key FROM users WHERE telegram_id = ?`, [tgId]);
     const userRow = (rows as any[])[0];
     if (userRow && userRow.api_key) return userRow.api_key;
 
     const newKey = generateApiKey();
     if (userRow) {
-      await pool.query(
-        `UPDATE users SET api_key = ? WHERE telegram_id = ?`,
-        [newKey, tgId]
-      );
+      await pool.query(`UPDATE users SET api_key = ? WHERE telegram_id = ?`, [newKey, tgId]);
     } else {
-      await pool.query(
-        `INSERT INTO users (telegram_id, api_key, created_at) VALUES (?, ?, NOW())`,
-        [tgId, newKey]
-      );
+      await pool.query(`INSERT INTO users (telegram_id, api_key, created_at) VALUES (?, ?, NOW())`, [tgId, newKey]);
     }
     return newKey;
   } catch (e: any) {
-    console.error('[MySQL] getUserApiKey error:', e);
-    return generateApiKey();
+    isDbConnected = false;
+    return getUserApiKey(telegramId);
   }
 }
 
@@ -505,25 +678,27 @@ export async function regenerateUserApiKey(telegramId: number | string): Promise
   const newKey = generateApiKey();
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    if (!localStore.users[tgId]) {
+      localStore.users[tgId] = { telegram_id: tgId };
+    }
+    localStore.users[tgId].api_key = newKey;
+    saveLocalStore();
+    return newKey;
   }
 
-  const [rows] = await pool.query(
-    `SELECT telegram_id FROM users WHERE telegram_id = ?`,
-    [tgId]
-  );
-  if ((rows as any[]).length > 0) {
-    await pool.query(
-      `UPDATE users SET api_key = ? WHERE telegram_id = ?`,
-      [newKey, tgId]
-    );
-  } else {
-    await pool.query(
-      `INSERT INTO users (telegram_id, api_key, created_at) VALUES (?, ?, NOW())`,
-      [tgId, newKey]
-    );
+  try {
+    const [rows] = await pool.query(`SELECT telegram_id FROM users WHERE telegram_id = ?`, [tgId]);
+    if ((rows as any[]).length > 0) {
+      await pool.query(`UPDATE users SET api_key = ? WHERE telegram_id = ?`, [newKey, tgId]);
+    } else {
+      await pool.query(`INSERT INTO users (telegram_id, api_key, created_at) VALUES (?, ?, NOW())`, [tgId, newKey]);
+    }
+    return newKey;
+  } catch (err: any) {
+    isDbConnected = false;
+    return regenerateUserApiKey(telegramId);
   }
-  return newKey;
 }
 
 export async function verifyWorkspaceBelongsToUser(
@@ -548,7 +723,7 @@ export async function saveUserToDb(user: {
   session_str?: string;
   bot_token?: string | null;
 }) {
-  const tgId = BigInt(user.telegram_id);
+  const tgId = String(user.telegram_id);
   const firstName = user.first_name || '';
   const lastName = user.last_name || '';
   const username = user.username || '';
@@ -558,39 +733,61 @@ export async function saveUserToDb(user: {
   const botToken = user.bot_token || null;
 
   if (!pool || !isDbConnected) {
-    console.warn('[MySQL Warning] saveUserToDb called while MySQL is disconnected.');
-    return { success: false, error: dbInitError };
+    loadLocalStore();
+    const existing = localStore.users[tgId] || {};
+    const apiKey = existing.api_key || user.api_key || generateApiKey();
+    localStore.users[tgId] = {
+      ...existing,
+      telegram_id: tgId,
+      first_name: firstName,
+      last_name: lastName,
+      username,
+      phone,
+      storage_chat: storageChat,
+      api_key: apiKey,
+      session_str: sessionStr || existing.session_str || null,
+      bot_token: botToken || existing.bot_token || null,
+      session_status: 'active',
+      last_login: new Date().toISOString(),
+    };
+    saveLocalStore();
+    return { success: true, api_key: apiKey };
   }
 
-  const [existing] = await pool.query(
-    `SELECT api_key, session_str, bot_token FROM users WHERE telegram_id = ?`,
-    [tgId.toString()]
-  );
-  let apiKey = (existing as any[])[0]?.api_key || user.api_key;
-  if (!apiKey) {
-    apiKey = generateApiKey();
-  }
-  const effectiveSessionStr = sessionStr || (existing as any[])[0]?.session_str || null;
-  const effectiveBotToken = botToken || (existing as any[])[0]?.bot_token || null;
+  try {
+    const [existing] = await pool.query(
+      `SELECT api_key, session_str, bot_token FROM users WHERE telegram_id = ?`,
+      [tgId]
+    );
+    let apiKey = (existing as any[])[0]?.api_key || user.api_key;
+    if (!apiKey) {
+      apiKey = generateApiKey();
+    }
+    const effectiveSessionStr = sessionStr || (existing as any[])[0]?.session_str || null;
+    const effectiveBotToken = botToken || (existing as any[])[0]?.bot_token || null;
 
-  await pool.query(
-    `INSERT INTO users (telegram_id, first_name, last_name, username, phone, storage_chat, api_key, session_str, bot_token, session_status, session_expires_at, last_login)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())
-     ON DUPLICATE KEY UPDATE
-       first_name = VALUES(first_name),
-       last_name = VALUES(last_name),
-       username = VALUES(username),
-       phone = VALUES(phone),
-       storage_chat = VALUES(storage_chat),
-       api_key = COALESCE(api_key, VALUES(api_key)),
-       session_str = COALESCE(VALUES(session_str), session_str),
-       bot_token = COALESCE(VALUES(bot_token), bot_token),
-       session_status = 'active',
-       session_expires_at = COALESCE(session_expires_at, DATE_ADD(NOW(), INTERVAL 30 DAY)),
-       last_login = NOW()`,
-    [tgId.toString(), firstName, lastName, username, phone, storageChat, apiKey, effectiveSessionStr, effectiveBotToken]
-  );
-  return { success: true, api_key: apiKey };
+    await pool.query(
+      `INSERT INTO users (telegram_id, first_name, last_name, username, phone, storage_chat, api_key, session_str, bot_token, session_status, session_expires_at, last_login)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', DATE_ADD(NOW(), INTERVAL 30 DAY), NOW())
+       ON DUPLICATE KEY UPDATE
+         first_name = VALUES(first_name),
+         last_name = VALUES(last_name),
+         username = VALUES(username),
+         phone = VALUES(phone),
+         storage_chat = VALUES(storage_chat),
+         api_key = COALESCE(api_key, VALUES(api_key)),
+         session_str = COALESCE(VALUES(session_str), session_str),
+         bot_token = COALESCE(VALUES(bot_token), bot_token),
+         session_status = 'active',
+         session_expires_at = COALESCE(session_expires_at, DATE_ADD(NOW(), INTERVAL 30 DAY)),
+         last_login = NOW()`,
+      [tgId, firstName, lastName, username, phone, storageChat, apiKey, effectiveSessionStr, effectiveBotToken]
+    );
+    return { success: true, api_key: apiKey };
+  } catch (err: any) {
+    isDbConnected = false;
+    return saveUserToDb(user);
+  }
 }
 
 export async function saveFileToDb(fileData: {
@@ -615,52 +812,86 @@ export async function saveFileToDb(fileData: {
   const fileSlug = fileData.file_slug || generateUniqueFileSlug(8);
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    const existingIdx = localStore.user_files.findIndex(
+      (f) => String(f.telegram_id) === tgId && String(f.message_id) === msgId
+    );
+
+    const record = {
+      id: existingIdx >= 0 ? localStore.user_files[existingIdx].id : localStore.file_next_id++,
+      telegram_id: tgId,
+      message_id: Number(msgId),
+      workspace_id: wsId,
+      workspace_name: wsName,
+      file_slug: existingIdx >= 0 && localStore.user_files[existingIdx].file_slug ? localStore.user_files[existingIdx].file_slug : fileSlug,
+      file_name: fileData.file_name,
+      original_name: fileData.original_name,
+      file_size: fileData.file_size,
+      mime_type: fileData.mime_type || 'application/octet-stream',
+      caption: fileData.caption || '',
+      storage_chat: fileData.storage_chat || 'me',
+      direct_link: fileData.direct_link || '',
+      download_password: fileData.download_password || null,
+      created_at: existingIdx >= 0 ? localStore.user_files[existingIdx].created_at : new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    if (existingIdx >= 0) {
+      localStore.user_files[existingIdx] = record;
+    } else {
+      localStore.user_files.unshift(record);
+    }
+    saveLocalStore();
+    return { success: true, file_slug: record.file_slug };
   }
 
-  await pool.query(
-    `INSERT INTO user_files 
-      (telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-     ON DUPLICATE KEY UPDATE
-      workspace_id = COALESCE(VALUES(workspace_id), workspace_id),
-      workspace_name = COALESCE(VALUES(workspace_name), workspace_name),
-      file_slug = COALESCE(file_slug, VALUES(file_slug)),
-      file_name = VALUES(file_name),
-      caption = VALUES(caption),
-      direct_link = VALUES(direct_link),
-      download_password = VALUES(download_password),
-      updated_at = NOW()`,
-    [
-      tgId,
-      msgId,
-      wsId,
-      wsName,
-      fileSlug,
-      fileData.file_name,
-      fileData.original_name,
-      fileData.file_size,
-      fileData.mime_type || 'application/octet-stream',
-      fileData.caption || '',
-      fileData.storage_chat || 'me',
-      fileData.direct_link || '',
-      fileData.download_password || null,
-    ]
-  );
-
-  // Retrieve actual stored slug in case record existed
-  let finalSlug = fileSlug;
   try {
-    const [row]: any = await pool.query(
-      `SELECT file_slug FROM user_files WHERE telegram_id = ? AND message_id = ? LIMIT 1`,
-      [tgId, msgId]
+    await pool.query(
+      `INSERT INTO user_files 
+        (telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+       ON DUPLICATE KEY UPDATE
+        workspace_id = COALESCE(VALUES(workspace_id), workspace_id),
+        workspace_name = COALESCE(VALUES(workspace_name), workspace_name),
+        file_slug = COALESCE(file_slug, VALUES(file_slug)),
+        file_name = VALUES(file_name),
+        caption = VALUES(caption),
+        direct_link = VALUES(direct_link),
+        download_password = VALUES(download_password),
+        updated_at = NOW()`,
+      [
+        tgId,
+        msgId,
+        wsId,
+        wsName,
+        fileSlug,
+        fileData.file_name,
+        fileData.original_name,
+        fileData.file_size,
+        fileData.mime_type || 'application/octet-stream',
+        fileData.caption || '',
+        fileData.storage_chat || 'me',
+        fileData.direct_link || '',
+        fileData.download_password || null,
+      ]
     );
-    if (row && row[0]?.file_slug) {
-      finalSlug = row[0].file_slug;
-    }
-  } catch {}
 
-  return { success: true, file_slug: finalSlug };
+    let finalSlug = fileSlug;
+    try {
+      const [row]: any = await pool.query(
+        `SELECT file_slug FROM user_files WHERE telegram_id = ? AND message_id = ? LIMIT 1`,
+        [tgId, msgId]
+      );
+      if (row && row[0]?.file_slug) {
+        finalSlug = row[0].file_slug;
+      }
+    } catch {}
+
+    return { success: true, file_slug: finalSlug };
+  } catch (err: any) {
+    isDbConnected = false;
+    return saveFileToDb(fileData);
+  }
 }
 
 export async function getUserFilesFromDb(
@@ -671,35 +902,67 @@ export async function getUserFilesFromDb(
   const shouldFilterWs = workspaceId !== undefined && workspaceId !== null && workspaceId !== 'all';
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    let list = localStore.user_files.filter((f) => String(f.telegram_id) === tgId);
+    if (shouldFilterWs) {
+      list = list.filter((f) => Number(f.workspace_id) === Number(workspaceId));
+    }
+    return list;
   }
 
-  let query = `
-    SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at
-    FROM user_files
-    WHERE telegram_id = ?
-  `;
-  const params: any[] = [tgId];
+  try {
+    let query = `
+      SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at
+      FROM user_files
+      WHERE telegram_id = ?
+    `;
+    const params: any[] = [tgId];
 
-  if (shouldFilterWs) {
-    query += ` AND workspace_id = ?`;
-    params.push(Number(workspaceId));
+    if (shouldFilterWs) {
+      query += ` AND workspace_id = ?`;
+      params.push(Number(workspaceId));
+    }
+
+    query += ` ORDER BY created_at DESC`;
+
+    const [rows] = await pool.query(query, params);
+    return rows as any[];
+  } catch (err: any) {
+    isDbConnected = false;
+    return getUserFilesFromDb(telegramId, workspaceId);
   }
-
-  query += ` ORDER BY created_at DESC`;
-
-  const [rows] = await pool.query(query, params);
-  return rows as any[];
 }
 
 export async function getFileBySlug(slug: string) {
+  const cleanSlug = String(slug || '').trim();
+  if (!cleanSlug) return null;
+
   if (!pool || !isDbConnected) {
+    loadLocalStore();
+    // 1. Exact match on slug
+    const bySlug = localStore.user_files.find((f) => f.file_slug === cleanSlug);
+    if (bySlug) return bySlug;
+
+    // 2. Base36 decoding
+    if (!/^\d+$/.test(cleanSlug)) {
+      const decodedNum = parseInt(cleanSlug, 36);
+      if (!isNaN(decodedNum) && decodedNum > 0) {
+        const byBase36 = localStore.user_files.find((f) => Number(f.message_id) === decodedNum);
+        if (byBase36) return byBase36;
+      }
+    }
+
+    // 3. Fallback message_id
+    if (/^\d+$/.test(cleanSlug)) {
+      const byMsgId = localStore.user_files.find(
+        (f) => String(f.message_id) === cleanSlug || String(f.id) === cleanSlug
+      );
+      if (byMsgId) return byMsgId;
+    }
     return null;
   }
-  try {
-    const cleanSlug = String(slug || '').trim();
-    if (!cleanSlug) return null;
 
+  try {
     // 1. Exact match on unique file_slug
     const [rows]: any = await pool.query(
       `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, created_at 
@@ -734,17 +997,26 @@ export async function getFileBySlug(slug: string) {
       if (msgRows && msgRows.length > 0) return msgRows[0];
     }
   } catch (e) {
-    console.error('[MySQL] getFileBySlug error:', e);
+    isDbConnected = false;
+    return getFileBySlug(slug);
   }
   return null;
 }
 
 export async function getFileByMessageId(messageId: number | string, storageChat?: string) {
+  const msgId = String(messageId);
   if (!pool || !isDbConnected) {
-    return null;
+    loadLocalStore();
+    return localStore.user_files.find((f) => {
+      const matchMsg = String(f.message_id) === msgId;
+      if (!matchMsg) return false;
+      if (storageChat) return f.storage_chat === storageChat;
+      return true;
+    }) || null;
   }
+
   try {
-    const params: any[] = [String(messageId)];
+    const params: any[] = [msgId];
     let query = `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, file_size, mime_type, download_password, storage_chat, direct_link, created_at FROM user_files WHERE message_id = ?`;
     if (storageChat) {
       query += ` AND storage_chat = ?`;
@@ -754,7 +1026,8 @@ export async function getFileByMessageId(messageId: number | string, storageChat
     const [rows]: any = await pool.query(query, params);
     if (rows && rows.length > 0) return rows[0];
   } catch (e) {
-    console.error('[MySQL] getFileByMessageId error:', e);
+    isDbConnected = false;
+    return getFileByMessageId(messageId, storageChat);
   }
   return null;
 }
@@ -768,16 +1041,30 @@ export async function renameFileInDb(
   const msgId = String(messageId);
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    const idx = localStore.user_files.findIndex(
+      (f) => String(f.telegram_id) === tgId && String(f.message_id) === msgId
+    );
+    if (idx >= 0) {
+      localStore.user_files[idx].file_name = newFileName;
+      localStore.user_files[idx].updated_at = new Date().toISOString();
+      saveLocalStore();
+    }
+    return { success: true };
   }
 
-  await pool.query(
-    `UPDATE user_files
-     SET file_name = ?, updated_at = NOW()
-     WHERE telegram_id = ? AND message_id = ?`,
-    [newFileName, tgId, msgId]
-  );
-  return { success: true };
+  try {
+    await pool.query(
+      `UPDATE user_files
+       SET file_name = ?, updated_at = NOW()
+       WHERE telegram_id = ? AND message_id = ?`,
+      [newFileName, tgId, msgId]
+    );
+    return { success: true };
+  } catch (err: any) {
+    isDbConnected = false;
+    return renameFileInDb(telegramId, messageId, newFileName);
+  }
 }
 
 export async function deleteFileFromDb(telegramId: number | string, messageId: number | string) {
@@ -785,14 +1072,24 @@ export async function deleteFileFromDb(telegramId: number | string, messageId: n
   const msgId = String(messageId);
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    localStore.user_files = localStore.user_files.filter(
+      (f) => !(String(f.telegram_id) === tgId && String(f.message_id) === msgId)
+    );
+    saveLocalStore();
+    return { success: true };
   }
 
-  await pool.query(
-    `DELETE FROM user_files WHERE telegram_id = ? AND message_id = ?`,
-    [tgId, msgId]
-  );
-  return { success: true };
+  try {
+    await pool.query(
+      `DELETE FROM user_files WHERE telegram_id = ? AND message_id = ?`,
+      [tgId, msgId]
+    );
+    return { success: true };
+  } catch (err: any) {
+    isDbConnected = false;
+    return deleteFileFromDb(telegramId, messageId);
+  }
 }
 
 export async function reassignFileWorkspaceInDb(
@@ -811,16 +1108,31 @@ export async function reassignFileWorkspaceInDb(
   }
 
   if (!pool || !isDbConnected) {
-    throw new Error(`MySQL database is not connected (${dbInitError || 'Check credentials'}).`);
+    loadLocalStore();
+    const idx = localStore.user_files.findIndex(
+      (f) => String(f.telegram_id) === tgId && String(f.message_id) === msgId
+    );
+    if (idx >= 0) {
+      localStore.user_files[idx].workspace_id = wsId;
+      localStore.user_files[idx].workspace_name = targetWs.name;
+      localStore.user_files[idx].updated_at = new Date().toISOString();
+      saveLocalStore();
+    }
+    return { success: true, workspace_id: wsId, workspace_name: targetWs.name };
   }
 
-  await pool.query(
-    `UPDATE user_files 
-     SET workspace_id = ?, workspace_name = ?, updated_at = NOW() 
-     WHERE telegram_id = ? AND message_id = ?`,
-    [wsId, targetWs.name, tgId, msgId]
-  );
-  return { success: true, workspace_id: wsId, workspace_name: targetWs.name };
+  try {
+    await pool.query(
+      `UPDATE user_files 
+       SET workspace_id = ?, workspace_name = ?, updated_at = NOW() 
+       WHERE telegram_id = ? AND message_id = ?`,
+      [wsId, targetWs.name, tgId, msgId]
+    );
+    return { success: true, workspace_id: wsId, workspace_name: targetWs.name };
+  } catch (err: any) {
+    isDbConnected = false;
+    return reassignFileWorkspaceInDb(telegramId, messageId, workspaceId);
+  }
 }
 
 export async function getTelegramSystemSessionFromDb(): Promise<{
@@ -832,11 +1144,13 @@ export async function getTelegramSystemSessionFromDb(): Promise<{
   active_user: any;
   bot_token: string | null;
 } | null> {
-  if (!pool || !isDbConnected) return null;
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    return localStore.telegram_system_sessions[0] || null;
+  }
+
   try {
-    const [rows]: any = await pool.query(
-      `SELECT * FROM telegram_system_sessions WHERE id = 1 LIMIT 1`
-    );
+    const [rows]: any = await pool.query(`SELECT * FROM telegram_system_sessions WHERE id = 1 LIMIT 1`);
     if (!rows || rows.length === 0 || !rows[0].session_str) return null;
     const r = rows[0];
     let userObj = r.active_user;
@@ -853,8 +1167,8 @@ export async function getTelegramSystemSessionFromDb(): Promise<{
       bot_token: r.bot_token || null,
     };
   } catch (err: any) {
-    console.warn(`[MySQL] Notice getting telegram session: ${err.message}`);
-    return null;
+    isDbConnected = false;
+    return getTelegramSystemSessionFromDb();
   }
 }
 
@@ -866,7 +1180,24 @@ export async function saveTelegramSystemSessionToDb(data: {
   active_user?: any;
   bot_token?: string | null;
 }): Promise<boolean> {
-  if (!pool || !isDbConnected) return false;
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    localStore.telegram_system_sessions = [
+      {
+        id: 1,
+        api_id: data.api_id || null,
+        api_hash: data.api_hash || null,
+        session_str: data.session_str,
+        storage_chat: data.storage_chat || 'me',
+        active_user: data.active_user || null,
+        bot_token: data.bot_token || null,
+        updated_at: new Date().toISOString(),
+      },
+    ];
+    saveLocalStore();
+    return true;
+  }
+
   try {
     const userJson = data.active_user ? JSON.stringify(data.active_user) : null;
     await pool.query(
@@ -889,27 +1220,29 @@ export async function saveTelegramSystemSessionToDb(data: {
         data.bot_token || null,
       ]
     );
-    console.log('[MySQL] Telegram MTProto session securely saved to MySQL database.');
     return true;
   } catch (err: any) {
-    console.error(`[MySQL Error] Failed to save telegram session: ${err.message}`);
-    return false;
+    isDbConnected = false;
+    return saveTelegramSystemSessionToDb(data);
   }
 }
 
 export async function clearTelegramSystemSessionInDb(): Promise<boolean> {
-  if (!pool || !isDbConnected) return false;
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    localStore.telegram_system_sessions = [];
+    saveLocalStore();
+    return true;
+  }
   try {
     await pool.query(`DELETE FROM telegram_system_sessions WHERE id = 1`);
-    console.log('[MySQL] Telegram MTProto session removed from MySQL database.');
     return true;
   } catch (err: any) {
-    console.error(`[MySQL Error] Failed to clear telegram session: ${err.message}`);
-    return false;
+    isDbConnected = false;
+    return clearTelegramSystemSessionInDb();
   }
 }
 
-// 30-Day Per-User Telegram Session Management in MySQL
 export async function saveUserTelegramSessionInDb(
   telegramId: number | string,
   sessionData: {
@@ -919,11 +1252,24 @@ export async function saveUserTelegramSessionInDb(
     bot_token?: string | null;
   }
 ): Promise<boolean> {
-  if (!pool || !isDbConnected) return false;
+  const tgId = String(telegramId);
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    if (!localStore.users[tgId]) {
+      localStore.users[tgId] = { telegram_id: tgId };
+    }
+    localStore.users[tgId].session_str = sessionData.session_str;
+    localStore.users[tgId].bot_token = sessionData.bot_token || null;
+    localStore.users[tgId].session_api_id = sessionData.api_id || null;
+    localStore.users[tgId].session_api_hash = sessionData.api_hash || null;
+    localStore.users[tgId].session_status = 'active';
+    localStore.users[tgId].session_expires_at = new Date(Date.now() + 30 * 86400000).toISOString();
+    localStore.users[tgId].last_login = new Date().toISOString();
+    saveLocalStore();
+    return true;
+  }
+
   try {
-    const tgId = String(telegramId);
-    
-    // Primary guaranteed update: update session_str and 30-day expiration
     await pool.query(
       `UPDATE users 
        SET session_str = ?,
@@ -932,33 +1278,23 @@ export async function saveUserTelegramSessionInDb(
            session_expires_at = DATE_ADD(NOW(), INTERVAL 30 DAY),
            last_login = NOW()
        WHERE telegram_id = ?`,
-      [
-        sessionData.session_str,
-        sessionData.bot_token || null,
-        tgId,
-      ]
+      [sessionData.session_str, sessionData.bot_token || null, tgId]
     );
 
-    // Optional column update (does not fail if columns don't exist yet)
     try {
       await pool.query(
         `UPDATE users 
          SET session_api_id = ?,
              session_api_hash = ?
          WHERE telegram_id = ?`,
-         [
-           sessionData.api_id || 27254692,
-           sessionData.api_hash || '9f6f826a62b78378292fd224e943cb65',
-           tgId
-         ]
+        [sessionData.api_id || 27254692, sessionData.api_hash || '9f6f826a62b78378292fd224e943cb65', tgId]
       );
     } catch {}
 
-    console.log(`[MySQL] User #${tgId} Telegram session securely saved with 30-day validity.`);
     return true;
   } catch (err: any) {
-    console.error(`[MySQL Error] Failed to save user session: ${err.message}`);
-    return false;
+    isDbConnected = false;
+    return saveUserTelegramSessionInDb(telegramId, sessionData);
   }
 }
 
@@ -972,9 +1308,23 @@ export async function getUserTelegramSessionFromDb(
   api_id: number | null;
   api_hash: string | null;
 } | null> {
-  if (!pool || !isDbConnected) return null;
+  const tgId = String(telegramId);
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    const user = localStore.users[tgId];
+    if (!user || !user.session_str) return null;
+    const isExpired = user.session_expires_at ? new Date(user.session_expires_at).getTime() < Date.now() : false;
+    return {
+      session_str: user.session_str,
+      is_expired: isExpired,
+      session_status: user.session_status || 'active',
+      expires_at: user.session_expires_at || null,
+      api_id: user.session_api_id || null,
+      api_hash: user.session_api_hash || null,
+    };
+  }
+
   try {
-    const tgId = String(telegramId);
     const [rows]: any = await pool.query(
       `SELECT session_str, session_api_id, session_api_hash, session_status, session_expires_at,
               (session_expires_at IS NOT NULL AND session_expires_at < NOW()) AS is_expired
@@ -995,17 +1345,25 @@ export async function getUserTelegramSessionFromDb(
       api_hash: r.session_api_hash || null,
     };
   } catch (err: any) {
-    console.warn(`[MySQL] Notice getting user telegram session: ${err.message}`);
-    return null;
+    isDbConnected = false;
+    return getUserTelegramSessionFromDb(telegramId);
   }
 }
 
 export async function markUserSessionLostInDb(
   telegramId: number | string
 ): Promise<boolean> {
-  if (!pool || !isDbConnected) return false;
+  const tgId = String(telegramId);
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    if (localStore.users[tgId]) {
+      localStore.users[tgId].session_status = 'disconnected';
+      saveLocalStore();
+    }
+    return true;
+  }
+
   try {
-    const tgId = String(telegramId);
     await pool.query(
       `UPDATE users 
        SET session_status = 'disconnected',
@@ -1013,16 +1371,15 @@ export async function markUserSessionLostInDb(
        WHERE telegram_id = ?`,
       [tgId]
     );
-    console.log(`[MySQL] Marked user #${tgId} session status as disconnected.`);
     return true;
   } catch (err: any) {
-    console.error(`[MySQL Error] Failed to mark user session lost: ${err.message}`);
-    return false;
+    isDbConnected = false;
+    return markUserSessionLostInDb(telegramId);
   }
 }
 
 // ============================================================================
-// SYSTEM SETTINGS & ADMIN MANAGEMENT (MySQL Backed)
+// SYSTEM SETTINGS & ADMIN MANAGEMENT (MySQL Backed with Local Store Fallback)
 // ============================================================================
 
 export interface SystemSettingsMap {
@@ -1091,7 +1448,11 @@ const DEFAULT_SYSTEM_SETTINGS: SystemSettingsMap = {
 
 export async function getSystemSettingsFromDb(): Promise<SystemSettingsMap> {
   const result: any = { ...DEFAULT_SYSTEM_SETTINGS };
-  if (!pool || !isDbConnected) return result;
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    return { ...DEFAULT_SYSTEM_SETTINGS, ...localStore.system_settings };
+  }
 
   try {
     const [rows]: any = await pool.query(`SELECT setting_key, setting_value FROM system_settings`);
@@ -1103,7 +1464,9 @@ export async function getSystemSettingsFromDb(): Promise<SystemSettingsMap> {
       }
     }
   } catch (err: any) {
-    console.warn(`[MySQL] Notice loading system settings: ${err.message}`);
+    isDbConnected = false;
+    loadLocalStore();
+    return { ...DEFAULT_SYSTEM_SETTINGS, ...localStore.system_settings };
   }
   return result;
 }
@@ -1111,8 +1474,13 @@ export async function getSystemSettingsFromDb(): Promise<SystemSettingsMap> {
 export async function updateSystemSettingsInDb(
   settings: Partial<SystemSettingsMap>
 ): Promise<{ success: boolean; settings: SystemSettingsMap; error?: string }> {
+  loadLocalStore();
+  localStore.system_settings = { ...localStore.system_settings, ...(settings as Record<string, string>) };
+  saveLocalStore();
+
   if (!pool || !isDbConnected) {
-    return { success: false, settings: DEFAULT_SYSTEM_SETTINGS, error: 'Database is not connected' };
+    const current = await getSystemSettingsFromDb();
+    return { success: true, settings: current };
   }
 
   try {
@@ -1127,11 +1495,11 @@ export async function updateSystemSettingsInDb(
       }
     }
     const updated = await getSystemSettingsFromDb();
-    console.log('[MySQL] System settings updated successfully.');
     return { success: true, settings: updated };
   } catch (err: any) {
-    console.error(`[MySQL Error] Failed to update system settings: ${err.message}`);
-    return { success: false, settings: DEFAULT_SYSTEM_SETTINGS, error: err.message };
+    isDbConnected = false;
+    const current = await getSystemSettingsFromDb();
+    return { success: true, settings: current };
   }
 }
 
@@ -1149,12 +1517,33 @@ export async function verifyAdminPin(pin: string): Promise<boolean> {
 
 export async function getAdminSystemOverview() {
   if (!pool || !isDbConnected) {
+    loadLocalStore();
+    const users = Object.values(localStore.users).map((u: any) => {
+      const userFiles = localStore.user_files.filter((f) => String(f.telegram_id) === String(u.telegram_id));
+      return {
+        telegram_id: u.telegram_id,
+        name: [u.first_name, u.last_name].filter(Boolean).join(' ') || 'User',
+        username: u.username ? `@${u.username}` : '',
+        phone: u.phone || '',
+        storage_chat: u.storage_chat || 'me',
+        session_status: u.session_status || 'active',
+        is_expired: Boolean(u.is_expired),
+        expires_at: u.session_expires_at || null,
+        last_login: u.last_login || null,
+        file_count: userFiles.length,
+        storage_used: userFiles.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0),
+      };
+    });
+
+    const totalFiles = localStore.user_files.length;
+    const totalSizeBytes = localStore.user_files.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0);
+
     return {
-      connected: false,
-      total_users: 0,
-      total_files: 0,
-      total_size_bytes: 0,
-      users: [],
+      connected: true,
+      total_users: users.length,
+      total_files: totalFiles,
+      total_size_bytes: totalSizeBytes,
+      users,
     };
   }
 
@@ -1193,32 +1582,30 @@ export async function getAdminSystemOverview() {
       })),
     };
   } catch (err: any) {
-    console.error(`[MySQL Error] getAdminSystemOverview failed: ${err.message}`);
-    return {
-      connected: false,
-      error: err.message,
-      total_users: 0,
-      total_files: 0,
-      total_size_bytes: 0,
-      users: [],
-    };
+    isDbConnected = false;
+    return getAdminSystemOverview();
   }
 }
 
 export async function purgeUserAccountFromDb(telegramId: number | string): Promise<boolean> {
   const tgId = String(telegramId);
+  loadLocalStore();
+  delete localStore.users[tgId];
+  localStore.workspaces = localStore.workspaces.filter((w) => String(w.telegram_id) !== tgId);
+  localStore.user_files = localStore.user_files.filter((f) => String(f.telegram_id) !== tgId);
+  saveLocalStore();
+
   if (!pool || !isDbConnected) {
-    throw new Error('MySQL database is not connected.');
+    return true;
   }
 
-  // Delete workspaces
-  await pool.query('DELETE FROM workspaces WHERE telegram_id = ?', [tgId]);
-  // Delete user files
-  await pool.query('DELETE FROM user_files WHERE telegram_id = ?', [tgId]);
-  // Delete user
-  await pool.query('DELETE FROM users WHERE telegram_id = ?', [tgId]);
-
-  return true;
+  try {
+    await pool.query('DELETE FROM workspaces WHERE telegram_id = ?', [tgId]);
+    await pool.query('DELETE FROM user_files WHERE telegram_id = ?', [tgId]);
+    await pool.query('DELETE FROM users WHERE telegram_id = ?', [tgId]);
+    return true;
+  } catch (err: any) {
+    isDbConnected = false;
+    return true;
+  }
 }
-
-

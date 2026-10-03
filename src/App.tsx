@@ -172,8 +172,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.6.6
-  const APP_VERSION = "v1.6.6";
+  // App Version in Header - Incremented to v1.6.8
+  const APP_VERSION = "v1.6.8";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -1568,8 +1568,19 @@ export default function App() {
       }
 
       const result = await res.json();
+      const directLink =
+        result.direct_link ||
+        (result.file_slug
+          ? `${window.location.origin}/f/${result.file_slug}`
+          : (result.file_url || `${window.location.origin}/api/download/${result.message_id}/${encodeURIComponent(result.file_name)}`));
+
+      const enrichedResult = {
+        ...result,
+        direct_link: directLink,
+      };
+
       setUploadProgress(100);
-      setUploadResult(result);
+      setUploadResult(enrichedResult);
       setSelectedFile(null);
       setCustomUploadName('');
       setUploadCaption('');
@@ -1645,8 +1656,19 @@ export default function App() {
       }
 
       const result = await res.json();
+      const directLink =
+        result.direct_link ||
+        (result.file_slug
+          ? `${window.location.origin}/f/${result.file_slug}`
+          : (result.file_url || `${window.location.origin}/api/download/${result.message_id}/${encodeURIComponent(result.file_name)}`));
+
+      const enrichedResult = {
+        ...result,
+        direct_link: directLink,
+      };
+
       setOverviewProgress(100);
-      setOverviewResult(result);
+      setOverviewResult(enrichedResult);
       setOverviewFile(null);
       setOverviewPassword('');
       
@@ -3323,13 +3345,15 @@ export default function App() {
                         className="flex-1 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono font-semibold focus:outline-none"
                       />
                       <button
-                        onClick={() => {
-                          navigator.clipboard.writeText(overviewResult.direct_link || '');
-                          alert("Link copied successfully!");
-                        }}
-                        className="px-4 py-2 rounded-xl bg-emerald-500 text-slate-950 font-bold text-xs hover:bg-emerald-400 transition"
+                        onClick={() => copyToClipboard(overviewResult.direct_link || '', 'overview-res')}
+                        className={`px-4 py-2 rounded-xl font-bold text-xs transition flex items-center space-x-1.5 cursor-pointer ${
+                          copiedId === 'overview-res'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'
+                        }`}
                       >
-                        Copy
+                        {copiedId === 'overview-res' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedId === 'overview-res' ? 'Copied' : 'Copy'}</span>
                       </button>
                     </div>
                   </div>

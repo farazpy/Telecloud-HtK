@@ -221,9 +221,18 @@ async function forwardToPython(
   return { status: 503, data: { error: 'Telegram MTProto service unavailable' } };
 }
 
-function getShortLink(slugOrId: number | string, _req?: Request): string {
-  const domain = process.env.CUSTOM_DOMAIN || 's3.htknetwork.in';
-  return `https://${domain}/f/${slugOrId}`;
+function getShortLink(slugOrId: number | string, req?: Request): string {
+  const customDomain = process.env.CUSTOM_DOMAIN;
+  if (customDomain) {
+    const cleanDomain = customDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    return `https://${cleanDomain}/f/${slugOrId}`;
+  }
+  if (req && req.get('host')) {
+    const host = req.get('host');
+    const proto = req.get('x-forwarded-proto') || req.protocol || 'https';
+    return `${proto}://${host}/f/${slugOrId}`;
+  }
+  return `https://s3.htknetwork.in/f/${slugOrId}`;
 }
 
 // Synchronize active Telegram MTProto Session from Python to MySQL (User 30-day & Admin Fallback)
