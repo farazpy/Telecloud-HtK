@@ -135,8 +135,9 @@ function ensurePythonDepsAndStart() {
       });
       install.on('close', (pipCode) => {
         if (pipCode !== 0) {
-          const apt = spawn('apt-get', ['install', '-y', 'python3-aiohttp', 'python3-telethon'], {
+          const apt = spawn('apt-get', ['install', '-y', '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold', 'python3-aiohttp', 'python3-telethon'], {
             stdio: 'inherit',
+            env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
           });
           apt.on('close', () => {
             startPythonService();
