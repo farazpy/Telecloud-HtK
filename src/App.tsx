@@ -22,6 +22,7 @@ import {
   HardDrive,
   Send,
   Key,
+  FileKey,
   Lock,
   AlertCircle,
   Eye,
@@ -172,8 +173,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.7.0
-  const APP_VERSION = "v1.7.0";
+  // App Version in Header - Incremented to v1.7.1
+  const APP_VERSION = "v1.7.1";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -581,6 +582,20 @@ export default function App() {
   const [stringSession, setStringSession] = useState<string>('');
   const [targetChatInput, setTargetChatInput] = useState<string>('me');
   const [secretsConfigured, setSecretsConfigured] = useState<boolean>(false);
+
+  // Session File Import & Export States
+  const [uploadedSessionFileName, setUploadedSessionFileName] = useState<string | null>(null);
+  const [uploadedSessionUser, setUploadedSessionUser] = useState<any | null>(null);
+  const [sessionFileError, setSessionFileError] = useState<string | null>(null);
+  const [isDraggingSessionFile, setIsDraggingSessionFile] = useState<boolean>(false);
+  const [showRawSessionText, setShowRawSessionText] = useState<boolean>(false);
+  const sessionFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Session Export Modal State
+  const [showSessionExportModal, setShowSessionExportModal] = useState<boolean>(false);
+  const [exportingSession, setExportingSession] = useState<boolean>(false);
+  const [sessionExportData, setSessionExportData] = useState<any | null>(null);
+  const [copiedSessionStr, setCopiedSessionStr] = useState<boolean>(false);
   
   // QR Code Login Flow
   const [loginQrDataUrl, setLoginQrDataUrl] = useState<string | null>(null);
@@ -1418,8 +1433,98 @@ export default function App() {
     }
   };
 
+  const handleSessionFileProcess = (file: File) => {
+    setSessionFileError(null);
+    setUploadedSessionFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const content = (e.target?.result as string || '').trim();
+        if (!content) {
+          throw new Error('Selected session file is empty.');
+        }
+
+        // Check if JSON format (TeleCloud session file)
+        if (content.startsWith('{') && content.endsWith('}')) {
+          try {
+            const parsed = JSON.parse(content);
+            const sess = parsed.string_session || parsed.session_str || parsed.session || parsed.stringSession;
+            if (!sess) {
+              throw new Error('Valid Telegram string_session not found in JSON file.');
+            }
+            setStringSession(sess);
+            if (parsed.user) {
+              setUploadedSessionUser(parsed.user);
+            } else {
+              setUploadedSessionUser(null);
+            }
+            if (parsed.api_id) setApiId(String(parsed.api_id));
+            if (parsed.api_hash) setApiHash(String(parsed.api_hash));
+            return;
+          } catch (jsonErr: any) {
+            throw new Error(jsonErr.message || 'Invalid session JSON file.');
+          }
+        }
+
+        // Otherwise treat as raw Telethon string session
+        setStringSession(content);
+        setUploadedSessionUser(null);
+      } catch (err: any) {
+        setSessionFileError(err.message || 'Failed to read session file.');
+        setUploadedSessionFileName(null);
+        setStringSession('');
+      }
+    };
+    reader.onerror = () => {
+      setSessionFileError('Error reading file from disk.');
+    };
+    reader.readAsText(file);
+  };
+
+  const handleDownloadSessionFile = async () => {
+    try {
+      setExportingSession(true);
+      const url = user?.id ? `/api/session/export?telegram_id=${user.id}&download=1` : '/api/session/export?download=1';
+      const res = await fetch(url);
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Failed to export session file.');
+      }
+      const blob = await res.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      const userIdent = user?.username || user?.first_name || user?.id || 'telecloud';
+      const cleanIdent = String(userIdent).replace(/[^a-zA-Z0-9_-]/g, '_');
+      a.download = `telecloud_session_${cleanIdent}.telecloud`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(downloadUrl);
+    } catch (err: any) {
+      alert(err.message || 'Failed to download session file.');
+    } finally {
+      setExportingSession(false);
+    }
+  };
+
+  const handleOpenExportModal = async () => {
+    setShowSessionExportModal(true);
+    setCopiedSessionStr(false);
+    try {
+      setExportingSession(true);
+      const url = user?.id ? `/api/session/export?telegram_id=${user.id}` : '/api/session/export';
+      const data = await safeJsonFetch(url);
+      if (data && data.success) {
+        setSessionExportData(data);
+      }
+    } catch {} finally {
+      setExportingSession(false);
+    }
+  };
+
   const handleDisconnect = async () => {
-    if (!confirm('Are you sure you want to disconnect your Telegram account?')) return;
+    if (!confirm('Are you sure you want to disconnect your Telegram account?\n\nTip: You can export your session file beforehand to easily log back in without an OTP or QR scan.')) return;
     try {
       await fetch('/api/disconnect', { method: 'POST' });
       await checkStatus();
@@ -2883,9 +2988,21 @@ export default function App() {
                 </p>
               </div>
               <button
+                onClick={handleOpenExportModal}
+                title="Backup / Download Session File (.telecloud) for instant login without OTP/QR"
+                className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-xl border text-xs font-semibold transition cursor-pointer flex items-center space-x-1.5 shadow-xs ${
+                  darkMode
+                    ? 'bg-amber-950/30 hover:bg-amber-950/60 border-amber-800/60 text-amber-300'
+                    : 'bg-amber-50 hover:bg-amber-100 border-amber-200 text-amber-800'
+                }`}
+              >
+                <FileKey className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                <span className="hidden lg:inline text-[11px]">Backup Key</span>
+              </button>
+              <button
                 onClick={handleDisconnect}
                 title="Sign out / Disconnect"
-                className={`p-1 sm:p-1.5 rounded-xl transition ${darkMode ? 'hover:bg-rose-950/60 text-slate-400 hover:text-rose-400' : 'hover:bg-rose-50 text-slate-400 hover:text-rose-600'}`}
+                className={`p-1 sm:p-1.5 rounded-xl transition cursor-pointer ${darkMode ? 'hover:bg-rose-950/60 text-slate-400 hover:text-rose-400' : 'hover:bg-rose-50 text-slate-400 hover:text-rose-600'}`}
               >
                 <LogOut className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </button>
@@ -6499,8 +6616,101 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
 
       {/* RENDER AUTH MODAL */}
       {renderAuthModal()}
+
+      {/* RENDER SESSION BACKUP / EXPORT MODAL */}
+      {renderSessionExportModal()}
     </div>
   );
+
+  function renderSessionExportModal() {
+    if (!showSessionExportModal) return null;
+
+    return (
+      <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-md flex items-center justify-center p-4">
+        <div className={`rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-5 border transition-colors ${
+          darkMode ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-500 flex items-center justify-center">
+                <FileKey className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold">Session Backup & Quick Key</h3>
+                <p className="text-xs text-slate-400">Passwordless sign-in file for your vault</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setShowSessionExportModal(false)}
+              className={`p-2 rounded-xl transition cursor-pointer ${
+                darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-400' : 'bg-slate-100 hover:bg-slate-200 text-slate-500'
+              }`}
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className={`p-4 rounded-2xl border space-y-2.5 ${
+            darkMode ? 'bg-slate-950/60 border-slate-800 text-xs' : 'bg-slate-50 border-slate-200 text-xs'
+          }`}>
+            <div className="flex justify-between items-center text-slate-400">
+              <span>Account:</span>
+              <span className="font-bold text-slate-200">{user?.first_name} {user?.last_name || ''}</span>
+            </div>
+            <div className="flex justify-between items-center text-slate-400">
+              <span>Telegram ID:</span>
+              <span className="font-mono text-slate-200">#{user?.id}</span>
+            </div>
+            <div className="flex justify-between items-center text-slate-400">
+              <span>Username:</span>
+              <span className="font-mono text-sky-400">{user?.username ? `@${user.username}` : 'None'}</span>
+            </div>
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs space-y-1">
+            <p className="font-bold flex items-center gap-1.5">
+              <ShieldCheck className="w-4 h-4 text-amber-500 shrink-0" />
+              <span>How This Works</span>
+            </p>
+            <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+              Download your <strong>.telecloud</strong> session file and keep it secure. When you sign in later, simply upload or drag-and-drop this file to enter instantly without waiting for an SMS or scanning a QR code!
+            </p>
+          </div>
+
+          <div className="space-y-2 pt-1">
+            <button
+              onClick={handleDownloadSessionFile}
+              disabled={exportingSession}
+              className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-extrabold text-xs transition shadow-lg shadow-amber-500/20 flex items-center justify-center space-x-2 cursor-pointer active:scale-95 disabled:opacity-50"
+            >
+              {exportingSession ? (
+                <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
+              ) : (
+                <Download className="w-4 h-4 text-slate-950" />
+              )}
+              <span>Download Session File (.telecloud)</span>
+            </button>
+
+            {sessionExportData?.string_session && (
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(sessionExportData.string_session);
+                  setCopiedSessionStr(true);
+                  setTimeout(() => setCopiedSessionStr(false), 2000);
+                }}
+                className={`w-full py-2.5 px-4 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer ${
+                  darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                }`}
+              >
+                {copiedSessionStr ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                <span>{copiedSessionStr ? 'Copied String Session!' : 'Copy Raw Session String'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   function renderAuthModal() {
     if (!showAuthModal) return null;
@@ -6578,12 +6788,13 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
               onClick={() => { setAuthMode('session'); stopQrPolling(); }}
               className={`py-2 px-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 ${
                 authMode === 'session'
-                  ? (darkMode ? 'bg-slate-800 text-white shadow-xs' : 'bg-white text-slate-900 shadow-xs')
+                  ? (darkMode ? 'bg-slate-800 text-white shadow-xs border border-amber-500/30' : 'bg-white text-slate-900 shadow-xs border border-amber-500/30')
                   : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
               }`}
             >
-              <Key className="w-3.5 h-3.5 text-amber-400" />
-              <span>Session String</span>
+              <FileKey className="w-3.5 h-3.5 text-amber-400" />
+              <span>Session File</span>
+              <span className="text-[9px] px-1 rounded-sm bg-amber-500 text-slate-950 uppercase font-bold">Key</span>
             </button>
           </div>
 
@@ -6862,20 +7073,120 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
             )}
 
             {authMode === 'session' && (
-              <div>
-                <label className={`block text-xs font-bold mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
-                  Telegram Session String
-                </label>
-                <textarea
-                  rows={3}
-                  required
-                  value={stringSession}
-                  onChange={(e) => setStringSession(e.target.value)}
-                  placeholder="Paste your session string here"
-                  className={`w-full border rounded-xl p-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 shadow-xs ${
-                    darkMode ? 'bg-slate-950 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
-                  }`}
-                />
+              <div className="space-y-3">
+                {/* File Drop / Upload Area */}
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className={`block text-xs font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                      Upload Session File (.telecloud, .session, .txt)
+                    </label>
+                    <span className="text-[10px] text-amber-500 font-semibold">No OTP / No QR Needed</span>
+                  </div>
+                  
+                  <input
+                    type="file"
+                    ref={sessionFileInputRef}
+                    accept=".telecloud,.session,.txt,application/json,text/plain"
+                    className="hidden"
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) handleSessionFileProcess(file);
+                    }}
+                  />
+
+                  <div
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setIsDraggingSessionFile(true);
+                    }}
+                    onDragLeave={() => setIsDraggingSessionFile(false)}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      setIsDraggingSessionFile(false);
+                      const file = e.dataTransfer.files?.[0];
+                      if (file) handleSessionFileProcess(file);
+                    }}
+                    onClick={() => sessionFileInputRef.current?.click()}
+                    className={`border-2 border-dashed rounded-2xl p-5 text-center cursor-pointer transition select-none ${
+                      isDraggingSessionFile
+                        ? 'border-sky-500 bg-sky-500/10 scale-[1.01]'
+                        : uploadedSessionFileName
+                        ? (darkMode ? 'border-emerald-500/50 bg-emerald-950/20' : 'border-emerald-500/50 bg-emerald-50/60')
+                        : (darkMode ? 'border-slate-800 hover:border-amber-500/50 hover:bg-slate-950' : 'border-slate-200 hover:border-amber-500/50 hover:bg-amber-50/30')
+                    }`}
+                  >
+                    {uploadedSessionFileName ? (
+                      <div className="space-y-1.5">
+                        <div className="w-10 h-10 mx-auto rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                          <CheckCircle2 className="w-5 h-5 text-emerald-500" />
+                        </div>
+                        <p className="text-xs font-bold text-emerald-600 dark:text-emerald-400 truncate max-w-xs mx-auto">
+                          {uploadedSessionFileName}
+                        </p>
+                        {uploadedSessionUser && (
+                          <p className="text-[11px] text-slate-400 font-mono">
+                            Account: {uploadedSessionUser.first_name || ''} {uploadedSessionUser.username ? `(@${uploadedSessionUser.username})` : `ID: ${uploadedSessionUser.id || ''}`}
+                          </p>
+                        )}
+                        <p className="text-[10px] text-slate-500">
+                          Click to select a different session file
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <div className="w-10 h-10 mx-auto rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center">
+                          <FileKey className="w-5 h-5" />
+                        </div>
+                        <p className={`text-xs font-bold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                          Drop your .telecloud or .session file here
+                        </p>
+                        <p className="text-[11px] text-slate-400">
+                          or click to browse your computer
+                        </p>
+                      </div>
+                    )}
+                  </div>
+
+                  {sessionFileError && (
+                    <p className="text-rose-500 text-[11px] font-medium mt-1.5 flex items-center gap-1">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{sessionFileError}</span>
+                    </p>
+                  )}
+                </div>
+
+                {/* Option to toggle raw text pasting */}
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowRawSessionText(!showRawSessionText)}
+                    className="text-[11px] font-semibold text-sky-500 hover:text-sky-400 transition flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>{showRawSessionText ? 'Hide manual string paste' : 'Or paste raw session string manually'}</span>
+                    <ChevronDown className={`w-3 h-3 transition-transform ${showRawSessionText ? 'rotate-180' : ''}`} />
+                  </button>
+
+                  {showRawSessionText && (
+                    <div className="mt-2 animate-in fade-in duration-150">
+                      <textarea
+                        rows={3}
+                        value={stringSession}
+                        onChange={(e) => {
+                          setStringSession(e.target.value);
+                          setUploadedSessionFileName(null);
+                        }}
+                        placeholder="Paste your Telethon 1BJWap1w... session string here"
+                        className={`w-full border rounded-xl p-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-sky-500/20 focus:border-sky-500 shadow-xs ${
+                          darkMode ? 'bg-slate-950 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-800'
+                        }`}
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <p className={`text-[11px] ${darkMode ? 'text-slate-400' : 'text-slate-500'} leading-normal`}>
+                  Instant cryptographically authorized MTProto handshake directly to Telegram datacenters.
+                </p>
               </div>
             )}
 
@@ -6916,6 +7227,8 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
                     ? 'Contacting Telegram MTProto...'
                     : authMode === 'phone'
                     ? 'Send Verification Code to Telegram'
+                    : authMode === 'session'
+                    ? 'Sign In with Session Key'
                     : 'Connect with Telegram'}
                 </span>
               </button>

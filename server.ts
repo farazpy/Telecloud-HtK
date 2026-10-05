@@ -588,6 +588,73 @@ app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: 
   res.status(result.status).json(result.data);
 });
 
+// Export active session as a reusable .telecloud file or JSON
+app.get(['/api/session/export', '/api/user/session-export'], async (req: Request, res: Response) => {
+  try {
+    let tgId = (req.query.telegram_id as string) || (req.query.userId as string);
+    let sessionStr: string | null = null;
+    let activeUser: any = null;
+
+    // Check Python daemon active session first
+    const sessionRes = await forwardToPython('GET', '/session_data');
+    if (sessionRes.status === 200 && sessionRes.data?.session_str) {
+      sessionStr = sessionRes.data.session_str;
+      activeUser = sessionRes.data.user;
+      if (!tgId && activeUser?.id) {
+        tgId = String(activeUser.id);
+      }
+    }
+
+    // Fallback to MySQL user session
+    if (!sessionStr && tgId) {
+      const uSess = await getUserTelegramSessionFromDb(tgId);
+      if (uSess?.session_str) {
+        sessionStr = uSess.session_str;
+      }
+    }
+
+    // Fallback to MySQL system admin session
+    if (!sessionStr) {
+      const sysSess = await getTelegramSystemSessionFromDb();
+      if (sysSess?.session_str) {
+        sessionStr = sysSess.session_str;
+        activeUser = sysSess.active_user || activeUser;
+      }
+    }
+
+    if (!sessionStr) {
+      return res.status(404).json({
+        success: false,
+        error: 'No active Telegram MTProto session found to export. Please connect first.',
+      });
+    }
+
+    const payload = {
+      app: 'TeleCloud Vault',
+      format_version: '1.0',
+      type: 'telecloud_session_backup',
+      user: activeUser || (tgId ? { id: tgId } : null),
+      string_session: sessionStr,
+      created_at: new Date().toISOString(),
+      instructions:
+        'Keep this file safe and private. You can upload this file to TeleCloud at any time to instantly sign in without receiving an SMS or scanning a QR code.',
+    };
+
+    if (req.query.download === '1' || req.query.download === 'true') {
+      const userIdent = activeUser?.username || activeUser?.first_name || tgId || 'user';
+      const cleanIdent = String(userIdent).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const filename = `telecloud_session_${cleanIdent}.telecloud`;
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Type', 'application/json');
+      return res.send(JSON.stringify(payload, null, 2));
+    }
+
+    return res.json({ success: true, ...payload });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/api/disconnect', async (req: Request, res: Response) => {
   const tgId = req.body?.telegram_id;
   if (tgId) {
