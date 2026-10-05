@@ -173,8 +173,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.7.2
-  const APP_VERSION = "v1.7.2";
+  // App Version in Header - Incremented to v1.7.3
+  const APP_VERSION = "v1.7.3";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -2178,8 +2178,12 @@ export default function App() {
                 return (
                   <button
                     key={link.path}
-                    onClick={() => navigate(link.path)}
-                    className={`transition-colors py-1 px-2.5 rounded-lg ${
+                    type="button"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigate(link.path);
+                    }}
+                    className={`transition-colors py-1 px-2.5 rounded-lg cursor-pointer ${
                       isActive
                         ? 'text-sky-500 font-extrabold bg-sky-500/10'
                         : darkMode
@@ -2187,7 +2191,7 @@ export default function App() {
                         : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
                     }`}
                   >
-                    {link.label}
+                    <span>{link.label}</span>
                   </button>
                 );
               })}
@@ -2234,11 +2238,13 @@ export default function App() {
               ].map((link) => (
                 <button
                   key={link.path}
-                  onClick={() => {
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
                     navigate(link.path);
                     setMobileMenuOpen(false);
                   }}
-                  className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-between ${
+                  className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-between cursor-pointer ${
                     currentRoute === link.path
                       ? 'bg-sky-500 text-white'
                       : darkMode
@@ -3037,8 +3043,9 @@ export default function App() {
               </p>
               <div className="space-y-1">
                 <button
+                  type="button"
                   onClick={() => { setDashboardTab('overview'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed cursor-pointer ${
                     darkMode ? 'border-slate-800/40' : 'border-slate-100'
                   } ${
                     dashboardTab === 'overview'
@@ -3051,8 +3058,9 @@ export default function App() {
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => { setDashboardTab('upload'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed cursor-pointer ${
                     darkMode ? 'border-slate-800/40' : 'border-slate-100'
                   } ${
                     dashboardTab === 'upload'
@@ -3065,8 +3073,9 @@ export default function App() {
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => { setDashboardTab('vault'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed cursor-pointer ${
                     darkMode ? 'border-slate-800/40' : 'border-slate-100'
                   } ${
                     dashboardTab === 'vault'
@@ -3088,8 +3097,9 @@ export default function App() {
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => { setDashboardTab('streamer'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed cursor-pointer ${
                     darkMode ? 'border-slate-800/40' : 'border-slate-100'
                   } ${
                     dashboardTab === 'streamer'
@@ -3109,8 +3119,9 @@ export default function App() {
               </p>
               <div className="space-y-1">
                 <button
+                  type="button"
                   onClick={() => { setDashboardTab('api'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed cursor-pointer ${
                     darkMode ? 'border-slate-800/40' : 'border-slate-100'
                   } ${
                     dashboardTab === 'api'
@@ -3132,8 +3143,9 @@ export default function App() {
                 </button>
 
                 <button
+                  type="button"
                   onClick={() => { setDashboardTab('settings'); setMobileSidebarOpen(false); }}
-                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed ${
+                  className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed cursor-pointer ${
                     darkMode ? 'border-slate-800/40' : 'border-slate-100'
                   } ${
                     dashboardTab === 'settings'
@@ -6554,8 +6566,9 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
         darkMode ? 'bg-slate-900/95 backdrop-blur-xl border-slate-800 text-slate-400' : 'bg-white/95 backdrop-blur-xl border-slate-200/80 text-slate-500'
       }`}>
         <button
+          type="button"
           onClick={() => { setDashboardTab('overview'); setMobileSidebarOpen(false); }}
-          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition ${
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition cursor-pointer ${
             dashboardTab === 'overview' ? 'text-indigo-400 font-extrabold' : (darkMode ? 'hover:text-white' : 'hover:text-slate-900')
           }`}
           aria-label="Overview tab"
@@ -6565,8 +6578,9 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
         </button>
 
         <button
+          type="button"
           onClick={() => { setDashboardTab('workspaces'); setMobileSidebarOpen(false); }}
-          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition relative ${
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition relative cursor-pointer ${
             dashboardTab === 'workspaces' ? 'text-purple-400 font-extrabold' : (darkMode ? 'hover:text-white' : 'hover:text-slate-900')
           }`}
           aria-label="Workspaces tab"
@@ -6579,8 +6593,9 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
         </button>
 
         <button
+          type="button"
           onClick={() => { setDashboardTab('upload'); setMobileSidebarOpen(false); }}
-          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition ${
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition cursor-pointer ${
             dashboardTab === 'upload' ? 'text-sky-400 font-extrabold' : (darkMode ? 'hover:text-white' : 'hover:text-slate-900')
           }`}
           aria-label="Upload tab"
@@ -6592,8 +6607,9 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
         </button>
 
         <button
+          type="button"
           onClick={() => { setDashboardTab('vault'); setMobileSidebarOpen(false); }}
-          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition ${
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition cursor-pointer ${
             dashboardTab === 'vault' ? 'text-emerald-400 font-extrabold' : (darkMode ? 'hover:text-white' : 'hover:text-slate-900')
           }`}
           aria-label="Files Vault tab"
@@ -6603,8 +6619,9 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
         </button>
 
         <button
+          type="button"
           onClick={() => { setDashboardTab('settings'); setMobileSidebarOpen(false); }}
-          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition ${
+          className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-xl transition cursor-pointer ${
             dashboardTab === 'settings' ? 'text-teal-400 font-extrabold' : (darkMode ? 'hover:text-white' : 'hover:text-slate-900')
           }`}
           aria-label="Storage Settings tab"
