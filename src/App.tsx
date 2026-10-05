@@ -172,9 +172,88 @@ export interface StorageChatOption {
   description?: string;
 }
 
+interface GridImagePreviewProps {
+  file: StorageFile;
+  darkMode: boolean;
+  getFileIcon: (mime?: string, name?: string) => React.ReactNode;
+}
+
+const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, getFileIcon }) => {
+  const [isLoading, setIsLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
+
+  const isImg = file.mime_type?.startsWith('image/') || /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(file.file_name);
+  const imageSrc = `/f/${file.file_slug || file.message_id}/${encodeURIComponent(file.file_name)}`;
+
+  if (!isImg) {
+    return (
+      <div className={`aspect-square w-full rounded-2xl flex flex-col items-center justify-center space-y-1.5 border shrink-0 ${
+        darkMode ? 'bg-slate-950/80 border-slate-800/80' : 'bg-slate-50 border-slate-150'
+      }`}>
+        <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${
+          darkMode ? 'bg-slate-900 border border-slate-800 text-sky-400' : 'bg-slate-100 border border-slate-200'
+        }`}>
+          {getFileIcon(file.mime_type, file.file_name)}
+        </div>
+        <span className="text-[10px] text-slate-500 font-mono tracking-wider font-extrabold uppercase">
+          {file.mime_type ? file.mime_type.split('/')[1]?.slice(0, 8) : 'BINARY'}
+        </span>
+      </div>
+    );
+  }
+
+  if (hasError) {
+    return (
+      <div className={`aspect-square w-full rounded-2xl flex flex-col items-center justify-center space-y-1.5 border shrink-0 ${
+        darkMode ? 'bg-slate-950/80 border-slate-800/80' : 'bg-slate-50 border-slate-150'
+      }`}>
+        <div className="w-12 h-12 rounded-2xl flex items-center justify-center bg-rose-500/10 text-rose-500 border border-rose-500/20">
+          <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+        </div>
+        <span className="text-[10px] text-rose-500 font-bold">Failed to load</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`aspect-square w-full rounded-2xl overflow-hidden border relative flex items-center justify-center group shrink-0 ${
+      darkMode ? 'bg-slate-950/80 border-slate-800/80' : 'bg-slate-50 border-slate-150'
+    }`}>
+      {/* Creative Loader */}
+      {isLoading && (
+        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-slate-900/40 backdrop-blur-xs">
+          <div className="relative flex items-center justify-center w-14 h-14">
+            <div className="absolute inset-0 rounded-full bg-sky-500/10 animate-ping duration-1000" />
+            <div className="absolute inset-0 rounded-full border-2 border-dashed border-sky-500/40 animate-spin" style={{ animationDuration: '6s' }} />
+            <div className="w-10 h-10 rounded-full border-2 border-sky-500 border-t-transparent animate-spin" />
+            <div className="absolute w-2 h-2 rounded-full bg-indigo-500 shadow-[0_0_8px_rgba(99,102,241,1)]" />
+          </div>
+          <span className="text-[10px] font-bold text-sky-400 mt-3 tracking-widest uppercase animate-pulse">
+            Retrieving...
+          </span>
+          <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-sky-500 to-transparent opacity-60 animate-scan" />
+        </div>
+      )}
+
+      <img
+        src={imageSrc}
+        alt={file.file_name}
+        loading="lazy"
+        onLoad={() => setIsLoading(false)}
+        onError={() => setHasError(true)}
+        className={`w-full h-full object-cover transition-all duration-500 ease-out group-hover:scale-[1.04] ${
+          isLoading ? 'opacity-0 scale-95' : 'opacity-100 scale-100'
+        }`}
+      />
+    </div>
+  );
+};
+
 export default function App() {
-  // App Version in Header - Incremented to v1.7.3
-  const APP_VERSION = "v1.7.3";
+  // App Version in Header - Incremented to v1.7.8
+  const APP_VERSION = "v1.7.8";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -593,6 +672,7 @@ export default function App() {
 
   // Session Export Modal State
   const [showSessionExportModal, setShowSessionExportModal] = useState<boolean>(false);
+  const [imageErrors, setImageErrors] = useState<Record<string | number, boolean>>({});
   const [exportingSession, setExportingSession] = useState<boolean>(false);
   const [sessionExportData, setSessionExportData] = useState<any | null>(null);
   const [copiedSessionStr, setCopiedSessionStr] = useState<boolean>(false);
@@ -1527,6 +1607,7 @@ export default function App() {
     if (!confirm('Are you sure you want to disconnect your Telegram account?\n\nTip: You can export your session file beforehand to easily log back in without an OTP or QR scan.')) return;
     try {
       await fetch('/api/disconnect', { method: 'POST' });
+      localStorage.removeItem('telecloud_user_tg_id');
       await checkStatus();
       setFiles([]);
     } catch (e) {
@@ -2322,18 +2403,18 @@ export default function App() {
             <div className="lg:col-span-7 space-y-6 text-left">
               <div className="inline-flex items-center space-x-2 text-xs font-semibold text-sky-500">
                 <Sparkles className="w-4 h-4 animate-pulse" />
-                <span>Enterprise Self-Hosted MTProto Storage</span>
+                <span>Turn Telegram into Your Personal Storage Cloud</span>
               </div>
 
               <h1 className={`text-4xl sm:text-6xl font-extrabold tracking-tight leading-tight text-wrap-balance ${darkMode ? 'text-white' : 'text-slate-950'}`}>
-                Decentralized Unlimited Cloud Storage on{' '}
+                Unlimited Cloud Storage.{' '}
                 <span className="bg-gradient-to-r from-sky-400 via-indigo-400 to-purple-400 bg-clip-text text-transparent">
-                  Your VPS.
+                  Powered by Telegram.
                 </span>
               </h1>
 
               <p className={`text-base sm:text-lg leading-relaxed ${darkMode ? 'text-slate-300' : 'text-slate-800'} max-w-2xl`}>
-                Store, index, and stream files of any size directly from your secure Telegram MTProto storage chats. TeleCloud indexes your library automatically in your private MySQL catalog and generates lightning-fast, seekable HTTP links instantly.
+                Connect your Telegram account, channel, or bot. Instantly turn your chats into an infinite, high-speed, self-hosted personal storage vault with zero file size caps, zero bandwidth limits, and complete data sovereignty on your own VPS.
               </p>
 
               <div className="pt-2 flex flex-col sm:flex-row items-center gap-4">
@@ -4563,6 +4644,9 @@ export default function App() {
                             </button>
                           </div>
                         </div>
+
+                        {/* Beautiful Media Preview Thumbnail for Grid Cards */}
+                        <GridImagePreview file={file} darkMode={darkMode} getFileIcon={getFileIcon} />
 
                         <div>
                           <div className="flex items-center space-x-1.5 mb-1.5 flex-wrap gap-1">

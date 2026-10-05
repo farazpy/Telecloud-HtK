@@ -51,6 +51,31 @@ const PORT = process.env.PORT || 3000;
 const PY_PORT = 5050;
 const PY_BASE = `http://127.0.0.1:${PY_PORT}/api/py`;
 
+// Helper to parse standard cookie values without external dependencies
+function getCookie(req: Request, name: string): string | null {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+  const cookies = cookieHeader.split(';');
+  for (const cookie of cookies) {
+    const parts = cookie.trim().split('=');
+    const key = parts[0];
+    const val = parts.slice(1).join('=');
+    if (key === name) {
+      return decodeURIComponent(val || '');
+    }
+  }
+  return null;
+}
+
+// Resilient helper to fetch Telegram ID across cookies, query parameters, or request body
+function getTelegramId(req: Request): string | undefined {
+  const cookieTgId = getCookie(req, 'telecloud_tg_id');
+  if (cookieTgId) return cookieTgId;
+  const bodyTgId = req.body?.telegram_id || req.body?.userId;
+  const queryTgId = req.query.telegram_id || req.query.userId;
+  return (queryTgId || bodyTgId) ? String(queryTgId || bodyTgId) : undefined;
+}
+
 // Helper to wait until Python MTProto daemon is ready before sending requests
 async function waitForPythonReady(maxWaitMs = 15000): Promise<boolean> {
   const start = Date.now();
@@ -385,7 +410,7 @@ app.get('/api/status', async (req: Request, res: Response) => {
   }
 
   // Check user session status if a specific user ID is passed
-  const queryTgId = req.query.telegram_id as string;
+  const queryTgId = getTelegramId(req);
   let userSessionInfo: any = null;
   let connectivityLost = false;
 
@@ -508,6 +533,15 @@ app.post('/api/connect', async (req: Request, res: Response) => {
 
     // Persist session to MySQL (User 30-Day & System Fallback)
     await syncSessionToMysql(result.data.user.id, sessionStr, req.body.bot_token);
+
+    // Set secure HTTP-Only cookie for the session
+    res.cookie('telecloud_tg_id', String(result.data.user.id), {
+      httpOnly: true,
+      secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      sameSite: 'lax',
+      path: '/',
+    });
   }
   res.status(result.status).json(result.data);
 });
@@ -554,6 +588,15 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
 
     // Persist 30-day session to MySQL
     await syncSessionToMysql(result.data.user.id, sessionStr);
+
+    // Set secure HTTP-Only cookie for the session
+    res.cookie('telecloud_tg_id', String(result.data.user.id), {
+      httpOnly: true,
+      secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      sameSite: 'lax',
+      path: '/',
+    });
   }
   res.status(result.status).json(result.data);
 });
@@ -585,6 +628,15 @@ app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: 
 
     // Persist session to MySQL on successful QR authorization (30-day user session + admin fallback)
     await syncSessionToMysql(result.data.user.id, sessionStr);
+
+    // Set secure HTTP-Only cookie for the session
+    res.cookie('telecloud_tg_id', String(result.data.user.id), {
+      httpOnly: true,
+      secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      sameSite: 'lax',
+      path: '/',
+    });
   }
   res.status(result.status).json(result.data);
 });
@@ -592,7 +644,7 @@ app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: 
 // Export active session as a reusable .telecloud file or JSON
 app.get(['/api/session/export', '/api/user/session-export'], async (req: Request, res: Response) => {
   try {
-    let tgId = (req.query.telegram_id as string) || (req.query.userId as string);
+    let tgId = getTelegramId(req);
     let sessionStr: string | null = null;
     let activeUser: any = null;
 
@@ -657,12 +709,13 @@ app.get(['/api/session/export', '/api/user/session-export'], async (req: Request
 });
 
 app.post('/api/disconnect', async (req: Request, res: Response) => {
-  const tgId = req.body?.telegram_id;
+  const tgId = req.body?.telegram_id || getCookie(req, 'telecloud_tg_id');
   if (tgId) {
     await markUserSessionLostInDb(tgId).catch(() => {});
   }
   await clearTelegramSystemSessionInDb().catch((e) => console.error('[MySQL] clear error:', e));
   const result = await forwardToPython('POST', '/disconnect');
+  res.clearCookie('telecloud_tg_id', { path: '/' });
   res.status(result.status).json(result.data);
 });
 
