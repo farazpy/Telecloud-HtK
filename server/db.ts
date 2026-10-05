@@ -169,6 +169,7 @@ export async function initDb() {
         storage_chat VARCHAR(255) DEFAULT 'me',
         direct_link TEXT,
         download_password VARCHAR(255) DEFAULT NULL,
+        is_restricted BOOLEAN DEFAULT FALSE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         INDEX idx_tg_user (telegram_id),
@@ -217,6 +218,7 @@ export async function initDb() {
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN workspace_name VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN download_password VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN file_slug VARCHAR(64) UNIQUE DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE user_files ADD COLUMN is_restricted BOOLEAN DEFAULT FALSE;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD INDEX idx_file_slug (file_slug);`); } catch {}
 
     // Backfill unique file_slug for any legacy files missing a slug
@@ -832,6 +834,7 @@ export async function saveFileToDb(fileData: {
       storage_chat: fileData.storage_chat || 'me',
       direct_link: fileData.direct_link || '',
       download_password: fileData.download_password || null,
+      is_restricted: existingIdx >= 0 ? Boolean(localStore.user_files[existingIdx].is_restricted) : false,
       created_at: existingIdx >= 0 ? localStore.user_files[existingIdx].created_at : new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -912,7 +915,7 @@ export async function getUserFilesFromDb(
 
   try {
     let query = `
-      SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at
+      SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, is_restricted, created_at, updated_at
       FROM user_files
       WHERE telegram_id = ?
     `;
@@ -965,7 +968,7 @@ export async function getFileBySlug(slug: string) {
   try {
     // 1. Exact match on unique file_slug
     const [rows]: any = await pool.query(
-      `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, created_at 
+      `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, is_restricted, created_at 
        FROM user_files 
        WHERE file_slug = ? LIMIT 1`,
       [cleanSlug]
@@ -977,7 +980,7 @@ export async function getFileBySlug(slug: string) {
       const decodedNum = parseInt(cleanSlug, 36);
       if (!isNaN(decodedNum) && decodedNum > 0) {
         const [base36Rows]: any = await pool.query(
-          `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, created_at 
+          `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, is_restricted, created_at 
            FROM user_files 
            WHERE message_id = ? LIMIT 1`,
           [decodedNum]
@@ -989,7 +992,7 @@ export async function getFileBySlug(slug: string) {
     // 3. Fallback by numeric message_id or record id
     if (/^\d+$/.test(cleanSlug)) {
       const [msgRows]: any = await pool.query(
-        `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, created_at 
+        `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, is_restricted, created_at 
          FROM user_files 
          WHERE message_id = ? OR id = ? LIMIT 1`,
         [cleanSlug, cleanSlug]
@@ -1017,7 +1020,7 @@ export async function getFileByMessageId(messageId: number | string, storageChat
 
   try {
     const params: any[] = [msgId];
-    let query = `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, file_size, mime_type, download_password, storage_chat, direct_link, created_at FROM user_files WHERE message_id = ?`;
+    let query = `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, file_size, mime_type, download_password, storage_chat, direct_link, is_restricted, created_at FROM user_files WHERE message_id = ?`;
     if (storageChat) {
       query += ` AND storage_chat = ?`;
       params.push(storageChat);
@@ -1132,6 +1135,293 @@ export async function reassignFileWorkspaceInDb(
   } catch (err: any) {
     isDbConnected = false;
     return reassignFileWorkspaceInDb(telegramId, messageId, workspaceId);
+  }
+}
+
+// ============================================================================
+// ADMIN COMPREHENSIVE FILE MANAGER FUNCTIONS (User-wise, Multi-filter & Restrict)
+// ============================================================================
+
+export interface AdminFileRecord {
+  id: number;
+  telegram_id: string;
+  message_id: number;
+  workspace_id: number | null;
+  workspace_name: string | null;
+  file_slug: string;
+  file_name: string;
+  original_name: string;
+  file_size: number;
+  mime_type: string;
+  caption: string;
+  storage_chat: string;
+  direct_link: string;
+  download_password: string | null;
+  is_restricted: boolean;
+  created_at: string;
+  updated_at: string;
+  user_name?: string;
+  user_username?: string;
+  user_phone?: string;
+}
+
+export async function getAllAdminFilesFromDb(options?: {
+  telegram_id?: string | null;
+  status?: 'all' | 'active' | 'restricted';
+  search?: string;
+  page?: number;
+  limit?: number;
+}): Promise<{
+  files: AdminFileRecord[];
+  total: number;
+  total_restricted: number;
+  total_size_bytes: number;
+  page: number;
+  limit: number;
+}> {
+  const targetTgId = options?.telegram_id && options.telegram_id !== 'all' ? String(options.telegram_id) : null;
+  const statusFilter = options?.status || 'all';
+  const searchTerm = String(options?.search || '').trim().toLowerCase();
+  const page = Math.max(1, Number(options?.page) || 1);
+  const limit = Math.max(1, Math.min(200, Number(options?.limit) || 50));
+  const offset = (page - 1) * limit;
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    let allFiles = [...localStore.user_files].map((f) => {
+      const user = localStore.users[String(f.telegram_id)] || {};
+      const uName = [user.first_name, user.last_name].filter(Boolean).join(' ') || 'User';
+      return {
+        ...f,
+        telegram_id: String(f.telegram_id),
+        message_id: Number(f.message_id),
+        file_size: Number(f.file_size || 0),
+        is_restricted: Boolean(f.is_restricted),
+        user_name: uName,
+        user_username: user.username ? `@${user.username}` : '',
+        user_phone: user.phone || '',
+      };
+    });
+
+    if (targetTgId) {
+      allFiles = allFiles.filter((f) => f.telegram_id === targetTgId);
+    }
+
+    if (statusFilter === 'active') {
+      allFiles = allFiles.filter((f) => !f.is_restricted);
+    } else if (statusFilter === 'restricted') {
+      allFiles = allFiles.filter((f) => f.is_restricted);
+    }
+
+    if (searchTerm) {
+      allFiles = allFiles.filter((f) => {
+        return (
+          (f.file_name && f.file_name.toLowerCase().includes(searchTerm)) ||
+          (f.file_slug && f.file_slug.toLowerCase().includes(searchTerm)) ||
+          String(f.message_id).includes(searchTerm) ||
+          (f.user_name && f.user_name.toLowerCase().includes(searchTerm)) ||
+          (f.user_username && f.user_username.toLowerCase().includes(searchTerm))
+        );
+      });
+    }
+
+    // Sort by created_at desc
+    allFiles.sort((a, b) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+
+    const total = allFiles.length;
+    const total_restricted = allFiles.filter((f) => f.is_restricted).length;
+    const total_size_bytes = allFiles.reduce((acc, f) => acc + (Number(f.file_size) || 0), 0);
+    const pagedFiles = allFiles.slice(offset, offset + limit);
+
+    return {
+      files: pagedFiles,
+      total,
+      total_restricted,
+      total_size_bytes,
+      page,
+      limit,
+    };
+  }
+
+  try {
+    let whereClauses: string[] = ['1=1'];
+    const params: any[] = [];
+
+    if (targetTgId) {
+      whereClauses.push('uf.telegram_id = ?');
+      params.push(targetTgId);
+    }
+
+    if (statusFilter === 'active') {
+      whereClauses.push('(uf.is_restricted IS NULL OR uf.is_restricted = FALSE)');
+    } else if (statusFilter === 'restricted') {
+      whereClauses.push('uf.is_restricted = TRUE');
+    }
+
+    if (searchTerm) {
+      whereClauses.push(
+        '(uf.file_name LIKE ? OR uf.file_slug LIKE ? OR uf.message_id LIKE ? OR u.username LIKE ? OR u.first_name LIKE ?)'
+      );
+      const wildcard = `%${searchTerm}%`;
+      params.push(wildcard, wildcard, wildcard, wildcard, wildcard);
+    }
+
+    const whereSql = whereClauses.join(' AND ');
+
+    // 1. Get totals
+    const countSql = `
+      SELECT COUNT(*) as total_count,
+             COALESCE(SUM(CASE WHEN uf.is_restricted = TRUE THEN 1 ELSE 0 END), 0) as total_restricted,
+             COALESCE(SUM(uf.file_size), 0) as total_size_bytes
+      FROM user_files uf
+      LEFT JOIN users u ON uf.telegram_id = u.telegram_id
+      WHERE ${whereSql}
+    `;
+    const [countRows]: any = await pool.query(countSql, params);
+    const total = Number(countRows[0]?.total_count || 0);
+    const total_restricted = Number(countRows[0]?.total_restricted || 0);
+    const total_size_bytes = Number(countRows[0]?.total_size_bytes || 0);
+
+    // 2. Get paged rows
+    const dataSql = `
+      SELECT uf.id, uf.telegram_id, uf.message_id, uf.workspace_id, uf.workspace_name, 
+             uf.file_slug, uf.file_name, uf.original_name, uf.file_size, uf.mime_type, 
+             uf.caption, uf.storage_chat, uf.direct_link, uf.download_password, 
+             COALESCE(uf.is_restricted, FALSE) as is_restricted,
+             uf.created_at, uf.updated_at,
+             TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))) as user_name,
+             u.username as user_username,
+             u.phone as user_phone
+      FROM user_files uf
+      LEFT JOIN users u ON uf.telegram_id = u.telegram_id
+      WHERE ${whereSql}
+      ORDER BY uf.created_at DESC
+      LIMIT ? OFFSET ?
+    `;
+
+    const dataParams = [...params, limit, offset];
+    const [rows]: any = await pool.query(dataSql, dataParams);
+
+    const files: AdminFileRecord[] = (rows || []).map((r: any) => ({
+      id: Number(r.id),
+      telegram_id: String(r.telegram_id),
+      message_id: Number(r.message_id),
+      workspace_id: r.workspace_id ? Number(r.workspace_id) : null,
+      workspace_name: r.workspace_name || null,
+      file_slug: r.file_slug,
+      file_name: r.file_name,
+      original_name: r.original_name,
+      file_size: Number(r.file_size || 0),
+      mime_type: r.mime_type || 'application/octet-stream',
+      caption: r.caption || '',
+      storage_chat: r.storage_chat || 'me',
+      direct_link: r.direct_link || '',
+      download_password: r.download_password || null,
+      is_restricted: Boolean(r.is_restricted),
+      created_at: r.created_at ? new Date(r.created_at).toISOString() : new Date().toISOString(),
+      updated_at: r.updated_at ? new Date(r.updated_at).toISOString() : new Date().toISOString(),
+      user_name: r.user_name || 'User',
+      user_username: r.user_username ? `@${r.user_username}` : '',
+      user_phone: r.user_phone || '',
+    }));
+
+    return {
+      files,
+      total,
+      total_restricted,
+      total_size_bytes,
+      page,
+      limit,
+    };
+  } catch (err: any) {
+    isDbConnected = false;
+    return getAllAdminFilesFromDb(options);
+  }
+}
+
+export async function toggleFileRestrictionInDb(
+  fileIdOrSlug: number | string,
+  isRestricted?: boolean
+): Promise<{ success: boolean; is_restricted: boolean; file: any }> {
+  const target = String(fileIdOrSlug).trim();
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    const idx = localStore.user_files.findIndex(
+      (f) => String(f.id) === target || String(f.file_slug) === target || String(f.message_id) === target
+    );
+    if (idx === -1) {
+      throw new Error(`File not found: ${target}`);
+    }
+    const current = Boolean(localStore.user_files[idx].is_restricted);
+    const nextState = isRestricted !== undefined ? Boolean(isRestricted) : !current;
+    localStore.user_files[idx].is_restricted = nextState;
+    localStore.user_files[idx].updated_at = new Date().toISOString();
+    saveLocalStore();
+    return { success: true, is_restricted: nextState, file: localStore.user_files[idx] };
+  }
+
+  try {
+    let targetRow: any = null;
+    const [existingRows]: any = await pool.query(
+      `SELECT id, telegram_id, message_id, file_slug, file_name, is_restricted, storage_chat FROM user_files WHERE id = ? OR file_slug = ? OR message_id = ? LIMIT 1`,
+      [target, target, target]
+    );
+
+    if (!existingRows || existingRows.length === 0) {
+      throw new Error(`File not found with identifier: ${target}`);
+    }
+    targetRow = existingRows[0];
+
+    const currentVal = Boolean(targetRow.is_restricted);
+    const nextVal = isRestricted !== undefined ? Boolean(isRestricted) : !currentVal;
+
+    await pool.query(
+      `UPDATE user_files SET is_restricted = ?, updated_at = NOW() WHERE id = ?`,
+      [nextVal, targetRow.id]
+    );
+
+    targetRow.is_restricted = nextVal;
+    return { success: true, is_restricted: nextVal, file: targetRow };
+  } catch (err: any) {
+    isDbConnected = false;
+    return toggleFileRestrictionInDb(fileIdOrSlug, isRestricted);
+  }
+}
+
+export async function adminDeleteFileFromDb(
+  fileIdOrSlug: number | string
+): Promise<{ success: boolean; deletedFile: any }> {
+  const target = String(fileIdOrSlug).trim();
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    const idx = localStore.user_files.findIndex(
+      (f) => String(f.id) === target || String(f.file_slug) === target || String(f.message_id) === target
+    );
+    if (idx === -1) {
+      return { success: true, deletedFile: null };
+    }
+    const [deleted] = localStore.user_files.splice(idx, 1);
+    saveLocalStore();
+    return { success: true, deletedFile: deleted };
+  }
+
+  try {
+    const [existingRows]: any = await pool.query(
+      `SELECT id, telegram_id, message_id, file_slug, file_name, storage_chat FROM user_files WHERE id = ? OR file_slug = ? OR message_id = ? LIMIT 1`,
+      [target, target, target]
+    );
+    const deletedFile = existingRows && existingRows.length > 0 ? existingRows[0] : null;
+
+    if (deletedFile) {
+      await pool.query(`DELETE FROM user_files WHERE id = ?`, [deletedFile.id]);
+    }
+
+    return { success: true, deletedFile };
+  } catch (err: any) {
+    isDbConnected = false;
+    return adminDeleteFileFromDb(fileIdOrSlug);
   }
 }
 

@@ -41,6 +41,9 @@ import {
   verifyAdminPin,
   getAdminSystemOverview,
   purgeUserAccountFromDb,
+  getAllAdminFilesFromDb,
+  toggleFileRestrictionInDb,
+  adminDeleteFileFromDb,
 } from './server/db.ts';
 
 const app = express();
@@ -48,13 +51,31 @@ const PORT = process.env.PORT || 3000;
 const PY_PORT = 5050;
 const PY_BASE = `http://127.0.0.1:${PY_PORT}/api/py`;
 
-// Initialize MySQL database and auto-restore Telegram session if available
+// Helper to wait until Python MTProto daemon is ready before sending requests
+async function waitForPythonReady(maxWaitMs = 15000): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const res = await fetch(`${PY_BASE}/status`, { signal: AbortSignal.timeout(1500) });
+      if (res.ok || res.status === 200 || res.status === 401) {
+        return true;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 800));
+  }
+  return false;
+}
+
+// Initialize MySQL database and auto-restore Telegram session once MTProto daemon is ready
 initDb()
-  .then(() => {
-    setTimeout(async () => {
+  .then(async () => {
+    const isReady = await waitForPythonReady(15000);
+    if (isReady) {
       await restoreSessionFromMysql().catch((e) => console.warn('[MySQL] Auto-restore notice:', e.message));
       await syncMysqlSettingsToPython().catch((e) => console.warn('[MySQL] Settings sync notice:', e.message));
-    }, 2500);
+    } else {
+      console.log('[Node] Python service will sync automatically on subsequent requests.');
+    }
   })
   .catch((err) => console.error('[MySQL] init error:', err));
 
@@ -192,7 +213,7 @@ async function forwardToPython(
   body?: any
 ): Promise<{ status: number; data: any }> {
   // Retry loop in case Python service is initializing
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const res = await fetch(`${PY_BASE}${endpoint}`, {
         method,
@@ -208,8 +229,8 @@ async function forwardToPython(
         return { status: res.status, data: { message: text } };
       }
     } catch (err: any) {
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 600));
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, (attempt + 1) * 600));
         continue;
       }
       return {
@@ -337,7 +358,11 @@ async function restoreSessionFromMysql(): Promise<boolean> {
       console.log('[MySQL Session] Telegram MTProto session successfully restored from MySQL!');
       return true;
     } else {
-      console.warn('[MySQL Session] Notice restoring session from MySQL:', connectRes.data);
+      if (connectRes.data?.error?.includes('starting up')) {
+        console.log('[MySQL Session] Telegram MTProto daemon is initializing. Session will auto-attach upon completion.');
+      } else {
+        console.warn('[MySQL Session] Notice restoring session from MySQL:', connectRes.data?.error || connectRes.data);
+      }
       return false;
     }
   } catch (err: any) {
@@ -774,6 +799,206 @@ app.post('/api/admin/users/reconnect', async (req: Request, res: Response) => {
         error: 'Session has been revoked or expired on Telegram servers. User must re-authenticate.',
       });
     }
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// ADMIN COMPREHENSIVE USER-WISE FILE MANAGER ROUTES
+// ============================================================================
+
+// List files across all users or filter by user, search, status with pagination
+app.get('/api/admin/files', async (req: Request, res: Response) => {
+  try {
+    const pin = (req.headers['x-admin-pin'] as string) || (req.query.pin as string);
+    if (!(await verifyAdminPin(pin))) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid Admin PIN required.' });
+    }
+
+    const telegramId = (req.query.telegram_id as string) || (req.query.userId as string) || undefined;
+    const status = (req.query.status as 'all' | 'active' | 'restricted') || 'all';
+    const search = (req.query.search as string) || undefined;
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 50;
+
+    const result = await getAllAdminFilesFromDb({
+      telegram_id: telegramId,
+      status,
+      search,
+      page,
+      limit,
+    });
+
+    const formattedFiles = result.files.map((file) => ({
+      ...file,
+      direct_link: getShortLink(file.file_slug || file.message_id, req),
+    }));
+
+    return res.json({
+      success: true,
+      files: formattedFiles,
+      total: result.total,
+      total_restricted: result.total_restricted,
+      total_size_bytes: result.total_size_bytes,
+      page: result.page,
+      limit: result.limit,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Restrict or unrestrict access to a file (prevents API serving & browser opening)
+app.post('/api/admin/files/:id/restrict', async (req: Request, res: Response) => {
+  try {
+    const pin = (req.headers['x-admin-pin'] as string) || (req.body?.pin as string);
+    if (!(await verifyAdminPin(pin))) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid Admin PIN required.' });
+    }
+
+    const { id } = req.params;
+    const { is_restricted } = req.body || {};
+
+    const result = await toggleFileRestrictionInDb(id, is_restricted);
+
+    // Evict file from local CDN cache to guarantee immediate lockout
+    if (result.file) {
+      const fileUniqueKey = result.file.file_slug || `${result.file.storage_chat || 'chat'}_${result.file.message_id}`;
+      const cacheKeySanitized = fileUniqueKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cachePath = path.join(CDN_CACHE_DIR, `${cacheKeySanitized}.bin`);
+      if (fs.existsSync(cachePath)) {
+        try { fs.unlinkSync(cachePath); } catch {}
+      }
+    }
+
+    return res.json({
+      success: true,
+      is_restricted: result.is_restricted,
+      message: result.is_restricted
+        ? 'File access has been restricted. It will not be served through API or direct links.'
+        : 'File access has been restored. Public CDN streaming is now enabled.',
+      file: result.file,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Bulk restrict / unrestrict files
+app.post('/api/admin/files/bulk-restrict', async (req: Request, res: Response) => {
+  try {
+    const pin = (req.headers['x-admin-pin'] as string) || (req.body?.pin as string);
+    if (!(await verifyAdminPin(pin))) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid Admin PIN required.' });
+    }
+
+    const ids: (string | number)[] = Array.isArray(req.body.ids) ? req.body.ids : [];
+    const isRestricted = req.body.is_restricted !== undefined ? Boolean(req.body.is_restricted) : true;
+
+    if (ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'No file IDs provided for bulk restriction.' });
+    }
+
+    let updatedCount = 0;
+    for (const id of ids) {
+      try {
+        const resToggle = await toggleFileRestrictionInDb(id, isRestricted);
+        if (resToggle.file) {
+          const fileUniqueKey = resToggle.file.file_slug || `${resToggle.file.storage_chat || 'chat'}_${resToggle.file.message_id}`;
+          const cacheKeySanitized = fileUniqueKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+          const cachePath = path.join(CDN_CACHE_DIR, `${cacheKeySanitized}.bin`);
+          if (fs.existsSync(cachePath)) {
+            try { fs.unlinkSync(cachePath); } catch {}
+          }
+        }
+        updatedCount++;
+      } catch {}
+    }
+
+    return res.json({
+      success: true,
+      updated_count: updatedCount,
+      is_restricted: isRestricted,
+      message: `${updatedCount} file(s) successfully ${isRestricted ? 'restricted' : 'restored'}.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Delete a single file across any user (Admin permanent delete)
+app.delete('/api/admin/files/:id', async (req: Request, res: Response) => {
+  try {
+    const pin = (req.headers['x-admin-pin'] as string) || (req.query.pin as string) || (req.body?.pin as string);
+    if (!(await verifyAdminPin(pin))) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid Admin PIN required.' });
+    }
+
+    const { id } = req.params;
+    const { deletedFile } = await adminDeleteFileFromDb(id);
+
+    // Evict file from local CDN cache
+    if (deletedFile) {
+      const fileUniqueKey = deletedFile.file_slug || `${deletedFile.storage_chat || 'chat'}_${deletedFile.message_id}`;
+      const cacheKeySanitized = fileUniqueKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cachePath = path.join(CDN_CACHE_DIR, `${cacheKeySanitized}.bin`);
+      if (fs.existsSync(cachePath)) {
+        try { fs.unlinkSync(cachePath); } catch {}
+      }
+
+      // Also forward deletion request to Python daemon if telegram message id is available
+      if (deletedFile.message_id) {
+        forwardToPython('DELETE', `/files/${deletedFile.message_id}`).catch(() => {});
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: 'File deleted permanently from the database and storage cache.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Bulk delete files across users (Admin permanent delete)
+app.post('/api/admin/files/bulk-delete', async (req: Request, res: Response) => {
+  try {
+    const pin = (req.headers['x-admin-pin'] as string) || (req.body?.pin as string);
+    if (!(await verifyAdminPin(pin))) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Valid Admin PIN required.' });
+    }
+
+    const ids: (string | number)[] = Array.isArray(req.body.ids) ? req.body.ids : [];
+    if (ids.length === 0) {
+      return res.status(400).json({ success: false, error: 'No file IDs provided for bulk deletion.' });
+    }
+
+    let deletedCount = 0;
+    for (const id of ids) {
+      try {
+        const { deletedFile } = await adminDeleteFileFromDb(id);
+        if (deletedFile) {
+          const fileUniqueKey = deletedFile.file_slug || `${deletedFile.storage_chat || 'chat'}_${deletedFile.message_id}`;
+          const cacheKeySanitized = fileUniqueKey.replace(/[^a-zA-Z0-9_-]/g, '_');
+          const cachePath = path.join(CDN_CACHE_DIR, `${cacheKeySanitized}.bin`);
+          if (fs.existsSync(cachePath)) {
+            try { fs.unlinkSync(cachePath); } catch {}
+          }
+          if (deletedFile.message_id) {
+            forwardToPython('DELETE', `/files/${deletedFile.message_id}`).catch(() => {});
+          }
+          deletedCount++;
+        }
+      } catch {}
+    }
+
+    return res.json({
+      success: true,
+      deleted_count: deletedCount,
+      message: `${deletedCount} file(s) deleted permanently.`,
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err.message });
   }
@@ -1744,7 +1969,60 @@ async function streamCdnFile(
   const targetStorageChat = options?.storageChat || file?.storage_chat || '';
   const fileUniqueKey = file?.file_slug || `${targetStorageChat || 'chat'}_${msgId}`;
 
-  // 2. Check Password Protection
+  // 2. Enforce Administrator File Restriction Policy
+  // If restricted, the file MUST NOT be served through API or opened directly in the browser
+  if (file && Boolean(file.is_restricted)) {
+    const isApiRequest =
+      req.path.startsWith('/api/') ||
+      req.path.startsWith('/stream/') ||
+      (req.headers.accept && req.headers.accept.includes('application/json'));
+
+    if (isApiRequest) {
+      res.status(403).json({
+        success: false,
+        error: 'File access has been restricted by system administrator.',
+        is_restricted: true,
+        file_slug: file.file_slug || null,
+      });
+      return;
+    }
+
+    const sanitizedFileName = String(file.file_name || fileName).replace(/[&<>'"]/g, '');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(403).send(`
+      <!DOCTYPE html>
+      <html lang="en" class="h-full">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Access Restricted - TeleCloud CDN</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+      </head>
+      <body class="bg-slate-950 text-slate-100 flex items-center justify-center min-h-full p-4 font-sans antialiased">
+        <div class="max-w-md w-full p-8 rounded-3xl bg-slate-900 border border-rose-900/40 shadow-2xl space-y-6 text-center">
+          <div class="w-16 h-16 mx-auto rounded-2xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400 shadow-inner">
+            <svg class="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+            </svg>
+          </div>
+          <div class="space-y-2">
+            <h1 class="text-xl font-extrabold text-white tracking-tight">Access Restricted</h1>
+            <p class="text-xs text-slate-400">This file has been restricted by an administrator and cannot be viewed, streamed, or downloaded.</p>
+          </div>
+          <div class="p-4 rounded-xl bg-slate-950/80 border border-slate-800 text-left text-xs space-y-2 font-mono">
+            <div class="text-slate-300 truncate"><span class="text-slate-500 font-sans">Filename:</span> ${sanitizedFileName}</div>
+            <div class="text-slate-300"><span class="text-slate-500 font-sans">Status:</span> <span class="text-rose-400 font-semibold tracking-wide">RESTRICTED</span></div>
+            <div class="text-slate-300"><span class="text-slate-500 font-sans">Policy:</span> Prohibited from API streaming & direct delivery</div>
+          </div>
+          <p class="text-[11px] text-slate-500">Contact the workspace administrator if you believe this restriction is in error.</p>
+        </div>
+      </body>
+      </html>
+    `);
+    return;
+  }
+
+  // 3. Check Password Protection
   const requiredPassword = options?.downloadPassword !== undefined ? options.downloadPassword : file?.download_password;
   if (requiredPassword) {
     const providedPassword = req.query.password || req.headers['x-download-password'] || '';

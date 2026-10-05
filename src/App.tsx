@@ -172,8 +172,8 @@ export interface StorageChatOption {
 }
 
 export default function App() {
-  // App Version in Header - Incremented to v1.6.8
-  const APP_VERSION = "v1.6.8";
+  // App Version in Header - Incremented to v1.7.0
+  const APP_VERSION = "v1.7.0";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
