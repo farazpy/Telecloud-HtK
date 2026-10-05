@@ -154,18 +154,22 @@ function ensurePythonDepsAndStart() {
   const check = spawn('python3', ['-c', 'import telethon, aiohttp']);
   check.on('close', (code) => {
     if (code !== 0) {
-      console.log('[Node] Installing Python dependencies (telethon, aiohttp)...');
-      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages'], {
+      console.log('[Node] Installing Python dependencies (telethon, aiohttp, cryptg)...');
+      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', 'cryptg', '--break-system-packages'], {
         stdio: 'inherit',
       });
       install.on('close', (pipCode) => {
         if (pipCode !== 0) {
-          const apt = spawn('apt-get', ['install', '-y', '-o', 'Dpkg::Options::=--force-confdef', '-o', 'Dpkg::Options::=--force-confold', 'python3-aiohttp', 'python3-telethon'], {
+          // Try user pip or get-pip.py fallback
+          const userPip = spawn('sh', ['-c', 'curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && python3 /tmp/get-pip.py --user && ~/.local/bin/pip install aiohttp telethon cryptg'], {
             stdio: 'inherit',
-            env: { ...process.env, DEBIAN_FRONTEND: 'noninteractive' },
           });
-          apt.on('close', () => {
-            startPythonService();
+          userPip.on('close', (userPipCode) => {
+            if (userPipCode === 0) {
+              startPythonService();
+            } else {
+              console.warn('[Node] Warning: Python telethon dependencies could not be automatically installed. Telethon features will be disabled until pip dependencies are installed.');
+            }
           });
         } else {
           startPythonService();

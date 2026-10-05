@@ -63,7 +63,10 @@ import {
   ArrowUpDown,
   ArrowUp,
   ArrowDown,
-  ExternalLink as LinkExternal
+  ExternalLink as LinkExternal,
+  Plus,
+  RotateCcw,
+  FileCheck,
 } from 'lucide-react';
 import { ApiConsolePage } from './components/ApiConsolePage';
 import FeaturesPage from './pages/FeaturesPage';
@@ -99,6 +102,18 @@ interface StorageFile {
   created_at?: string;
   direct_link?: string;
   telegram_link?: string;
+}
+
+export interface BulkUploadItem {
+  id: string;
+  file: globalThis.File;
+  name: string;
+  size: number;
+  type: string;
+  status: 'queued' | 'uploading' | 'completed' | 'error';
+  progress: number;
+  result?: StorageFile | null;
+  error?: string | null;
 }
 
 export interface Workspace {
@@ -252,8 +267,8 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v1.7.8
-  const APP_VERSION = "v1.7.8";
+  // App Version in Header - Incremented to v1.8.2
+  const APP_VERSION = "v1.8.2";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -708,7 +723,7 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState<boolean>(false);
 
-  // File Upload State
+  // File Upload State (Single & Bulk Queue)
   const [selectedFile, setSelectedFile] = useState<globalThis.File | null>(null);
   const [customUploadName, setCustomUploadName] = useState<string>('');
   const [uploadCaption, setUploadCaption] = useState<string>('');
@@ -718,15 +733,26 @@ export default function App() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Overview Drag-and-Drop Uploader State
-  const [overviewFile, setOverviewFile] = useState<globalThis.File | null>(null);
+  // Dedicated Bulk Upload State
+  const [uploadQueue, setUploadQueue] = useState<BulkUploadItem[]>([]);
+  const [isBulkUploading, setIsBulkUploading] = useState<boolean>(false);
+  const [activeUploadIndex, setActiveUploadIndex] = useState<number>(-1);
+  const [bulkUploadPassword, setBulkUploadPassword] = useState<string>('');
+  const [bulkUploadCaption, setBulkUploadCaption] = useState<string>('');
+  const [isBulkDragging, setIsBulkDragging] = useState<boolean>(false);
+  const bulkFileInputRef = useRef<HTMLInputElement>(null);
+  const [copiedBatchAll, setCopiedBatchAll] = useState<boolean>(false);
+  const [uploadTabMode, setUploadTabMode] = useState<'bulk' | 'single'>('bulk');
+
+  // Overview Drag-and-Drop Uploader State (Supports multi-file batch)
+  const [overviewFiles, setOverviewFiles] = useState<BulkUploadItem[]>([]);
   const [overviewPassword, setOverviewPassword] = useState<string>('');
   const [isOverviewDragging, setIsOverviewDragging] = useState<boolean>(false);
   const [overviewUploading, setOverviewUploading] = useState<boolean>(false);
-  const [overviewProgress, setOverviewProgress] = useState<number>(0);
-  const [overviewResult, setOverviewResult] = useState<any | null>(null);
-  const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [overviewActiveIndex, setOverviewActiveIndex] = useState<number>(-1);
   const [overviewWorkspaceId, setOverviewWorkspaceId] = useState<string>('');
+  const [overviewCopiedBatchAll, setOverviewCopiedBatchAll] = useState<boolean>(false);
+  const overviewFileInputRef = useRef<HTMLInputElement>(null);
 
   // Files List & Rename
   const [files, setFiles] = useState<StorageFile[]>([]);
@@ -1564,13 +1590,33 @@ export default function App() {
   const handleDownloadSessionFile = async () => {
     try {
       setExportingSession(true);
-      const url = user?.id ? `/api/session/export?telegram_id=${user.id}&download=1` : '/api/session/export?download=1';
-      const res = await fetch(url);
-      if (!res.ok) {
-        const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.error || 'Failed to export session file.');
+      let exportPayload = sessionExportData;
+      if (!exportPayload || !exportPayload.string_session) {
+        const url = user?.id ? `/api/session/export?telegram_id=${user.id}` : '/api/session/export';
+        const res = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson.error || 'Failed to export session file.');
+        }
+        exportPayload = await res.json();
       }
-      const blob = await res.blob();
+
+      if (!exportPayload?.string_session) {
+        throw new Error('No active Telegram session string found to export.');
+      }
+
+      const fileData = {
+        app: 'TeleCloud Vault',
+        format_version: '1.0',
+        type: 'telecloud_session_backup',
+        user: exportPayload.user || user || null,
+        string_session: exportPayload.string_session,
+        created_at: new Date().toISOString(),
+        instructions:
+          'Keep this file safe and private. You can upload this file to TeleCloud at any time to instantly sign in without receiving an SMS or scanning a QR code.',
+      };
+
+      const blob = new Blob([JSON.stringify(fileData, null, 2)], { type: 'application/json' });
       const downloadUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = downloadUrl;
@@ -1588,6 +1634,42 @@ export default function App() {
     }
   };
 
+  const handleDownloadRawSession = async () => {
+    try {
+      setExportingSession(true);
+      let exportPayload = sessionExportData;
+      if (!exportPayload || !exportPayload.string_session) {
+        const url = user?.id ? `/api/session/export?telegram_id=${user.id}` : '/api/session/export';
+        const res = await fetch(url, { headers: { Accept: 'application/json' } });
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => ({}));
+          throw new Error(errJson.error || 'Failed to export session.');
+        }
+        exportPayload = await res.json();
+      }
+
+      if (!exportPayload?.string_session) {
+        throw new Error('No active Telegram session string found to export.');
+      }
+
+      const blob = new Blob([exportPayload.string_session.trim()], { type: 'text/plain' });
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      const userIdent = user?.username || user?.first_name || user?.id || 'telecloud';
+      const cleanIdent = String(userIdent).replace(/[^a-zA-Z0-9_-]/g, '_');
+      a.download = `telegram_string_${cleanIdent}.session`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(downloadUrl);
+    } catch (err: any) {
+      alert(err.message || 'Failed to download raw session string.');
+    } finally {
+      setExportingSession(false);
+    }
+  };
+
   const handleOpenExportModal = async () => {
     setShowSessionExportModal(true);
     setCopiedSessionStr(false);
@@ -1595,7 +1677,7 @@ export default function App() {
       setExportingSession(true);
       const url = user?.id ? `/api/session/export?telegram_id=${user.id}` : '/api/session/export';
       const data = await safeJsonFetch(url);
-      if (data && data.success) {
+      if (data && data.success && data.string_session) {
         setSessionExportData(data);
       }
     } catch {} finally {
@@ -1784,6 +1866,151 @@ export default function App() {
     }
   };
 
+  // Bulk Upload Queue Management for Dedicated Upload Tab
+  const addFilesToBulkQueue = (fileList: FileList | globalThis.File[]) => {
+    const newItems: BulkUploadItem[] = Array.from(fileList).map((f) => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      file: f,
+      name: f.name,
+      size: f.size,
+      type: f.type,
+      status: 'queued',
+      progress: 0,
+    }));
+    setUploadQueue((prev) => [...prev, ...newItems]);
+  };
+
+  const removeBulkQueueItem = (id: string) => {
+    setUploadQueue((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  const clearCompletedBulkQueue = () => {
+    setUploadQueue((prev) => prev.filter((item) => item.status !== 'completed'));
+  };
+
+  const clearAllBulkQueue = () => {
+    if (isBulkUploading) return;
+    setUploadQueue([]);
+  };
+
+  const retryBulkQueueItem = (id: string) => {
+    setUploadQueue((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, status: 'queued', progress: 0, error: null } : item))
+    );
+  };
+
+  const startBulkUploadProcess = async () => {
+    if (!connected) {
+      setShowAuthModal(true);
+      return;
+    }
+
+    if (uploadQueue.length === 0) return;
+
+    setIsBulkUploading(true);
+
+    for (let i = 0; i < uploadQueue.length; i++) {
+      const currentItem = uploadQueue[i];
+      if (currentItem.status === 'completed') continue;
+
+      setActiveUploadIndex(i);
+      setUploadQueue((prev) =>
+        prev.map((item, idx) => (idx === i ? { ...item, status: 'uploading', progress: 12, error: null } : item))
+      );
+
+      // 50MB check per file
+      if (currentItem.file.size > 50 * 1024 * 1024) {
+        setUploadQueue((prev) =>
+          prev.map((item, idx) =>
+            idx === i ? { ...item, status: 'error', progress: 0, error: 'Exceeds 50MB limit' } : item
+          )
+        );
+        continue;
+      }
+
+      let currentProgress = 12;
+      const timer = setInterval(() => {
+        currentProgress = Math.min(94, currentProgress + Math.floor(Math.random() * 4) + 2);
+        setUploadQueue((prev) =>
+          prev.map((item, idx) => (idx === i ? { ...item, progress: currentProgress } : item))
+        );
+      }, 120);
+
+      const formData = new FormData();
+      formData.append('file', currentItem.file);
+      formData.append('file_name', currentItem.name);
+      if (bulkUploadCaption.trim()) {
+        formData.append('caption', bulkUploadCaption.trim());
+      }
+      if (bulkUploadPassword.trim()) {
+        formData.append('password', bulkUploadPassword.trim());
+      }
+      const targetWsId = uploadWorkspaceId || activeWorkspace?.id;
+      if (targetWsId) {
+        formData.append('workspace_id', String(targetWsId));
+      }
+
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        clearInterval(timer);
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `Upload failed (status ${res.status})`);
+        }
+
+        const result = await res.json();
+        const directLink =
+          result.direct_link ||
+          (result.file_slug
+            ? `${window.location.origin}/f/${result.file_slug}`
+            : (result.file_url || `${window.location.origin}/api/download/${result.message_id}/${encodeURIComponent(result.file_name)}`));
+
+        const enrichedResult = {
+          ...result,
+          direct_link: directLink,
+        };
+
+        setUploadQueue((prev) =>
+          prev.map((item, idx) =>
+            idx === i ? { ...item, status: 'completed', progress: 100, result: enrichedResult } : item
+          )
+        );
+
+        fetchWorkspaces();
+        fetchFiles();
+        fetchStats();
+      } catch (err: any) {
+        clearInterval(timer);
+        setUploadQueue((prev) =>
+          prev.map((item, idx) =>
+            idx === i ? { ...item, status: 'error', progress: 0, error: err.message || 'Upload failed' } : item
+          )
+        );
+      }
+    }
+
+    setIsBulkUploading(false);
+    setActiveUploadIndex(-1);
+  };
+
+  const copyAllCompletedLinks = () => {
+    const completedLinks = uploadQueue
+      .filter((item) => item.status === 'completed' && item.result?.direct_link)
+      .map((item) => item.result!.direct_link)
+      .join('\n');
+
+    if (!completedLinks) return;
+    navigator.clipboard.writeText(completedLinks);
+    setCopiedBatchAll(true);
+    setTimeout(() => setCopiedBatchAll(false), 2500);
+  };
+
+  // Overview Drag & Drop Multiple File Handlers
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
     setIsOverviewDragging(true);
@@ -1796,78 +2023,148 @@ export default function App() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setIsOverviewDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      const droppedFile = e.dataTransfer.files[0];
-      setOverviewFile(droppedFile);
-      setOverviewResult(null);
-      setOverviewError(null);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      addFilesToOverviewQueue(e.dataTransfer.files);
     }
   };
 
-  const handleOverviewUpload = async (fileToUpload: globalThis.File) => {
-    if (!fileToUpload) return;
+  const addFilesToOverviewQueue = (fileList: FileList | globalThis.File[]) => {
+    const newItems: BulkUploadItem[] = Array.from(fileList).map((f) => ({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      file: f,
+      name: f.name,
+      size: f.size,
+      type: f.type,
+      status: 'queued',
+      progress: 0,
+    }));
+    setOverviewFiles((prev) => [...prev, ...newItems]);
+  };
+
+  const removeOverviewQueueItem = (id: string) => {
+    setOverviewFiles((prev) => prev.filter((item) => item.id !== id));
+  };
+
+  const clearCompletedOverviewQueue = () => {
+    setOverviewFiles((prev) => prev.filter((item) => item.status !== 'completed'));
+  };
+
+  const clearAllOverviewQueue = () => {
+    if (overviewUploading) return;
+    setOverviewFiles([]);
+  };
+
+  const retryOverviewQueueItem = (id: string) => {
+    setOverviewFiles((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, status: 'queued', progress: 0, error: null } : item))
+    );
+  };
+
+  const startOverviewBulkUpload = async () => {
+    if (!connected) {
+      setShowAuthModal(true);
+      return;
+    }
+
+    if (overviewFiles.length === 0) return;
+
     setOverviewUploading(true);
-    setOverviewError(null);
-    setOverviewResult(null);
-    setOverviewProgress(10);
 
-    const formData = new FormData();
-    formData.append('file', fileToUpload);
-    if (overviewPassword.trim()) {
-      formData.append('password', overviewPassword.trim());
-    }
-    const targetWsId = overviewWorkspaceId || activeWorkspace?.id;
-    if (targetWsId) {
-      formData.append('workspace_id', String(targetWsId));
-    }
+    for (let i = 0; i < overviewFiles.length; i++) {
+      const currentItem = overviewFiles[i];
+      if (currentItem.status === 'completed') continue;
 
-    const progressInterval = setInterval(() => {
-      setOverviewProgress((prev) => {
-        if (prev >= 92) return 92;
-        return prev + Math.floor(Math.random() * 8) + 4;
-      });
-    }, 400);
+      setOverviewActiveIndex(i);
+      setOverviewFiles((prev) =>
+        prev.map((item, idx) => (idx === i ? { ...item, status: 'uploading', progress: 15, error: null } : item))
+      );
 
-    try {
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
-
-      clearInterval(progressInterval);
-
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || `Upload failed with status ${res.status}`);
+      if (currentItem.file.size > 50 * 1024 * 1024) {
+        setOverviewFiles((prev) =>
+          prev.map((item, idx) =>
+            idx === i ? { ...item, status: 'error', progress: 0, error: 'Exceeds 50MB limit' } : item
+          )
+        );
+        continue;
       }
 
-      const result = await res.json();
-      const directLink =
-        result.direct_link ||
-        (result.file_slug
-          ? `${window.location.origin}/f/${result.file_slug}`
-          : (result.file_url || `${window.location.origin}/api/download/${result.message_id}/${encodeURIComponent(result.file_name)}`));
+      let currentProgress = 15;
+      const timer = setInterval(() => {
+        currentProgress = Math.min(94, currentProgress + Math.floor(Math.random() * 4) + 2);
+        setOverviewFiles((prev) =>
+          prev.map((item, idx) => (idx === i ? { ...item, progress: currentProgress } : item))
+        );
+      }, 120);
 
-      const enrichedResult = {
-        ...result,
-        direct_link: directLink,
-      };
+      const formData = new FormData();
+      formData.append('file', currentItem.file);
+      formData.append('file_name', currentItem.name);
+      if (overviewPassword.trim()) {
+        formData.append('password', overviewPassword.trim());
+      }
+      const targetWsId = overviewWorkspaceId || activeWorkspace?.id;
+      if (targetWsId) {
+        formData.append('workspace_id', String(targetWsId));
+      }
 
-      setOverviewProgress(100);
-      setOverviewResult(enrichedResult);
-      setOverviewFile(null);
-      setOverviewPassword('');
-      
-      fetchWorkspaces();
-      fetchFiles();
-      fetchStats();
-    } catch (err: any) {
-      clearInterval(progressInterval);
-      setOverviewError(err.message || 'File upload failed');
-      setOverviewProgress(0);
-    } finally {
-      setOverviewUploading(false);
+      try {
+        const res = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        clearInterval(timer);
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          throw new Error(errData.error || `Upload failed (status ${res.status})`);
+        }
+
+        const result = await res.json();
+        const directLink =
+          result.direct_link ||
+          (result.file_slug
+            ? `${window.location.origin}/f/${result.file_slug}`
+            : (result.file_url || `${window.location.origin}/api/download/${result.message_id}/${encodeURIComponent(result.file_name)}`));
+
+        const enrichedResult = {
+          ...result,
+          direct_link: directLink,
+        };
+
+        setOverviewFiles((prev) =>
+          prev.map((item, idx) =>
+            idx === i ? { ...item, status: 'completed', progress: 100, result: enrichedResult } : item
+          )
+        );
+
+        fetchWorkspaces();
+        fetchFiles();
+        fetchStats();
+      } catch (err: any) {
+        clearInterval(timer);
+        setOverviewFiles((prev) =>
+          prev.map((item, idx) =>
+            idx === i ? { ...item, status: 'error', progress: 0, error: err.message || 'Upload failed' } : item
+          )
+        );
+      }
     }
+
+    setOverviewUploading(false);
+    setOverviewActiveIndex(-1);
+  };
+
+  const copyAllCompletedOverviewLinks = () => {
+    const completedLinks = overviewFiles
+      .filter((item) => item.status === 'completed' && item.result?.direct_link)
+      .map((item) => item.result!.direct_link)
+      .join('\n');
+
+    if (!completedLinks) return;
+    navigator.clipboard.writeText(completedLinks);
+    setOverviewCopiedBatchAll(true);
+    setTimeout(() => setOverviewCopiedBatchAll(false), 2500);
   };
 
   const handleRenameSubmit = async (e: React.FormEvent) => {
@@ -3369,97 +3666,259 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Drag-and-Drop Direct Link Generator Card */}
-              <div className={`p-4 sm:p-5 rounded-2xl space-y-3 transition-colors duration-200 ${cardBg}`}>
+              {/* Drag-and-Drop Direct Link Generator Card (Bulk & Single) */}
+              <div className={`p-4 sm:p-5 rounded-2xl space-y-4 transition-colors duration-200 ${cardBg}`}>
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
                     <h3 className={`font-black text-sm sm:text-base flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
                       <UploadCloud className="w-5 h-5 text-sky-500" />
-                      <span>Drag & Drop Link Generator</span>
+                      <span>Bulk Drag & Drop Storage Uploader</span>
                     </h3>
                     <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
-                      Instantly upload any file to Telegram and generate a secure, password-protected streaming link.
+                      Drop single or multiple files to stream directly to Telegram MTProto and generate instant CDN links.
                     </p>
                   </div>
                   <div className="flex items-center space-x-2">
                     <span className="text-[10px] font-mono font-bold text-sky-500 uppercase tracking-widest bg-sky-500/10 px-2.5 py-0.5 rounded-md border border-sky-500/20 shadow-2xs">
-                      Max 50MB
+                      Max 50MB / File
                     </span>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-                  {/* Left drag zone */}
-                  <div className="lg:col-span-7 flex flex-col">
+                  {/* Left drag zone / multi-file queue */}
+                  <div className="lg:col-span-7 flex flex-col space-y-3">
                     <div
                       onDragOver={handleDragOver}
                       onDragLeave={handleDragLeave}
                       onDrop={handleDrop}
-                      onClick={() => {
-                        const input = document.getElementById('overview-file-picker');
-                        if (input) input.click();
-                      }}
-                      className={`flex-1 border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-200 min-h-[180px] ${
+                      onClick={() => overviewFileInputRef.current?.click()}
+                      className={`border-2 border-dashed rounded-2xl p-6 flex flex-col items-center justify-center text-center cursor-pointer transition-all duration-200 min-h-[160px] ${
                         isOverviewDragging
-                          ? 'border-sky-500 bg-sky-500/5 shadow-lg shadow-sky-500/5'
-                          : overviewFile
-                          ? 'border-emerald-500/40 bg-emerald-500/5'
-                          : 'border-slate-200 dark:border-slate-800 hover:border-sky-500 dark:hover:border-sky-500/30'
+                          ? 'border-sky-500 bg-sky-500/10 shadow-lg shadow-sky-500/10 scale-[1.01]'
+                          : overviewFiles.length > 0
+                          ? 'border-sky-500/40 bg-sky-500/5'
+                          : 'border-slate-200 dark:border-slate-800 hover:border-sky-500 dark:hover:border-sky-500/40 bg-slate-50/50 dark:bg-slate-950/30'
                       }`}
                     >
                       <input
                         type="file"
-                        id="overview-file-picker"
+                        ref={overviewFileInputRef}
+                        multiple
                         className="hidden"
                         onChange={(e) => {
-                          if (e.target.files && e.target.files[0]) {
-                            setOverviewFile(e.target.files[0]);
-                            setOverviewResult(null);
-                            setOverviewError(null);
+                          if (e.target.files && e.target.files.length > 0) {
+                            addFilesToOverviewQueue(e.target.files);
+                            if (e.target) e.target.value = '';
                           }
                         }}
                       />
                       
-                      {overviewFile ? (
-                        <div className="space-y-3">
-                          <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center mx-auto shadow-2xs border border-emerald-500/20">
-                            <Check className="w-6 h-6" />
-                          </div>
-                          <div>
-                            <p className={`text-xs font-extrabold max-w-[280px] truncate mx-auto ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                              {overviewFile.name}
-                            </p>
-                            <p className="text-[10px] text-slate-500 font-mono mt-0.5">
-                              {formatBytes(overviewFile.size)} · {overviewFile.type || 'Unknown Type'}
-                            </p>
-                          </div>
+                      <div className="space-y-2.5">
+                        <div className="w-11 h-11 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center mx-auto border border-sky-500/20 shadow-sm animate-pulse-glow">
+                          <UploadCloud className="w-5 h-5" />
                         </div>
-                      ) : (
-                        <div className="space-y-3">
-                          <div className="w-12 h-12 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center mx-auto border border-sky-500/20">
-                            <UploadCloud className="w-6 h-6" />
-                          </div>
-                          <div className="space-y-1">
-                            <p className={`text-xs font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
-                              Drag and drop file here, or <span className="text-sky-500 underline">browse</span>
-                            </p>
-                            <p className="text-[10px] text-slate-400 dark:text-slate-500">
-                              Accepts any file up to 50MB (Telegram native limit)
-                            </p>
-                          </div>
+                        <div className="space-y-1">
+                          <p className={`text-xs font-bold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                            Drop <span className="text-sky-500 underline font-extrabold">multiple files</span> here, or click to browse
+                          </p>
+                          <p className="text-[10px] text-slate-400 dark:text-slate-500">
+                            Videos, Photos, Archives (.zip), Documents, APKs • Up to 50MB each
+                          </p>
                         </div>
-                      )}
+                      </div>
                     </div>
+
+                    {/* Queued files display */}
+                    {overviewFiles.length > 0 && (
+                      <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-200">
+                        <div className="flex items-center justify-between text-xs px-1">
+                          <span className={`font-mono font-bold text-[11px] ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                            Queue: {overviewFiles.length} {overviewFiles.length === 1 ? 'file' : 'files'} ({formatBytes(overviewFiles.reduce((acc, f) => acc + f.size, 0))})
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                overviewFileInputRef.current?.click();
+                              }}
+                              disabled={overviewUploading}
+                              className="text-[10px] font-bold text-sky-500 hover:underline flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            >
+                              <Plus className="w-3 h-3" /> Add More
+                            </button>
+                            {overviewFiles.some((f) => f.status === 'completed') && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  clearCompletedOverviewQueue();
+                                }}
+                                className="text-[10px] font-bold text-slate-400 hover:text-slate-300 hover:underline cursor-pointer"
+                              >
+                                Clear Completed
+                              </button>
+                            )}
+                            {!overviewUploading && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  clearAllOverviewQueue();
+                                }}
+                                className="text-[10px] font-bold text-rose-400 hover:underline cursor-pointer"
+                              >
+                                Reset All
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Overall batch progress bar if uploading */}
+                        {overviewUploading && (
+                          <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5 animate-in fade-in duration-200">
+                            <div className="flex items-center justify-between text-[10px] font-mono text-slate-300 font-bold">
+                              <span className="flex items-center gap-1.5 text-sky-400">
+                                <RefreshCw className="w-3 h-3 animate-spin" />
+                                <span>Uploading {overviewActiveIndex + 1} of {overviewFiles.length}...</span>
+                              </span>
+                              <span>
+                                {Math.round(
+                                  (overviewFiles.reduce((acc, f) => acc + (f.status === 'completed' ? 100 : f.status === 'uploading' ? f.progress : 0), 0) /
+                                    (overviewFiles.length * 100)) * 100
+                                )}%
+                              </span>
+                            </div>
+                            <div className="w-full bg-slate-900 rounded-full h-1.5 overflow-hidden">
+                              <div
+                                className="bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500 h-1.5 rounded-full transition-all duration-300 relative overflow-hidden"
+                                style={{
+                                  width: `${Math.round(
+                                    (overviewFiles.reduce((acc, f) => acc + (f.status === 'completed' ? 100 : f.status === 'uploading' ? f.progress : 0), 0) /
+                                      (overviewFiles.length * 100)) * 100
+                                  )}%`
+                                }}
+                              >
+                                <div className="absolute inset-0 bg-white/20 animate-shimmer" />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* File Item List */}
+                        <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1 scrollbar-thin">
+                          {overviewFiles.map((item, idx) => (
+                            <div
+                              key={item.id}
+                              className={`p-2.5 rounded-xl border transition-all duration-300 flex items-center justify-between gap-2.5 ${
+                                item.status === 'uploading'
+                                  ? 'bg-sky-500/10 border-sky-500/40 shadow-sm'
+                                  : item.status === 'completed'
+                                  ? 'bg-emerald-500/5 border-emerald-500/30'
+                                  : item.status === 'error'
+                                  ? 'bg-rose-500/10 border-rose-500/30'
+                                  : darkMode
+                                  ? 'bg-slate-950/60 border-slate-800'
+                                  : 'bg-white border-slate-200'
+                              }`}
+                            >
+                              <div className="flex items-center space-x-2.5 min-w-0 flex-1">
+                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                                  item.status === 'completed'
+                                    ? 'bg-emerald-500/20 text-emerald-400'
+                                    : darkMode
+                                    ? 'bg-slate-900 text-sky-400'
+                                    : 'bg-slate-100 text-slate-700'
+                                }`}>
+                                  {item.status === 'completed' ? (
+                                    <Check className="w-4 h-4 animate-checkmark-pop" />
+                                  ) : (
+                                    getFileIcon(item.type, item.name)
+                                  )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className={`text-xs font-bold truncate ${darkMode ? 'text-slate-200' : 'text-slate-800'}`} title={item.name}>
+                                    {item.name}
+                                  </p>
+                                  <div className="flex items-center gap-2 text-[10px] font-mono text-slate-400 mt-0.5">
+                                    <span>{formatBytes(item.size)}</span>
+                                    <span>•</span>
+                                    {item.status === 'queued' && <span className="text-slate-400 font-medium">Ready in queue</span>}
+                                    {item.status === 'uploading' && (
+                                      <span className="text-sky-400 font-bold flex items-center gap-1">
+                                        <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Streaming {item.progress}%
+                                      </span>
+                                    )}
+                                    {item.status === 'completed' && <span className="text-emerald-400 font-bold">Uploaded</span>}
+                                    {item.status === 'error' && <span className="text-rose-400 font-bold">{item.error || 'Failed'}</span>}
+                                  </div>
+
+                                  {/* Item progress bar when active */}
+                                  {item.status === 'uploading' && (
+                                    <div className="w-full bg-slate-900 rounded-full h-1 mt-1.5 overflow-hidden">
+                                      <div
+                                        className="bg-gradient-to-r from-sky-400 to-indigo-500 h-1 rounded-full transition-all duration-300"
+                                        style={{ width: `${item.progress}%` }}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="flex items-center space-x-1 shrink-0">
+                                {item.status === 'completed' && item.result?.direct_link && (
+                                  <button
+                                    type="button"
+                                    onClick={() => copyToClipboard(item.result!.direct_link!, `overview-${item.id}`)}
+                                    className={`px-2 py-1 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                                      copiedId === `overview-${item.id}`
+                                        ? 'bg-emerald-600 text-white'
+                                        : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30'
+                                    }`}
+                                  >
+                                    {copiedId === `overview-${item.id}` ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                    <span>{copiedId === `overview-${item.id}` ? 'Copied' : 'Link'}</span>
+                                  </button>
+                                )}
+
+                                {item.status === 'error' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => retryOverviewQueueItem(item.id)}
+                                    className="p-1 text-xs text-rose-400 hover:text-rose-300 font-bold transition flex items-center gap-0.5 cursor-pointer"
+                                    title="Retry this file"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                  </button>
+                                )}
+
+                                {item.status !== 'uploading' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => removeOverviewQueueItem(item.id)}
+                                    className="p-1 rounded-md text-slate-400 hover:text-rose-400 transition cursor-pointer"
+                                    title="Remove file"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Right configuration zone */}
+                  {/* Right configuration & action zone */}
                   <div className="lg:col-span-5 flex flex-col justify-between space-y-4">
                     <div className="space-y-3 flex-1">
                       {/* Password Protection */}
                       <div className="space-y-1 text-left">
                         <label className="text-[10px] uppercase font-mono font-bold text-slate-400 tracking-wider flex items-center gap-1.5">
                           <Lock className="w-3.5 h-3.5 text-sky-500" />
-                          <span>Enable Link Password Protection</span>
+                          <span>Batch Password Protection</span>
                         </label>
                         <input
                           type="password"
@@ -3468,106 +3927,74 @@ export default function App() {
                           onChange={(e) => setOverviewPassword(e.target.value)}
                           className={`w-full px-3 py-2.5 rounded-xl text-xs transition ${inputBg} font-semibold`}
                         />
+                        <p className="text-[10px] text-slate-400">
+                          Applied to all files uploaded in this batch.
+                        </p>
                       </div>
 
-                      {/* Implicitly using the current active workspace for upload */}
+                      {/* Completed summary & Copy All */}
+                      {overviewFiles.some((f) => f.status === 'completed') && (
+                        <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 space-y-2 animate-in fade-in duration-200">
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-emerald-400 font-bold flex items-center gap-1.5">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              <span>{overviewFiles.filter((f) => f.status === 'completed').length} files uploaded!</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={copyAllCompletedOverviewLinks}
+                              className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                                overviewCopiedBatchAll
+                                  ? 'bg-emerald-600 text-white'
+                                  : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'
+                              }`}
+                            >
+                              {overviewCopiedBatchAll ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                              <span>{overviewCopiedBatchAll ? 'All Copied!' : 'Copy All Links'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
 
                     {/* Action button */}
                     <div>
                       {overviewUploading ? (
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
-                            <span className="flex items-center gap-1.5">
-                              <RefreshCw className="w-3 h-3 animate-spin text-sky-400" />
-                              <span>Streaming to Telegram...</span>
-                            </span>
-                            <span>{overviewProgress}%</span>
-                          </div>
-                          <div className="w-full bg-slate-100 dark:bg-slate-950 rounded-full h-1.5 overflow-hidden">
-                            <div
-                              className="bg-gradient-to-r from-sky-500 to-indigo-600 h-1.5 rounded-full transition-all duration-300"
-                              style={{ width: `${overviewProgress}%` }}
-                            />
-                          </div>
+                        <div className="p-3 rounded-xl bg-sky-500/10 border border-sky-500/30 text-center space-y-1">
+                          <p className="text-xs font-bold text-sky-400 flex items-center justify-center gap-2">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>Processing Bulk Queue...</span>
+                          </p>
+                          <p className="text-[10px] text-slate-400 font-mono">
+                            Auto-syncing to MTProto & MySQL
+                          </p>
                         </div>
                       ) : (
                         <div className="flex gap-2">
-                          {overviewFile && (
-                            <button
-                              onClick={() => {
-                                setOverviewFile(null);
-                                setOverviewPassword('');
-                                setOverviewResult(null);
-                                setOverviewError(null);
-                              }}
-                              className="px-3 py-3 rounded-xl border border-slate-200 dark:border-slate-800 text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-900 transition flex items-center justify-center text-slate-500"
-                            >
-                              Reset
-                            </button>
-                          )}
                           <button
-                            onClick={() => overviewFile && handleOverviewUpload(overviewFile)}
-                            disabled={!overviewFile}
-                            className={`flex-1 py-3 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 ${
-                              overviewFile
-                                ? 'bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white shadow-md active:scale-98'
+                            type="button"
+                            onClick={startOverviewBulkUpload}
+                            disabled={overviewFiles.length === 0 || !overviewFiles.some((f) => f.status === 'queued' || f.status === 'error')}
+                            className={`flex-1 py-3 px-4 rounded-xl font-bold text-xs transition flex items-center justify-center gap-2 ${
+                              overviewFiles.length > 0 && overviewFiles.some((f) => f.status === 'queued' || f.status === 'error')
+                                ? 'bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white shadow-md shadow-sky-500/20 active:scale-98 cursor-pointer'
                                 : darkMode
                                 ? 'bg-slate-900 text-slate-600 border border-slate-800 cursor-not-allowed'
                                 : 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
                             }`}
                           >
                             <Play className="w-3.5 h-3.5" />
-                            <span>Upload & Generate Link</span>
+                            <span>
+                              {overviewFiles.length === 0
+                                ? 'Select Files to Upload'
+                                : `Upload ${overviewFiles.filter((f) => f.status === 'queued' || f.status === 'error').length} Files`}
+                            </span>
                           </button>
                         </div>
                       )}
                     </div>
                   </div>
                 </div>
-
-                {/* Upload feedback messages */}
-                {overviewError && (
-                  <div className="p-3.5 rounded-xl bg-red-500/10 text-red-500 text-xs flex items-center gap-2 border border-red-500/20 font-medium">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{overviewError}</span>
-                  </div>
-                )}
-
-                {overviewResult && (
-                  <div className="p-4 rounded-2xl bg-emerald-500/10 text-emerald-500 space-y-2 border border-emerald-500/20 animate-fadeIn">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <CheckCircle2 className="w-4 h-4 shrink-0" />
-                        <span className={`text-xs font-bold ${darkMode ? 'text-white' : 'text-slate-950'}`}>File Uploaded Successfully!</span>
-                      </div>
-                      {overviewResult.has_password && (
-                        <span className="text-[9px] uppercase font-mono font-bold bg-amber-500/20 text-amber-500 border border-amber-500/25 px-2 py-0.5 rounded-md shadow-2xs flex items-center gap-1">
-                          <Lock className="w-3 h-3" /> Locked
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex gap-2">
-                      <input
-                        type="text"
-                        readOnly
-                        value={overviewResult.direct_link || ''}
-                        className="flex-1 px-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-xs font-mono font-semibold focus:outline-none"
-                      />
-                      <button
-                        onClick={() => copyToClipboard(overviewResult.direct_link || '', 'overview-res')}
-                        className={`px-4 py-2 rounded-xl font-bold text-xs transition flex items-center space-x-1.5 cursor-pointer ${
-                          copiedId === 'overview-res'
-                            ? 'bg-emerald-600 text-white'
-                            : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'
-                        }`}
-                      >
-                        {copiedId === 'overview-res' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                        <span>{copiedId === 'overview-res' ? 'Copied' : 'Copy'}</span>
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
 
               {/* Stats Cards Grid */}
@@ -3939,25 +4366,52 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 3: UPLOAD & DIRECT LINK */}
+          {/* TAB 3: UPLOAD & DIRECT LINK (BULK QUEUE & SINGLE) */}
           {dashboardTab === 'upload' && (
             <div className="max-w-4xl mx-auto space-y-6">
-              <div className={`rounded-3xl p-7 transition-colors duration-200 ${cardBg}`}>
-                <div className="flex items-center justify-between mb-5">
+              <div className={`rounded-3xl p-6 sm:p-7 transition-colors duration-200 ${cardBg}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5">
                   <div>
                     <h2 className={`text-lg font-extrabold flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
                       <UploadCloud className="w-5 h-5 text-sky-500" />
-                      <span>Upload File to Telegram MTProto</span>
+                      <span>Telegram MTProto Cloud Uploader</span>
                     </h2>
                     <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
                       Saved to Telegram Chat: <span className="text-sky-400 font-mono font-bold">{storageChat}</span> • User ID: <span className={`font-mono font-bold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>{user?.id}</span>
                     </p>
                   </div>
-                  <span className={`text-xs font-bold px-3 py-1 rounded-full border font-mono ${
-                    darkMode ? 'bg-slate-950 text-slate-300 border-slate-800' : 'bg-slate-100 text-slate-600 border-slate-200/80'
-                  }`}>
-                    Max: 50 MB
-                  </span>
+
+                  {/* Mode switcher tabs */}
+                  <div className={`flex items-center p-1 rounded-xl border ${darkMode ? 'bg-slate-950/80 border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
+                    <button
+                      type="button"
+                      onClick={() => setUploadTabMode('bulk')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                        uploadTabMode === 'bulk'
+                          ? 'bg-sky-500 text-white shadow-xs'
+                          : darkMode
+                          ? 'text-slate-400 hover:text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      <span>Bulk Upload Queue</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setUploadTabMode('single')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                        uploadTabMode === 'single'
+                          ? 'bg-sky-500 text-white shadow-xs'
+                          : darkMode
+                          ? 'text-slate-400 hover:text-white'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>Single File Custom</span>
+                    </button>
+                  </div>
                 </div>
 
                 {/* Target Workspace Selector */}
@@ -3967,7 +4421,7 @@ export default function App() {
                       Destination Workspace (MySQL Tag)
                     </label>
                     <p className={`text-[11px] mt-0.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                      Select which workspace this uploaded file will be associated with:
+                      Select which workspace uploaded files will be indexed under:
                     </p>
                   </div>
                   <select
@@ -3990,134 +4444,485 @@ export default function App() {
                   </select>
                 </div>
 
-                <form onSubmit={handleUploadSubmit} className="space-y-5">
-                  <div
-                    onClick={() => fileInputRef.current?.click()}
-                    className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center min-h-[220px] ${
-                      selectedFile
-                        ? (darkMode ? 'border-sky-500/80 bg-sky-950/40 shadow-inner' : 'border-sky-400/80 bg-sky-50/50 shadow-inner')
-                        : (darkMode ? 'border-slate-700 hover:border-sky-400 bg-slate-950/40 hover:bg-slate-900/60' : 'border-slate-300/80 hover:border-sky-400 bg-white/50 hover:bg-white/80')
-                    }`}
-                  >
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      className="hidden"
-                      onChange={(e) => {
-                        if (e.target.files && e.target.files[0]) {
-                          setSelectedFile(e.target.files[0]);
-                          setCustomUploadName(e.target.files[0].name);
-                          setUploadResult(null);
+                {/* BULK UPLOAD MODE */}
+                {uploadTabMode === 'bulk' && (
+                  <div className="space-y-5 animate-in fade-in duration-200">
+                    {/* Multi-file Dropzone */}
+                    <div
+                      onDragOver={(e) => { e.preventDefault(); setIsBulkDragging(true); }}
+                      onDragLeave={() => setIsBulkDragging(false)}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        setIsBulkDragging(false);
+                        if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                          addFilesToBulkQueue(e.dataTransfer.files);
                         }
                       }}
-                    />
+                      onClick={() => bulkFileInputRef.current?.click()}
+                      className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all duration-300 flex flex-col items-center justify-center min-h-[190px] ${
+                        isBulkDragging
+                          ? 'border-sky-500 bg-sky-500/10 shadow-lg shadow-sky-500/10 scale-[1.01]'
+                          : uploadQueue.length > 0
+                          ? 'border-sky-500/40 bg-sky-500/5'
+                          : darkMode
+                          ? 'border-slate-700 hover:border-sky-400 bg-slate-950/40 hover:bg-slate-900/60'
+                          : 'border-slate-300/80 hover:border-sky-400 bg-white/50 hover:bg-white/80'
+                      }`}
+                    >
+                      <input
+                        type="file"
+                        ref={bulkFileInputRef}
+                        multiple
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files.length > 0) {
+                            addFilesToBulkQueue(e.target.files);
+                            if (e.target) e.target.value = '';
+                          }
+                        }}
+                      />
 
-                    {selectedFile ? (
-                      <div className="flex flex-col items-center space-y-2.5">
-                        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-sky-400 ${
-                          darkMode ? 'bg-slate-900 border border-slate-800' : 'bg-white shadow-md border border-slate-100'
-                        }`}>
-                          {getFileIcon(selectedFile.type, selectedFile.name)}
-                        </div>
-                        <p className={`font-bold text-base truncate max-w-xs sm:max-w-md ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                          {selectedFile.name}
-                        </p>
-                        <p className={`text-xs font-mono font-medium ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                          {formatBytes(selectedFile.size)} • {selectedFile.type || 'Binary / Document'}
-                        </p>
-                        <span className="text-xs font-semibold text-sky-400 underline pt-1">Click to select different file</span>
-                      </div>
-                    ) : (
-                      <div className="flex flex-col items-center space-y-3">
-                        <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-sky-400 ${
-                          darkMode ? 'bg-slate-900 border border-slate-800' : 'bg-white shadow-md border border-slate-100'
-                        }`}>
+                      <div className="space-y-3">
+                        <div className="w-14 h-14 rounded-2xl bg-sky-500/10 text-sky-400 flex items-center justify-center mx-auto border border-sky-500/20 shadow-sm animate-pulse-glow">
                           <UploadCloud className="w-7 h-7" />
                         </div>
                         <div>
-                          <p className={`text-sm font-bold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
-                            Click to browse or drag & drop any file here
+                          <p className={`text-sm font-extrabold ${darkMode ? 'text-slate-100' : 'text-slate-900'}`}>
+                            Drop <span className="text-sky-500 underline">multiple files</span> here, or click to browse
                           </p>
                           <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
-                            Videos, Photos, Archives (.zip, .tar), Documents, APKs, Binaries
+                            Select any batch of videos, images, archives (.zip), binaries • Up to 50MB per file
                           </p>
                         </div>
                       </div>
-                    )}
-                  </div>
-
-                  {selectedFile && (
-                    <div>
-                      <label className={`block text-xs font-bold mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
-                        File Name (will be stored in MySQL)
-                      </label>
-                      <input
-                        type="text"
-                        value={customUploadName}
-                        onChange={(e) => setCustomUploadName(e.target.value)}
-                        placeholder="File name"
-                        className={`w-full rounded-xl px-4 py-2.5 text-xs font-mono ${inputBg}`}
-                      />
                     </div>
-                  )}
 
-                  <div>
-                    <label className={`block text-xs font-bold mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
-                      Optional Caption or Tags
-                    </label>
-                    <input
-                      type="text"
-                      value={uploadCaption}
-                      onChange={(e) => setUploadCaption(e.target.value)}
-                      placeholder="e.g. Project Archive v1 or #backup #docs"
-                      className={`w-full rounded-xl px-4 py-2.5 text-xs ${inputBg}`}
-                    />
-                  </div>
-
-                  {isUploading && (
-                    <div className="space-y-2 pt-2">
-                      <div className="flex justify-between text-xs font-bold">
-                        <span className="text-sky-400 flex items-center space-x-1.5">
-                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>Streaming chunks via Telethon MTProto & writing to MySQL...</span>
-                        </span>
-                        <span className={`font-mono ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>{uploadProgress}%</span>
+                    {/* Batch Options (Password & Tag) */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className={`block text-xs font-bold mb-1 flex items-center gap-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                          <Lock className="w-3.5 h-3.5 text-sky-500" />
+                          <span>Batch Password (Optional)</span>
+                        </label>
+                        <input
+                          type="password"
+                          placeholder="Password for all queued files"
+                          value={bulkUploadPassword}
+                          onChange={(e) => setBulkUploadPassword(e.target.value)}
+                          className={`w-full rounded-xl px-3.5 py-2.5 text-xs ${inputBg}`}
+                        />
                       </div>
-                      <div className={`w-full rounded-full h-2.5 overflow-hidden p-0.5 ${darkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
-                        <div
-                          className="bg-gradient-to-r from-sky-500 to-indigo-500 h-2 rounded-full transition-all duration-300 shadow-sm"
-                          style={{ width: `${uploadProgress}%` }}
+                      <div>
+                        <label className={`block text-xs font-bold mb-1 flex items-center gap-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                          <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                          <span>Batch Tags / Caption Prefix (Optional)</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="e.g. #batch-upload #release-v1"
+                          value={bulkUploadCaption}
+                          onChange={(e) => setBulkUploadCaption(e.target.value)}
+                          className={`w-full rounded-xl px-3.5 py-2.5 text-xs ${inputBg}`}
                         />
                       </div>
                     </div>
-                  )}
 
-                  {uploadError && (
-                    <div className={`p-3.5 rounded-xl text-xs flex items-center space-x-2 border ${
-                      darkMode ? 'bg-rose-950/80 border-rose-800 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-700'
-                    }`}>
-                      <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                      <span>{uploadError}</span>
+                    {/* Active Upload Queue View */}
+                    {uploadQueue.length > 0 && (
+                      <div className="space-y-4 pt-2 animate-in fade-in slide-in-from-top-3 duration-300">
+                        {/* Queue Header & Actions */}
+                        <div className={`p-4 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                          darkMode ? 'bg-slate-950/80 border-slate-800' : 'bg-slate-50 border-slate-200'
+                        }`}>
+                          <div className="space-y-0.5">
+                            <div className="flex items-center gap-2">
+                              <h3 className={`text-sm font-extrabold ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                                Upload Queue ({uploadQueue.length} {uploadQueue.length === 1 ? 'file' : 'files'})
+                              </h3>
+                              <span className="text-xs font-mono font-bold text-sky-400 bg-sky-500/10 px-2 py-0.5 rounded-md border border-sky-500/20">
+                                {formatBytes(uploadQueue.reduce((acc, it) => acc + it.size, 0))}
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-400">
+                              {uploadQueue.filter((it) => it.status === 'completed').length} completed • {uploadQueue.filter((it) => it.status === 'queued').length} queued • {uploadQueue.filter((it) => it.status === 'error').length} failed
+                            </p>
+                          </div>
+
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={() => bulkFileInputRef.current?.click()}
+                              disabled={isBulkUploading}
+                              className="px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 transition flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                              <span>Add Files</span>
+                            </button>
+
+                            {uploadQueue.some((it) => it.status === 'completed') && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={copyAllCompletedLinks}
+                                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                                    copiedBatchAll
+                                      ? 'bg-emerald-600 text-white shadow-sm'
+                                      : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm'
+                                  }`}
+                                >
+                                  {copiedBatchAll ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                                  <span>{copiedBatchAll ? 'Links Copied!' : 'Copy All Links'}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={clearCompletedBulkQueue}
+                                  disabled={isBulkUploading}
+                                  className="px-2.5 py-1.5 rounded-xl text-xs font-bold text-slate-400 hover:text-slate-200 transition cursor-pointer disabled:opacity-50"
+                                >
+                                  Clear Done
+                                </button>
+                              </>
+                            )}
+
+                            {!isBulkUploading && (
+                              <button
+                                type="button"
+                                onClick={clearAllBulkQueue}
+                                className="px-2.5 py-1.5 rounded-xl text-xs font-bold text-rose-400 hover:text-rose-300 transition cursor-pointer"
+                              >
+                                Clear All
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Overall Progress Bar during batch upload */}
+                        {isBulkUploading && (
+                          <div className="p-4 rounded-2xl bg-sky-950/40 border border-sky-500/30 space-y-2 animate-in fade-in duration-200">
+                            <div className="flex items-center justify-between text-xs font-mono font-bold">
+                              <span className="flex items-center gap-2 text-sky-400">
+                                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                                <span>Uploading file {activeUploadIndex + 1} of {uploadQueue.length}...</span>
+                              </span>
+                              <span className="text-slate-200">
+                                {Math.round(
+                                  (uploadQueue.reduce((acc, it) => acc + (it.status === 'completed' ? 100 : it.status === 'uploading' ? it.progress : 0), 0) /
+                                    (uploadQueue.length * 100)) * 100
+                                )}%
+                              </span>
+                            </div>
+                            <div className="w-full bg-slate-900 rounded-full h-2 overflow-hidden p-0.5 border border-slate-800">
+                              <div
+                                className="bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500 h-1.5 rounded-full transition-all duration-300 relative overflow-hidden"
+                                style={{
+                                  width: `${Math.round(
+                                    (uploadQueue.reduce((acc, it) => acc + (it.status === 'completed' ? 100 : it.status === 'uploading' ? it.progress : 0), 0) /
+                                      (uploadQueue.length * 100)) * 100
+                                  )}%`
+                                }}
+                              >
+                                <div className="absolute inset-0 bg-white/20 animate-shimmer" />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Queue Items List */}
+                        <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1 scrollbar-thin">
+                          {uploadQueue.map((item, idx) => (
+                            <div
+                              key={item.id}
+                              className={`p-3.5 rounded-2xl border transition-all duration-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300 ${
+                                item.status === 'uploading'
+                                  ? 'bg-sky-500/10 border-sky-500/50 shadow-md'
+                                  : item.status === 'completed'
+                                  ? 'bg-emerald-500/5 border-emerald-500/30'
+                                  : item.status === 'error'
+                                  ? 'bg-rose-500/10 border-rose-500/30'
+                                  : darkMode
+                                  ? 'bg-slate-950/60 border-slate-800'
+                                  : 'bg-white border-slate-200'
+                              }`}
+                            >
+                              <div className="flex items-center space-x-3 min-w-0 flex-1">
+                                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                                  item.status === 'completed'
+                                    ? 'bg-emerald-500/20 text-emerald-400'
+                                    : darkMode
+                                    ? 'bg-slate-900 text-sky-400 border border-slate-800'
+                                    : 'bg-slate-100 text-slate-700'
+                                }`}>
+                                  {item.status === 'completed' ? (
+                                    <Check className="w-5 h-5 animate-checkmark-pop text-emerald-400" />
+                                  ) : (
+                                    getFileIcon(item.type, item.name)
+                                  )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <p className={`text-xs font-bold truncate ${darkMode ? 'text-white' : 'text-slate-900'}`} title={item.name}>
+                                      {item.name}
+                                    </p>
+                                    {item.status === 'completed' && item.result?.message_id && (
+                                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 font-bold shrink-0">
+                                        #{item.result.message_id}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2 text-[10px] font-mono text-slate-400 mt-0.5">
+                                    <span>{formatBytes(item.size)}</span>
+                                    <span>•</span>
+                                    {item.status === 'queued' && <span className="text-slate-400 font-medium">Ready in queue</span>}
+                                    {item.status === 'uploading' && (
+                                      <span className="text-sky-400 font-bold flex items-center gap-1">
+                                        <RefreshCw className="w-2.5 h-2.5 animate-spin" /> Streaming {item.progress}%
+                                      </span>
+                                    )}
+                                    {item.status === 'completed' && <span className="text-emerald-400 font-bold">Uploaded & Indexed</span>}
+                                    {item.status === 'error' && <span className="text-rose-400 font-bold">{item.error || 'Failed'}</span>}
+                                  </div>
+
+                                  {/* Progress bar during uploading */}
+                                  {item.status === 'uploading' && (
+                                    <div className="w-full bg-slate-900 rounded-full h-1.5 mt-2 overflow-hidden">
+                                      <div
+                                        className="bg-gradient-to-r from-sky-400 to-indigo-500 h-1.5 rounded-full transition-all duration-300 relative overflow-hidden"
+                                        style={{ width: `${item.progress}%` }}
+                                      >
+                                        <div className="absolute inset-0 bg-white/20 animate-shimmer" />
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Completed Link and Actions */}
+                              <div className="flex items-center space-x-1.5 shrink-0">
+                                {item.status === 'completed' && item.result?.direct_link && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => copyToClipboard(item.result!.direct_link!, `queue-${item.id}`)}
+                                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                                        copiedId === `queue-${item.id}`
+                                          ? 'bg-emerald-600 text-white'
+                                          : 'bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 border border-emerald-500/30'
+                                      }`}
+                                    >
+                                      {copiedId === `queue-${item.id}` ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                                      <span>{copiedId === `queue-${item.id}` ? 'Copied' : 'Copy Link'}</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => setQrModalFile(item.result!)}
+                                      className="p-1.5 rounded-xl border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 transition cursor-pointer"
+                                      title="QR Code"
+                                    >
+                                      <QrCode className="w-3.5 h-3.5" />
+                                    </button>
+
+                                    <a
+                                      href={item.result.direct_link}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="p-1.5 rounded-xl border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-200 transition flex items-center"
+                                      title="Open Stream"
+                                    >
+                                      <ExternalLink className="w-3.5 h-3.5" />
+                                    </a>
+                                  </>
+                                )}
+
+                                {item.status === 'error' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => retryBulkQueueItem(item.id)}
+                                    className="px-2.5 py-1 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-xs font-bold transition flex items-center gap-1 border border-rose-500/30 cursor-pointer"
+                                  >
+                                    <RotateCcw className="w-3 h-3" />
+                                    <span>Retry</span>
+                                  </button>
+                                )}
+
+                                {item.status !== 'uploading' && (
+                                  <button
+                                    type="button"
+                                    onClick={() => removeBulkQueueItem(item.id)}
+                                    className="p-1.5 rounded-xl text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition cursor-pointer"
+                                    title="Remove from queue"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Bulk Upload Start Trigger */}
+                        <button
+                          type="button"
+                          onClick={startBulkUploadProcess}
+                          disabled={isBulkUploading || !uploadQueue.some((it) => it.status === 'queued' || it.status === 'error')}
+                          className={`w-full py-4 px-6 rounded-2xl font-bold text-sm flex items-center justify-center space-x-2 transition shadow-xl ${
+                            isBulkUploading || !uploadQueue.some((it) => it.status === 'queued' || it.status === 'error')
+                              ? (darkMode ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' : 'bg-slate-200 text-slate-400 cursor-not-allowed border border-slate-300/60')
+                              : 'bg-gradient-to-r from-sky-500 via-indigo-600 to-purple-600 hover:from-sky-400 hover:to-indigo-500 text-white shadow-sky-500/25 active:scale-[0.99] cursor-pointer'
+                          }`}
+                        >
+                          {isBulkUploading ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                              <span>Uploading {uploadQueue.length} Files to Telegram & MySQL...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Send className="w-4 h-4" />
+                              <span>
+                                {uploadQueue.every((it) => it.status === 'completed')
+                                  ? 'All Files Uploaded Successfully!'
+                                  : `Start Bulk Upload (${uploadQueue.filter((it) => it.status === 'queued' || it.status === 'error').length} Files)`}
+                              </span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* SINGLE FILE CUSTOM MODE */}
+                {uploadTabMode === 'single' && (
+                  <form onSubmit={handleUploadSubmit} className="space-y-5 animate-in fade-in duration-200">
+                    <div
+                      onClick={() => fileInputRef.current?.click()}
+                      className={`border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all duration-200 flex flex-col items-center justify-center min-h-[220px] ${
+                        selectedFile
+                          ? (darkMode ? 'border-sky-500/80 bg-sky-950/40 shadow-inner' : 'border-sky-400/80 bg-sky-50/50 shadow-inner')
+                          : (darkMode ? 'border-slate-700 hover:border-sky-400 bg-slate-950/40 hover:bg-slate-900/60' : 'border-slate-300/80 hover:border-sky-400 bg-white/50 hover:bg-white/80')
+                      }`}
+                    >
+                      <input
+                        type="file"
+                        ref={fileInputRef}
+                        className="hidden"
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files[0]) {
+                            setSelectedFile(e.target.files[0]);
+                            setCustomUploadName(e.target.files[0].name);
+                            setUploadResult(null);
+                          }
+                        }}
+                      />
+
+                      {selectedFile ? (
+                        <div className="flex flex-col items-center space-y-2.5">
+                          <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-sky-400 ${
+                            darkMode ? 'bg-slate-900 border border-slate-800' : 'bg-white shadow-md border border-slate-100'
+                          }`}>
+                            {getFileIcon(selectedFile.type, selectedFile.name)}
+                          </div>
+                          <p className={`font-bold text-base truncate max-w-xs sm:max-w-md ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                            {selectedFile.name}
+                          </p>
+                          <p className={`text-xs font-mono font-medium ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                            {formatBytes(selectedFile.size)} • {selectedFile.type || 'Binary / Document'}
+                          </p>
+                          <span className="text-xs font-semibold text-sky-400 underline pt-1">Click to select different file</span>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center space-y-3">
+                          <div className={`w-14 h-14 rounded-2xl flex items-center justify-center text-sky-400 ${
+                            darkMode ? 'bg-slate-900 border border-slate-800' : 'bg-white shadow-md border border-slate-100'
+                          }`}>
+                            <UploadCloud className="w-7 h-7" />
+                          </div>
+                          <div>
+                            <p className={`text-sm font-bold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                              Click to browse or drag & drop single file here
+                            </p>
+                            <p className={`text-xs mt-1 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                              Custom file name and caption override
+                            </p>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                  )}
 
-                  <button
-                    type="submit"
-                    disabled={!selectedFile || isUploading}
-                    className={`w-full py-3.5 px-5 rounded-2xl font-bold text-sm flex items-center justify-center space-x-2 transition shadow-lg ${
-                      !selectedFile || isUploading
-                        ? (darkMode ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' : 'bg-slate-200 text-slate-400 cursor-not-allowed border border-slate-300/60')
-                        : 'bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white shadow-sky-500/25 active:scale-[0.99]'
-                    }`}
-                  >
-                    <Send className="w-4 h-4" />
-                    <span>{isUploading ? 'Uploading to Telegram & MySQL...' : 'Upload & Generate Direct Link'}</span>
-                  </button>
-                </form>
+                    {selectedFile && (
+                      <div>
+                        <label className={`block text-xs font-bold mb-1 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                          File Name (Stored in MySQL Catalog)
+                        </label>
+                        <input
+                          type="text"
+                          value={customUploadName}
+                          onChange={(e) => setCustomUploadName(e.target.value)}
+                          placeholder="File name"
+                          className={`w-full rounded-xl px-4 py-2.5 text-xs font-mono ${inputBg}`}
+                        />
+                      </div>
+                    )}
+
+                    <div>
+                      <label className={`block text-xs font-bold mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                        Optional Caption or Tags
+                      </label>
+                      <input
+                        type="text"
+                        value={uploadCaption}
+                        onChange={(e) => setUploadCaption(e.target.value)}
+                        placeholder="e.g. Project Archive v1 or #backup #docs"
+                        className={`w-full rounded-xl px-4 py-2.5 text-xs ${inputBg}`}
+                      />
+                    </div>
+
+                    {isUploading && (
+                      <div className="space-y-2 pt-2">
+                        <div className="flex justify-between text-xs font-bold">
+                          <span className="text-sky-400 flex items-center space-x-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            <span>Streaming chunks via Telethon MTProto & writing to MySQL...</span>
+                          </span>
+                          <span className={`font-mono ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>{uploadProgress}%</span>
+                        </div>
+                        <div className={`w-full rounded-full h-2.5 overflow-hidden p-0.5 ${darkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
+                          <div
+                            className="bg-gradient-to-r from-sky-500 to-indigo-500 h-2 rounded-full transition-all duration-300 shadow-sm"
+                            style={{ width: `${uploadProgress}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {uploadError && (
+                      <div className={`p-3.5 rounded-xl text-xs flex items-center space-x-2 border ${
+                        darkMode ? 'bg-rose-950/80 border-rose-800 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-700'
+                      }`}>
+                        <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                        <span>{uploadError}</span>
+                      </div>
+                    )}
+
+                    <button
+                      type="submit"
+                      disabled={!selectedFile || isUploading}
+                      className={`w-full py-3.5 px-5 rounded-2xl font-bold text-sm flex items-center justify-center space-x-2 transition shadow-lg ${
+                        !selectedFile || isUploading
+                          ? (darkMode ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed' : 'bg-slate-200 text-slate-400 cursor-not-allowed border border-slate-300/60')
+                          : 'bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white shadow-sky-500/25 active:scale-[0.99] cursor-pointer'
+                      }`}
+                    >
+                      <Send className="w-4 h-4" />
+                      <span>{isUploading ? 'Uploading to Telegram & MySQL...' : 'Upload & Generate Direct Link'}</span>
+                    </button>
+                  </form>
+                )}
               </div>
 
-              {/* Upload Result Card */}
-              {uploadResult && (
+              {/* Upload Result Card for Single Upload Mode */}
+              {uploadResult && uploadTabMode === 'single' && (
                 <div className={`border border-emerald-500/80 rounded-3xl p-7 relative overflow-hidden transition-colors duration-200 ${cardBg}`}>
                   <div className="flex items-center space-x-3 mb-4">
                     <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center shadow-xs">
@@ -4144,7 +4949,7 @@ export default function App() {
                         />
                         <button
                           onClick={() => copyToClipboard(uploadResult.direct_link || '', 'direct-res')}
-                          className="px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-bold shadow-xs flex items-center space-x-1.5 transition"
+                          className="px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-bold shadow-xs flex items-center space-x-1.5 transition cursor-pointer"
                         >
                           {copiedId === 'direct-res' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                           <span>{copiedId === 'direct-res' ? 'Copied' : 'Copy'}</span>
@@ -4159,7 +4964,7 @@ export default function App() {
                               direct_link: uploadResult.direct_link
                             } as StorageFile);
                           }}
-                          className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-white text-xs font-bold shadow-xs flex items-center space-x-1.5 transition"
+                          className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-white text-xs font-bold shadow-xs flex items-center space-x-1.5 transition cursor-pointer"
                           title="Generate QR code for mobile scanning"
                         >
                           <QrCode className="w-3.5 h-3.5" />
@@ -4228,6 +5033,18 @@ export default function App() {
                       <LayoutGrid className="w-4 h-4" />
                     </button>
                   </div>
+
+                  <button
+                    onClick={() => {
+                      setDashboardTab('upload');
+                      setUploadTabMode('bulk');
+                    }}
+                    className="px-3.5 py-2 rounded-xl text-xs font-bold bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white shadow-md shadow-sky-500/20 flex items-center space-x-1.5 transition cursor-pointer active:scale-95"
+                    title="Upload multiple files with smooth animations"
+                  >
+                    <UploadCloud className="w-3.5 h-3.5" />
+                    <span>Upload Files</span>
+                  </button>
 
                   <button
                     onClick={handleFetchOldFiles}
@@ -6789,23 +7606,43 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
               ) : (
                 <Download className="w-4 h-4 text-slate-950" />
               )}
-              <span>Download Session File (.telecloud)</span>
+              <span>Download Full Backup File (.telecloud)</span>
+            </button>
+
+            <button
+              onClick={handleDownloadRawSession}
+              disabled={exportingSession}
+              className={`w-full py-2.5 px-4 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer ${
+                darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-slate-50 hover:bg-slate-100 text-slate-800 border-slate-200'
+              }`}
+            >
+              <FileText className="w-4 h-4 text-sky-400" />
+              <span>Download Raw String (.session / .txt)</span>
             </button>
 
             {sessionExportData?.string_session && (
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(sessionExportData.string_session);
-                  setCopiedSessionStr(true);
-                  setTimeout(() => setCopiedSessionStr(false), 2000);
-                }}
-                className={`w-full py-2.5 px-4 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer ${
-                  darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
-                }`}
-              >
-                {copiedSessionStr ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
-                <span>{copiedSessionStr ? 'Copied String Session!' : 'Copy Raw Session String'}</span>
-              </button>
+              <>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(sessionExportData.string_session);
+                    setCopiedSessionStr(true);
+                    setTimeout(() => setCopiedSessionStr(false), 2000);
+                  }}
+                  className={`w-full py-2.5 px-4 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer ${
+                    darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                  }`}
+                >
+                  {copiedSessionStr ? <Check className="w-4 h-4 text-emerald-500" /> : <Copy className="w-4 h-4" />}
+                  <span>{copiedSessionStr ? 'Copied String Session!' : 'Copy Raw Session String'}</span>
+                </button>
+
+                <div className={`p-3 rounded-xl border text-[11px] font-mono break-all max-h-24 overflow-y-auto ${
+                  darkMode ? 'bg-slate-950/80 border-slate-800 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-700'
+                }`}>
+                  <p className="text-[10px] font-sans font-bold text-slate-400 mb-1">StringSession Preview:</p>
+                  {sessionExportData.string_session}
+                </div>
+              </>
             )}
           </div>
         </div>
