@@ -219,6 +219,8 @@ export async function initDb() {
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN download_password VARCHAR(255) DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN file_slug VARCHAR(64) UNIQUE DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN is_restricted BOOLEAN DEFAULT FALSE;`); } catch {}
+    try { await pool.query(`ALTER TABLE user_files ADD COLUMN access_count INT DEFAULT 0;`); } catch {}
+    try { await pool.query(`ALTER TABLE user_files ADD COLUMN last_accessed_at DATETIME DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD INDEX idx_file_slug (file_slug);`); } catch {}
 
     // Backfill unique file_slug for any legacy files missing a slug
@@ -915,7 +917,7 @@ export async function getUserFilesFromDb(
 
   try {
     let query = `
-      SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, is_restricted, created_at, updated_at
+      SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, is_restricted, access_count, last_accessed_at, created_at, updated_at
       FROM user_files
       WHERE telegram_id = ?
     `;
@@ -1898,4 +1900,171 @@ export async function purgeUserAccountFromDb(telegramId: number | string): Promi
     isDbConnected = false;
     return true;
   }
+}
+
+export async function recordFileAccess(fileIdentifier: number | string) {
+  const clean = String(fileIdentifier || '').trim();
+  if (!clean) return;
+
+  loadLocalStore();
+  const idx = localStore.user_files.findIndex(
+    (f) => String(f.id) === clean || String(f.file_slug) === clean || String(f.message_id) === clean
+  );
+  if (idx >= 0) {
+    localStore.user_files[idx].access_count = (Number(localStore.user_files[idx].access_count) || 0) + 1;
+    localStore.user_files[idx].last_accessed_at = new Date().toISOString();
+    saveLocalStore();
+  }
+
+  if (!pool || !isDbConnected) return;
+
+  try {
+    await pool.query(
+      `UPDATE user_files 
+       SET access_count = COALESCE(access_count, 0) + 1, last_accessed_at = NOW() 
+       WHERE id = ? OR file_slug = ? OR message_id = ?`,
+      [clean, clean, clean]
+    );
+  } catch (err: any) {
+    isDbConnected = false;
+  }
+}
+
+export async function getFilesAnalyticsFromDb(
+  telegramId?: number | string | null,
+  workspaceId?: number | string | null,
+  filterOption: string = 'all'
+) {
+  let allFiles: any[] = [];
+  if (telegramId) {
+    allFiles = await getUserFilesFromDb(telegramId, workspaceId);
+  } else {
+    if (!pool || !isDbConnected) {
+      loadLocalStore();
+      allFiles = [...localStore.user_files];
+    } else {
+      try {
+        let query = `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, is_restricted, access_count, last_accessed_at, created_at, updated_at FROM user_files ORDER BY created_at DESC`;
+        const [rows]: any = await pool.query(query);
+        allFiles = rows || [];
+      } catch {
+        isDbConnected = false;
+        loadLocalStore();
+        allFiles = [...localStore.user_files];
+      }
+    }
+  }
+
+  const nowMs = Date.now();
+
+  const formatted = allFiles.map((f) => {
+    const accessCount = Number(f.access_count) || 0;
+    const lastAccessedIso = f.last_accessed_at ? new Date(f.last_accessed_at).toISOString() : null;
+    const createdAtIso = f.created_at ? new Date(f.created_at).toISOString() : new Date().toISOString();
+
+    const referenceTimeMs = lastAccessedIso ? new Date(lastAccessedIso).getTime() : new Date(createdAtIso).getTime();
+    const daysSinceLastAccess = Math.max(0, Math.floor((nowMs - referenceTimeMs) / (1000 * 60 * 60 * 24)));
+
+    return {
+      ...f,
+      access_count: accessCount,
+      last_accessed_at: lastAccessedIso,
+      days_since_last_access: daysSinceLastAccess,
+    };
+  });
+
+  // Calculate Summary Statistics
+  const totalFiles = formatted.length;
+  const totalServes = formatted.reduce((sum, f) => sum + f.access_count, 0);
+  const neverAccessed = formatted.filter((f) => f.access_count === 0);
+  const unaccessed7Days = formatted.filter((f) => f.access_count === 0 || f.days_since_last_access >= 7);
+  const unaccessed30Days = formatted.filter((f) => f.access_count === 0 || f.days_since_last_access >= 30);
+
+  const stats = {
+    totalFiles,
+    totalServes,
+    totalSizeBytes: formatted.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0),
+    neverAccessedCount: neverAccessed.length,
+    neverAccessedBytes: neverAccessed.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0),
+    unaccessed7DaysCount: unaccessed7Days.length,
+    unaccessed7DaysBytes: unaccessed7Days.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0),
+    unaccessed30DaysCount: unaccessed30Days.length,
+    unaccessed30DaysBytes: unaccessed30Days.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0),
+  };
+
+  let filteredFiles = [...formatted];
+
+  if (filterOption === 'most_accessed') {
+    filteredFiles.sort((a, b) => b.access_count - a.access_count);
+  } else if (filterOption === 'never_accessed') {
+    filteredFiles = filteredFiles.filter((f) => f.access_count === 0);
+  } else if (filterOption === 'unaccessed_7_days') {
+    filteredFiles = filteredFiles.filter((f) => f.access_count === 0 || f.days_since_last_access >= 7);
+    filteredFiles.sort((a, b) => b.days_since_last_access - a.days_since_last_access);
+  } else if (filterOption === 'unaccessed_30_days') {
+    filteredFiles = filteredFiles.filter((f) => f.access_count === 0 || f.days_since_last_access >= 30);
+    filteredFiles.sort((a, b) => b.days_since_last_access - a.days_since_last_access);
+  }
+
+  return { stats, files: filteredFiles };
+}
+
+export async function deleteUnaccessedFilesFromDb(
+  telegramId?: number | string | null,
+  rule: string = 'not_accessed_7_days',
+  specificFileIds?: (number | string)[]
+) {
+  const { files } = await getFilesAnalyticsFromDb(telegramId, null, 'all');
+  let filesToDelete: any[] = [];
+
+  const targetIdSet = new Set((specificFileIds || []).map((id) => String(id)));
+
+  if (rule === 'custom' && targetIdSet.size > 0) {
+    filesToDelete = files.filter((f) => targetIdSet.has(String(f.id)) || targetIdSet.has(String(f.message_id)));
+  } else if (rule === 'not_accessed_7_days') {
+    filesToDelete = files.filter((f) => f.access_count === 0 || f.days_since_last_access >= 7);
+  } else if (rule === 'not_accessed_30_days') {
+    filesToDelete = files.filter((f) => f.access_count === 0 || f.days_since_last_access >= 30);
+  } else if (rule === 'never_accessed') {
+    filesToDelete = files.filter((f) => f.access_count === 0);
+  }
+
+  if (filesToDelete.length === 0) {
+    return { success: true, deletedCount: 0, deletedFiles: [] };
+  }
+
+  const idsToRemove = filesToDelete.map((f) => String(f.id));
+  const msgIdsToRemove = filesToDelete.map((f) => String(f.message_id));
+
+  // 1. Remove from localStore
+  loadLocalStore();
+  localStore.user_files = localStore.user_files.filter(
+    (f) => !idsToRemove.includes(String(f.id)) && !msgIdsToRemove.includes(String(f.message_id))
+  );
+  saveLocalStore();
+
+  // 2. Remove from MySQL if connected
+  if (pool && isDbConnected) {
+    try {
+      if (telegramId) {
+        await pool.query(
+          `DELETE FROM user_files WHERE telegram_id = ? AND (id IN (?) OR message_id IN (?))`,
+          [String(telegramId), idsToRemove, msgIdsToRemove]
+        );
+      } else {
+        await pool.query(
+          `DELETE FROM user_files WHERE id IN (?) OR message_id IN (?)`,
+          [idsToRemove, msgIdsToRemove]
+        );
+      }
+    } catch (err: any) {
+      isDbConnected = false;
+    }
+  }
+
+  return {
+    success: true,
+    deletedCount: filesToDelete.length,
+    deletedFiles: filesToDelete,
+  };
 }

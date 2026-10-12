@@ -67,6 +67,11 @@ import {
   Plus,
   RotateCcw,
   FileCheck,
+  Activity,
+  Flame,
+  FileQuestion,
+  Clock,
+  AlertTriangle,
 } from 'lucide-react';
 import { ApiConsolePage } from './components/ApiConsolePage';
 import FeaturesPage from './pages/FeaturesPage';
@@ -267,8 +272,8 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v1.8.2
-  const APP_VERSION = "v1.8.2";
+  // App Version in Header - Incremented to v1.8.4
+  const APP_VERSION = "v1.8.4";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -429,7 +434,7 @@ export default function App() {
 
   // Navigation: For logged-in dashboard vs landing
   // Clean user-focused tabs with dedicated API Console & Simulator
-  const [dashboardTab, setDashboardTab] = useState<'overview' | 'workspaces' | 'upload' | 'vault' | 'streamer' | 'links' | 'api' | 'settings'>('overview');
+  const [dashboardTab, setDashboardTab] = useState<'overview' | 'workspaces' | 'upload' | 'vault' | 'analytics' | 'streamer' | 'links' | 'api' | 'settings'>('overview');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState<boolean>(false);
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
   const [viewMode, setViewMode] = useState<'list' | 'grid'>('list');
@@ -753,6 +758,15 @@ export default function App() {
   const [overviewWorkspaceId, setOverviewWorkspaceId] = useState<string>('');
   const [overviewCopiedBatchAll, setOverviewCopiedBatchAll] = useState<boolean>(false);
   const overviewFileInputRef = useRef<HTMLInputElement>(null);
+  // Analytics & Cleanup State
+  const [analyticsFilter, setAnalyticsFilter] = useState<'all' | 'most_accessed' | 'never_accessed' | 'unaccessed_7_days' | 'unaccessed_30_days'>('all');
+  const [analyticsLoading, setAnalyticsLoading] = useState<boolean>(false);
+  const [analyticsStats, setAnalyticsStats] = useState<any | null>(null);
+  const [analyticsFiles, setAnalyticsFiles] = useState<any[]>([]);
+  const [selectedAnalyticsFileIds, setSelectedAnalyticsFileIds] = useState<string[]>([]);
+  const [cleanupModalRule, setCleanupModalRule] = useState<'not_accessed_7_days' | 'never_accessed' | 'not_accessed_30_days' | 'custom' | null>(null);
+  const [isCleaningUp, setIsCleaningUp] = useState<boolean>(false);
+  const [cleanupSuccessNotice, setCleanupSuccessNotice] = useState<string | null>(null);
 
   // Files List & Rename
   const [files, setFiles] = useState<StorageFile[]>([]);
@@ -1140,6 +1154,66 @@ export default function App() {
       setIsFetchingOldFiles(false);
     }
   };
+
+  const fetchAnalytics = async () => {
+    setAnalyticsLoading(true);
+    try {
+      const targetWsId = activeWorkspaceId ? String(activeWorkspaceId) : '';
+      const url = `/api/user/analytics?filter=${analyticsFilter}${targetWsId ? `&workspace_id=${targetWsId}` : ''}${user?.id ? `&telegram_id=${user.id}` : ''}`;
+      const data = await safeJsonFetch(url);
+      if (data && data.success) {
+        setAnalyticsStats(data.stats || null);
+        setAnalyticsFiles(data.files || []);
+      }
+    } catch (err: any) {
+      console.warn('Error fetching analytics:', err);
+    } finally {
+      setAnalyticsLoading(false);
+    }
+  };
+
+  const handleExecuteCleanup = async () => {
+    if (!cleanupModalRule) return;
+    setIsCleaningUp(true);
+    setCleanupSuccessNotice(null);
+
+    try {
+      const res = await fetch('/api/user/analytics/cleanup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          telegram_id: user?.id,
+          rule: cleanupModalRule,
+          file_ids: cleanupModalRule === 'custom' ? selectedAnalyticsFileIds : [],
+          delete_from_telegram: true,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Cleanup operation failed.');
+      }
+
+      const result = await res.json();
+      setCleanupSuccessNotice(result.message || `Purged ${result.deletedCount} unaccessed file(s)!`);
+      setSelectedAnalyticsFileIds([]);
+      setCleanupModalRule(null);
+      await fetchAnalytics();
+      await fetchFiles();
+      await fetchStats();
+      setTimeout(() => setCleanupSuccessNotice(null), 6000);
+    } catch (err: any) {
+      alert(err.message || 'Cleanup operation failed.');
+    } finally {
+      setIsCleaningUp(false);
+    }
+  };
+
+  useEffect(() => {
+    if (dashboardTab === 'analytics' && connected) {
+      fetchAnalytics();
+    }
+  }, [dashboardTab, analyticsFilter, activeWorkspaceId, connected]);
 
   const selectStorageDestination = async (chatId: string, title?: string) => {
     try {
@@ -1599,6 +1673,9 @@ export default function App() {
           throw new Error(errJson.error || 'Failed to export session file.');
         }
         exportPayload = await res.json();
+        if (exportPayload?.string_session) {
+          setSessionExportData(exportPayload);
+        }
       }
 
       if (!exportPayload?.string_session) {
@@ -1634,7 +1711,7 @@ export default function App() {
     }
   };
 
-  const handleDownloadRawSession = async () => {
+  const handleDownloadRawSession = async (ext: 'session' | 'txt' = 'session') => {
     try {
       setExportingSession(true);
       let exportPayload = sessionExportData;
@@ -1646,19 +1723,22 @@ export default function App() {
           throw new Error(errJson.error || 'Failed to export session.');
         }
         exportPayload = await res.json();
+        if (exportPayload?.string_session) {
+          setSessionExportData(exportPayload);
+        }
       }
 
       if (!exportPayload?.string_session) {
         throw new Error('No active Telegram session string found to export.');
       }
 
-      const blob = new Blob([exportPayload.string_session.trim()], { type: 'text/plain' });
+      const blob = new Blob([exportPayload.string_session.trim()], { type: 'text/plain;charset=utf-8' });
       const downloadUrl = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = downloadUrl;
       const userIdent = user?.username || user?.first_name || user?.id || 'telecloud';
       const cleanIdent = String(userIdent).replace(/[^a-zA-Z0-9_-]/g, '_');
-      a.download = `telegram_string_${cleanIdent}.session`;
+      a.download = `telegram_session_${cleanIdent}.${ext}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -3471,6 +3551,26 @@ export default function App() {
                       : (darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-600')
                   }`}>
                     {activeWorkspaceFileCount} files
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => { setDashboardTab('analytics'); setMobileSidebarOpen(false); }}
+                  className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition border-b border-dashed cursor-pointer ${
+                    darkMode ? 'border-slate-800/40' : 'border-slate-100'
+                  } ${
+                    dashboardTab === 'analytics'
+                      ? (darkMode ? 'bg-amber-500/10 text-amber-400' : 'bg-amber-50 text-amber-700')
+                      : (darkMode ? 'text-slate-300 hover:bg-slate-800/50 hover:text-white' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900')
+                  }`}
+                >
+                  <div className="flex items-center space-x-3">
+                    <Activity className={`w-4 h-4 text-amber-400 shrink-0`} />
+                    <span>Analytics & Cleanup</span>
+                  </div>
+                  <span className="px-1.5 py-0.5 text-[9px] rounded font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 uppercase">
+                    Auto
                   </span>
                 </button>
 
@@ -5766,7 +5866,419 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 4: MEDIA STREAMER */}
+          {/* TAB 4: FILE SERVE ANALYTICS & STORAGE CLEANUP */}
+          {dashboardTab === 'analytics' && (
+            <div className="space-y-6">
+              {/* Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className={`text-lg font-extrabold flex items-center space-x-2 ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                      <Activity className="w-5 h-5 text-amber-500" />
+                      <span>File Serve Analytics & Storage Cleanup</span>
+                    </h2>
+                    {activeWorkspace && (
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+                        {activeWorkspace.name}
+                      </span>
+                    )}
+                  </div>
+                  <p className={`text-xs mt-0.5 ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Real-time CDN serve counts, access recency metrics, and automated storage purging
+                  </p>
+                </div>
+
+                <button
+                  onClick={fetchAnalytics}
+                  disabled={analyticsLoading}
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold border shadow-xs flex items-center space-x-1.5 transition cursor-pointer ${
+                    darkMode ? 'bg-slate-900 hover:bg-slate-800 text-slate-200 border-slate-800' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200'
+                  }`}
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${analyticsLoading ? 'animate-spin text-amber-500' : ''}`} />
+                  <span>Refresh Metrics</span>
+                </button>
+              </div>
+
+              {/* Cleanup Success Banner */}
+              {cleanupSuccessNotice && (
+                <div className="p-4 bg-emerald-500/10 border border-emerald-500/30 rounded-2xl flex items-center justify-between text-emerald-400 text-xs font-semibold animate-in fade-in">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>{cleanupSuccessNotice}</span>
+                  </div>
+                  <button onClick={() => setCleanupSuccessNotice(null)} className="text-slate-400 hover:text-white">✕</button>
+                </div>
+              )}
+
+              {/* Analytics Metric Cards */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className={`p-4 sm:p-5 rounded-2xl transition-all duration-200 ${cardBg}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-xs font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Total Serves / Streams</span>
+                    <div className="w-8 h-8 rounded-xl bg-amber-500/10 text-amber-400 flex items-center justify-center">
+                      <Flame className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <p className={`text-2xl font-black font-mono tabular-nums ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {analyticsStats?.totalServes || 0}
+                  </p>
+                  <p className="text-[11px] text-slate-400 font-mono mt-1">
+                    across {analyticsStats?.totalFiles || 0} catalog files ({formatBytes(analyticsStats?.totalSizeBytes || 0)})
+                  </p>
+                </div>
+
+                <div className={`p-4 sm:p-5 rounded-2xl transition-all duration-200 ${cardBg}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-xs font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Never Served (0 Serves)</span>
+                    <div className="w-8 h-8 rounded-xl bg-sky-500/10 text-sky-400 flex items-center justify-center">
+                      <FileQuestion className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <p className={`text-2xl font-black font-mono tabular-nums ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {analyticsStats?.neverAccessedCount || 0} <span className="text-xs font-sans text-slate-400 font-normal">files</span>
+                  </p>
+                  <p className="text-[11px] text-sky-400 font-mono mt-1">
+                    Reclaimable: {formatBytes(analyticsStats?.neverAccessedBytes || 0)}
+                  </p>
+                </div>
+
+                <div className={`p-4 sm:p-5 rounded-2xl transition-all duration-200 ${cardBg}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-xs font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Unaccessed &gt; 7 Days</span>
+                    <div className="w-8 h-8 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center">
+                      <Clock className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <p className={`text-2xl font-black font-mono tabular-nums ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {analyticsStats?.unaccessed7DaysCount || 0} <span className="text-xs font-sans text-slate-400 font-normal">files</span>
+                  </p>
+                  <p className="text-[11px] text-amber-400 font-mono mt-1">
+                    Reclaimable: {formatBytes(analyticsStats?.unaccessed7DaysBytes || 0)}
+                  </p>
+                </div>
+
+                <div className={`p-4 sm:p-5 rounded-2xl transition-all duration-200 ${cardBg}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className={`text-xs font-semibold ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Dormant &gt; 30 Days</span>
+                    <div className="w-8 h-8 rounded-xl bg-purple-500/10 text-purple-400 flex items-center justify-center">
+                      <Trash2 className="w-4 h-4" />
+                    </div>
+                  </div>
+                  <p className={`text-2xl font-black font-mono tabular-nums ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {analyticsStats?.unaccessed30DaysCount || 0} <span className="text-xs font-sans text-slate-400 font-normal">files</span>
+                  </p>
+                  <p className="text-[11px] text-purple-400 font-mono mt-1">
+                    Reclaimable: {formatBytes(analyticsStats?.unaccessed30DaysBytes || 0)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Automated Storage Purging Banner */}
+              <div className={`p-5 rounded-3xl border space-y-3 ${darkMode ? 'bg-slate-950/80 border-slate-800' : 'bg-slate-100 border-slate-200'}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-extrabold flex items-center gap-2">
+                      <Trash2 className="w-4 h-4 text-rose-500" />
+                      <span>One-Click Automated Storage Cleanup Rules</span>
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5">
+                      Purge unaccessed or cold files directly from your MySQL catalog and Telegram MTProto cloud
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setCleanupModalRule('not_accessed_7_days')}
+                      disabled={(analyticsStats?.unaccessed7DaysCount || 0) === 0}
+                      className="px-3.5 py-2 rounded-xl text-xs font-extrabold bg-gradient-to-r from-amber-500 to-rose-500 hover:from-amber-400 hover:to-rose-400 text-white shadow-md shadow-rose-500/20 transition cursor-pointer active:scale-95 disabled:opacity-50"
+                    >
+                      Purge Unaccessed (&gt; 7 Days) [{analyticsStats?.unaccessed7DaysCount || 0}]
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setCleanupModalRule('never_accessed')}
+                      disabled={(analyticsStats?.neverAccessedCount || 0) === 0}
+                      className="px-3 py-2 rounded-xl text-xs font-bold border border-sky-500/30 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 transition cursor-pointer disabled:opacity-50"
+                    >
+                      Purge Never Served (0 Serves) [{analyticsStats?.neverAccessedCount || 0}]
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setCleanupModalRule('not_accessed_30_days')}
+                      disabled={(analyticsStats?.unaccessed30DaysCount || 0) === 0}
+                      className="px-3 py-2 rounded-xl text-xs font-bold border border-purple-500/30 bg-purple-500/10 hover:bg-purple-500/20 text-purple-400 transition cursor-pointer disabled:opacity-50"
+                    >
+                      Purge Dormant (&gt; 30 Days) [{analyticsStats?.unaccessed30DaysCount || 0}]
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Filters & Selection Toolbar */}
+              <div className={`p-4 sm:p-5 rounded-3xl space-y-4 ${cardBg}`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-4 border-slate-800/40">
+                  {/* Filter Option Tabs */}
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setAnalyticsFilter('all')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                        analyticsFilter === 'all'
+                          ? 'bg-amber-500 text-slate-950 shadow-xs'
+                          : darkMode ? 'bg-slate-800/60 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      All Files ({analyticsStats?.totalFiles || 0})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAnalyticsFilter('most_accessed')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                        analyticsFilter === 'most_accessed'
+                          ? 'bg-amber-500 text-slate-950 shadow-xs'
+                          : darkMode ? 'bg-slate-800/60 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <Flame className="w-3.5 h-3.5 text-amber-500" />
+                      <span>Most Accessed (Top Served)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAnalyticsFilter('never_accessed')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                        analyticsFilter === 'never_accessed'
+                          ? 'bg-sky-500 text-white shadow-xs'
+                          : darkMode ? 'bg-slate-800/60 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <FileQuestion className="w-3.5 h-3.5 text-sky-400" />
+                      <span>Never Served ({analyticsStats?.neverAccessedCount || 0})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAnalyticsFilter('unaccessed_7_days')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                        analyticsFilter === 'unaccessed_7_days'
+                          ? 'bg-rose-500 text-white shadow-xs'
+                          : darkMode ? 'bg-slate-800/60 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <Clock className="w-3.5 h-3.5 text-rose-400" />
+                      <span>Unaccessed &gt; 7 Days ({analyticsStats?.unaccessed7DaysCount || 0})</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAnalyticsFilter('unaccessed_30_days')}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 cursor-pointer ${
+                        analyticsFilter === 'unaccessed_30_days'
+                          ? 'bg-purple-500 text-white shadow-xs'
+                          : darkMode ? 'bg-slate-800/60 text-slate-400 hover:text-white' : 'bg-slate-100 text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <span>Unaccessed &gt; 30 Days ({analyticsStats?.unaccessed30DaysCount || 0})</span>
+                    </button>
+                  </div>
+
+                  {/* Multi-selection Purge Trigger */}
+                  {selectedAnalyticsFileIds.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setCleanupModalRule('custom')}
+                      className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white transition flex items-center gap-1.5 shadow-md shadow-rose-500/20 cursor-pointer active:scale-95"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Purge Selected ({selectedAnalyticsFileIds.length} Files)</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* File List */}
+                {analyticsFiles.length === 0 ? (
+                  <div className="py-12 text-center space-y-3">
+                    <div className="w-12 h-12 rounded-2xl bg-amber-500/10 text-amber-500 flex items-center justify-center mx-auto">
+                      <Activity className="w-6 h-6" />
+                    </div>
+                    <p className={`text-sm font-bold ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                      No files match the selected analytics filter
+                    </p>
+                    <p className="text-xs text-slate-400">
+                      Try selecting a different filter above or upload new files to your vault.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto scrollbar-thin">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className={`border-b text-[11px] font-mono uppercase tracking-wider ${darkMode ? 'border-slate-800 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
+                          <th className="py-3 px-3 w-10">
+                            <input
+                              type="checkbox"
+                              checked={selectedAnalyticsFileIds.length === analyticsFiles.length && analyticsFiles.length > 0}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedAnalyticsFileIds(analyticsFiles.map((f) => String(f.id)));
+                                } else {
+                                  setSelectedAnalyticsFileIds([]);
+                                }
+                              }}
+                              className="rounded border-slate-700 text-amber-500 focus:ring-amber-500 cursor-pointer"
+                            />
+                          </th>
+                          <th className="py-3 px-3">File Catalog Name</th>
+                          <th className="py-3 px-3">Size & Workspace</th>
+                          <th className="py-3 px-3">Serve Count</th>
+                          <th className="py-3 px-3">Last Access Recency</th>
+                          <th className="py-3 px-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/40">
+                        {analyticsFiles.map((file) => {
+                          const isSelected = selectedAnalyticsFileIds.includes(String(file.id));
+                          return (
+                            <tr
+                              key={file.id || file.message_id}
+                              className={`transition ${
+                                isSelected
+                                  ? (darkMode ? 'bg-rose-950/20' : 'bg-rose-50/50')
+                                  : (darkMode ? 'hover:bg-slate-900/60' : 'hover:bg-slate-50')
+                              }`}
+                            >
+                              <td className="py-3 px-3">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={(e) => {
+                                    const idStr = String(file.id);
+                                    if (e.target.checked) {
+                                      setSelectedAnalyticsFileIds((prev) => [...prev, idStr]);
+                                    } else {
+                                      setSelectedAnalyticsFileIds((prev) => prev.filter((it) => it !== idStr));
+                                    }
+                                  }}
+                                  className="rounded border-slate-700 text-amber-500 focus:ring-amber-500 cursor-pointer"
+                                />
+                              </td>
+
+                              <td className="py-3 px-3">
+                                <div className="flex items-center space-x-3 min-w-0">
+                                  <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                                    file.access_count > 0 ? 'bg-amber-500/10 text-amber-400' : 'bg-slate-800 text-slate-400'
+                                  }`}>
+                                    {getFileIcon(file.mime_type, file.file_name)}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <p className={`font-bold truncate max-w-xs sm:max-w-md ${darkMode ? 'text-white' : 'text-slate-900'}`} title={file.file_name}>
+                                      {file.file_name}
+                                    </p>
+                                    <p className="text-[10px] font-mono text-slate-400">
+                                      #{file.message_id} • Slug: {file.file_slug || 'N/A'}
+                                    </p>
+                                  </div>
+                                </div>
+                              </td>
+
+                              <td className="py-3 px-3 font-mono">
+                                <div>{formatBytes(file.file_size)}</div>
+                                <span className="text-[10px] text-amber-400">
+                                  {file.workspace_name || 'Default'}
+                                </span>
+                              </td>
+
+                              <td className="py-3 px-3 font-mono">
+                                {file.access_count > 0 ? (
+                                  <span className="px-2 py-1 rounded-lg text-[11px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 flex items-center gap-1 w-fit">
+                                    <Flame className="w-3 h-3 text-amber-500" />
+                                    <span>{file.access_count} {file.access_count === 1 ? 'serve' : 'serves'}</span>
+                                  </span>
+                                ) : (
+                                  <span className="px-2 py-1 rounded-lg text-[11px] font-bold bg-slate-800 text-slate-400 border border-slate-700 flex items-center gap-1 w-fit">
+                                    <FileQuestion className="w-3 h-3" />
+                                    <span>0 serves (Never)</span>
+                                  </span>
+                                )}
+                              </td>
+
+                              <td className="py-3 px-3 font-mono text-[11px]">
+                                {file.last_accessed_at ? (
+                                  <div className="space-y-0.5">
+                                    <span className="text-slate-200 font-bold block">
+                                      {file.days_since_last_access === 0 ? 'Today' : `${file.days_since_last_access} days ago`}
+                                    </span>
+                                    <span className="text-slate-500 text-[10px]">
+                                      {new Date(file.last_accessed_at).toLocaleDateString()}
+                                    </span>
+                                  </div>
+                                ) : (
+                                  <div className="space-y-0.5">
+                                    <span className="text-sky-400 font-bold block">Never accessed</span>
+                                    <span className="text-slate-500 text-[10px]">
+                                      Uploaded {file.days_since_last_access} days ago
+                                    </span>
+                                  </div>
+                                )}
+                              </td>
+
+                              <td className="py-3 px-3 text-right">
+                                <div className="flex items-center justify-end space-x-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => copyToClipboard(file.direct_link, `anal-${file.id}`)}
+                                    className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                                      copiedId === `anal-${file.id}`
+                                        ? 'bg-emerald-600 text-white'
+                                        : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700'
+                                    }`}
+                                  >
+                                    {copiedId === `anal-${file.id}` ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                    <span>{copiedId === `anal-${file.id}` ? 'Copied' : 'Link'}</span>
+                                  </button>
+
+                                  <a
+                                    href={file.direct_link}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
+                                    title="Open / Stream File"
+                                  >
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                  </a>
+
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      if (!confirm(`Are you sure you want to permanently delete "${file.file_name}"?`)) return;
+                                      try {
+                                        await safeJsonFetch(`/api/admin/files/${file.id}`, { method: 'DELETE' });
+                                        fetchAnalytics();
+                                        fetchFiles();
+                                        fetchStats();
+                                      } catch (e: any) {
+                                        alert(e.message || 'Failed to delete file');
+                                      }
+                                    }}
+                                    className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 transition cursor-pointer"
+                                    title="Delete file"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB 5: MEDIA STREAMER */}
           {dashboardTab === 'streamer' && (
             <div className="space-y-6">
               <div className={`p-6 rounded-3xl transition-colors duration-200 ${cardBg}`}>
@@ -7537,8 +8049,121 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
 
       {/* RENDER SESSION BACKUP / EXPORT MODAL */}
       {renderSessionExportModal()}
+
+      {/* RENDER CLEANUP & PURGE CONFIRMATION MODAL */}
+      {renderCleanupModal()}
     </div>
   );
+
+  function renderCleanupModal() {
+    if (!cleanupModalRule) return null;
+
+    let targetCount = 0;
+    let targetBytes = 0;
+    let ruleTitle = '';
+    let ruleDescription = '';
+
+    if (cleanupModalRule === 'custom') {
+      targetCount = selectedAnalyticsFileIds.length;
+      const targetSet = new Set(selectedAnalyticsFileIds);
+      const selectedFiles = analyticsFiles.filter((f) => targetSet.has(String(f.id)) || targetSet.has(String(f.message_id)));
+      targetBytes = selectedFiles.reduce((sum, f) => sum + (Number(f.file_size) || 0), 0);
+      ruleTitle = `Purge Selected Files (${targetCount})`;
+      ruleDescription = `You have selected ${targetCount} file(s) for permanent removal from your catalog and Telegram chat.`;
+    } else if (cleanupModalRule === 'not_accessed_7_days') {
+      targetCount = analyticsStats?.unaccessed7DaysCount || 0;
+      targetBytes = analyticsStats?.unaccessed7DaysBytes || 0;
+      ruleTitle = 'Purge Unaccessed Files (> 7 Days)';
+      ruleDescription = 'Permanently delete files that have not been served or accessed in the last 7 days (or never served).';
+    } else if (cleanupModalRule === 'not_accessed_30_days') {
+      targetCount = analyticsStats?.unaccessed30DaysCount || 0;
+      targetBytes = analyticsStats?.unaccessed30DaysBytes || 0;
+      ruleTitle = 'Purge Dormant Files (> 30 Days)';
+      ruleDescription = 'Permanently delete old dormant files that have not been accessed in over 30 days.';
+    } else if (cleanupModalRule === 'never_accessed') {
+      targetCount = analyticsStats?.neverAccessedCount || 0;
+      targetBytes = analyticsStats?.neverAccessedBytes || 0;
+      ruleTitle = 'Purge Never Accessed Files (Since Start)';
+      ruleDescription = 'Permanently delete files that have 0 total serves since upload.';
+    }
+
+    return (
+      <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-md flex items-center justify-center p-4">
+        <div className={`rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-5 border transition-colors ${
+          darkMode ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+        }`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-500 flex items-center justify-center">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold">{ruleTitle}</h3>
+                <p className="text-xs text-slate-400">Automated Storage Reclaim</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setCleanupModalRule(null)}
+              className={`p-2 rounded-xl transition cursor-pointer ${
+                darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-400' : 'bg-slate-100 hover:bg-slate-200 text-slate-500'
+              }`}
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className={`p-4 rounded-2xl border space-y-3 ${
+            darkMode ? 'bg-slate-950/60 border-slate-800 text-xs' : 'bg-slate-50 border-slate-200 text-xs'
+          }`}>
+            <p className="text-slate-300 leading-relaxed">{ruleDescription}</p>
+            <div className="pt-2 border-t border-slate-800 flex justify-between items-center font-mono">
+              <span className="text-slate-400">Files to be purged:</span>
+              <span className="font-bold text-rose-400 text-sm">{targetCount} files</span>
+            </div>
+            <div className="flex justify-between items-center font-mono">
+              <span className="text-slate-400">Storage space reclaimed:</span>
+              <span className="font-bold text-emerald-400 text-sm">{formatBytes(targetBytes)}</span>
+            </div>
+          </div>
+
+          <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400 text-xs space-y-1">
+            <p className="font-bold flex items-center gap-1.5">
+              <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
+              <span>Warning</span>
+            </p>
+            <p className="text-[11px] leading-relaxed">
+              This action will permanently delete these files from your MySQL catalog and Telegram MTProto cloud storage. This cannot be undone.
+            </p>
+          </div>
+
+          <div className="flex items-center space-x-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setCleanupModalRule(null)}
+              className={`flex-1 py-3 rounded-xl font-bold text-xs transition cursor-pointer ${
+                darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+              }`}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleExecuteCleanup}
+              disabled={isCleaningUp || targetCount === 0}
+              className="flex-1 py-3 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-500/20 transition cursor-pointer flex items-center justify-center space-x-2 disabled:opacity-50"
+            >
+              {isCleaningUp ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <Trash2 className="w-4 h-4" />
+              )}
+              <span>{isCleaningUp ? 'Purging...' : 'Confirm Purge'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   function renderSessionExportModal() {
     if (!showSessionExportModal) return null;
@@ -7596,28 +8221,37 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
           </div>
 
           <div className="space-y-2 pt-1">
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => handleDownloadRawSession('session')}
+                disabled={exportingSession}
+                className="py-2.5 px-3 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-extrabold text-xs transition shadow-md shadow-amber-500/20 flex items-center justify-center space-x-1.5 cursor-pointer active:scale-95 disabled:opacity-50"
+              >
+                <Download className="w-4 h-4 text-slate-950 shrink-0" />
+                <span>Download .session</span>
+              </button>
+
+              <button
+                onClick={() => handleDownloadRawSession('txt')}
+                disabled={exportingSession}
+                className={`py-2.5 px-3 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-1.5 cursor-pointer active:scale-95 disabled:opacity-50 ${
+                  darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-slate-100 hover:bg-slate-200 text-slate-800 border-slate-200'
+                }`}
+              >
+                <FileText className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>Download .txt String</span>
+              </button>
+            </div>
+
             <button
               onClick={handleDownloadSessionFile}
               disabled={exportingSession}
-              className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-extrabold text-xs transition shadow-lg shadow-amber-500/20 flex items-center justify-center space-x-2 cursor-pointer active:scale-95 disabled:opacity-50"
-            >
-              {exportingSession ? (
-                <RefreshCw className="w-4 h-4 animate-spin text-slate-950" />
-              ) : (
-                <Download className="w-4 h-4 text-slate-950" />
-              )}
-              <span>Download Full Backup File (.telecloud)</span>
-            </button>
-
-            <button
-              onClick={handleDownloadRawSession}
-              disabled={exportingSession}
               className={`w-full py-2.5 px-4 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer ${
-                darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-slate-50 hover:bg-slate-100 text-slate-800 border-slate-200'
+                darkMode ? 'bg-slate-900 hover:bg-slate-800 text-amber-400 border-amber-500/30' : 'bg-amber-50/80 hover:bg-amber-100 text-amber-900 border-amber-300'
               }`}
             >
-              <FileText className="w-4 h-4 text-sky-400" />
-              <span>Download Raw String (.session / .txt)</span>
+              <ShieldCheck className="w-4 h-4 text-amber-500" />
+              <span>Download Backup File (.telecloud)</span>
             </button>
 
             {sessionExportData?.string_session && (

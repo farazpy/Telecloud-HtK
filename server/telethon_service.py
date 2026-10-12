@@ -48,6 +48,8 @@ from telethon.errors import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.getLogger("telethon").setLevel(logging.ERROR)
+logging.getLogger("telethon.network").setLevel(logging.ERROR)
 logger = logging.getLogger("telethon_storage")
 
 DATA_DIR = Path("./data")
@@ -728,19 +730,44 @@ class TelethonManager:
             return dialogs
 
         try:
-            async for d in self.client.iter_dialogs(limit=30):
-                if d.is_channel or d.is_group:
-                    cid = str(d.id)
-                    dialogs.append({
-                        "id": cid,
-                        "title": d.title,
-                        "type": "channel" if d.is_channel else "group",
-                        "is_self": False,
-                        "badge": "Storage Channel" if d.is_channel else "Group Chat",
-                        "description": f"ID: {cid}"
-                    })
-        except Exception as e:
-            logger.warning(f"Notice fetching dialogs: {e}")
+            # 1. Primary method: get_dialogs with ignore_migrated
+            d_list = await self.client.get_dialogs(limit=40, ignore_migrated=True)
+            for d in d_list:
+                try:
+                    if d.is_channel or d.is_group:
+                        cid = str(d.id)
+                        if not any(item["id"] == cid for item in dialogs):
+                            dialogs.append({
+                                "id": cid,
+                                "title": getattr(d, "name", None) or getattr(d, "title", None) or f"Chat {cid}",
+                                "type": "channel" if d.is_channel else "group",
+                                "is_self": False,
+                                "badge": "Storage Channel" if d.is_channel else "Group Chat",
+                                "description": f"ID: {cid}"
+                            })
+                except Exception:
+                    continue
+        except Exception as e1:
+            logger.debug(f"get_dialogs notice: {e1}")
+            # 2. Fallback method: safe iter_dialogs
+            try:
+                async for d in self.client.iter_dialogs(limit=30, ignore_migrated=True):
+                    try:
+                        if d.is_channel or d.is_group:
+                            cid = str(d.id)
+                            if not any(item["id"] == cid for item in dialogs):
+                                dialogs.append({
+                                    "id": cid,
+                                    "title": getattr(d, "name", None) or getattr(d, "title", None) or f"Chat {cid}",
+                                    "type": "channel" if d.is_channel else "group",
+                                    "is_self": False,
+                                    "badge": "Storage Channel" if d.is_channel else "Group Chat",
+                                    "description": f"ID: {cid}"
+                                })
+                    except Exception:
+                        continue
+            except Exception as e2:
+                logger.debug(f"iter_dialogs notice: {e2}")
 
         return dialogs
 

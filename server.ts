@@ -44,6 +44,9 @@ import {
   getAllAdminFilesFromDb,
   toggleFileRestrictionInDb,
   adminDeleteFileFromDb,
+  recordFileAccess,
+  getFilesAnalyticsFromDb,
+  deleteUnaccessedFilesFromDb,
 } from './server/db.ts';
 
 const app = express();
@@ -697,6 +700,16 @@ app.get(['/api/session/export', '/api/user/session-export'], async (req: Request
         'Keep this file safe and private. You can upload this file to TeleCloud at any time to instantly sign in without receiving an SMS or scanning a QR code.',
     };
 
+    if (req.query.format === 'raw' || req.query.format === 'txt' || req.query.format === 'session' || req.query.download_raw === 'true') {
+      const userIdent = activeUser?.username || activeUser?.first_name || tgId || 'user';
+      const cleanIdent = String(userIdent).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const ext = req.query.format === 'txt' ? 'txt' : 'session';
+      const filename = `telegram_string_${cleanIdent}.${ext}`;
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Type', 'text/plain');
+      return res.send(sessionStr.trim());
+    }
+
     if (req.query.download === '1' || req.query.download === 'true') {
       const userIdent = activeUser?.username || activeUser?.first_name || tgId || 'user';
       const cleanIdent = String(userIdent).replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -1323,6 +1336,87 @@ app.get(['/api/user/files', '/api/v1/files'], async (req: Request, res: Response
     };
   });
   res.json({ files: formattedFiles, total: formattedFiles.length });
+});
+
+// File Serve Analytics & Detailed Performance Metrics
+app.get(['/api/user/analytics', '/api/v1/analytics'], async (req: Request, res: Response) => {
+  try {
+    let tgId = req.query.telegram_id as string;
+    let workspaceId = req.query.workspace_id as string;
+
+    if (!tgId) {
+      const auth = await authenticateApiRequest(req);
+      if (auth.authenticated && auth.user) {
+        tgId = auth.user.telegram_id;
+        if (!workspaceId && (req.query.workspace_id || req.headers['x-workspace-id'])) {
+          workspaceId = String(req.query.workspace_id || req.headers['x-workspace-id']);
+        }
+      }
+    }
+
+    if (!tgId) {
+      const statusRes = await forwardToPython('GET', '/status');
+      tgId = statusRes.data?.user?.id;
+    }
+
+    const filterOption = (req.query.filter as string) || 'all';
+    const data = await getFilesAnalyticsFromDb(tgId || null, workspaceId || null, filterOption);
+    const filesWithLinks = data.files.map((f: any) => ({
+      ...f,
+      direct_link: getShortLink(f.file_slug || f.message_id, req),
+    }));
+
+    return res.json({
+      success: true,
+      stats: data.stats,
+      filter: filterOption,
+      files: filesWithLinks,
+      total: filesWithLinks.length,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Bulk Delete Unaccessed Files (Cleanup Rules: 7 days, 30 days, never accessed, or custom IDs)
+app.post(['/api/user/analytics/cleanup', '/api/v1/analytics/cleanup'], async (req: Request, res: Response) => {
+  try {
+    let tgId = req.body?.telegram_id || (req.query.telegram_id as string);
+    if (!tgId) {
+      const auth = await authenticateApiRequest(req);
+      if (auth.authenticated && auth.user) {
+        tgId = auth.user.telegram_id;
+      }
+    }
+    if (!tgId) {
+      const statusRes = await forwardToPython('GET', '/status');
+      tgId = statusRes.data?.user?.id;
+    }
+
+    const { rule, file_ids, delete_from_telegram } = req.body || {};
+    const cleanupResult = await deleteUnaccessedFilesFromDb(
+      tgId || null,
+      rule || 'not_accessed_7_days',
+      file_ids || []
+    );
+
+    if (delete_from_telegram !== false && cleanupResult.deletedFiles.length > 0) {
+      for (const file of cleanupResult.deletedFiles) {
+        if (file.message_id) {
+          forwardToPython('DELETE', `/files/${file.message_id}`).catch(() => {});
+        }
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: `Successfully purged ${cleanupResult.deletedCount} unaccessed file(s) from your storage catalog!`,
+      deletedCount: cleanupResult.deletedCount,
+      deletedFiles: cleanupResult.deletedFiles,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Fetch & Import historical Telegram files from channel / chat into MySQL database
@@ -2093,6 +2187,10 @@ async function streamCdnFile(
   const mimeType = file?.mime_type || 'application/octet-stream';
   const targetStorageChat = options?.storageChat || file?.storage_chat || '';
   const fileUniqueKey = file?.file_slug || `${targetStorageChat || 'chat'}_${msgId}`;
+
+  if (file && (file.id || file.file_slug || file.message_id)) {
+    recordFileAccess(file.id || file.file_slug || file.message_id).catch(() => {});
+  }
 
   // 2. Enforce Administrator File Restriction Policy
   // If restricted, the file MUST NOT be served through API or opened directly in the browser
