@@ -1952,10 +1952,32 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
       targetWs = await getActiveWorkspaceFromDb(auth.user.telegram_id);
     }
 
-    // Direct MTProto upload to workspace's configured chat destination
-    if (targetWs && targetWs.storage_chat) {
-      await forwardToPython('POST', '/storage', { storage_chat: targetWs.storage_chat });
+    if (!targetWs || !targetWs.id) {
+      fs.unlink(filePath, () => {});
+      res.status(400).json({
+        success: false,
+        error: 'Missing Workspace ID',
+        message: 'workspace_id is required. Please provide workspace_id in form field "workspace_id" or header "x-workspace-id".',
+      });
+      return;
     }
+
+    // Check if a Telegram channel or group is linked to this workspace
+    const linkedChannel = targetWs.storage_chat ? String(targetWs.storage_chat).trim() : '';
+    if (!linkedChannel || linkedChannel === 'none' || linkedChannel === 'unlinked') {
+      fs.unlink(filePath, () => {});
+      res.status(400).json({
+        success: false,
+        error: 'Channel Not Linked',
+        message: `No Telegram channel or group is linked to workspace #${targetWs.id} ("${targetWs.name}"). Please link a Telegram channel or group to this workspace in workspace settings before uploading files.`,
+        workspace_id: targetWs.id,
+        workspace_name: targetWs.name,
+      });
+      return;
+    }
+
+    // Direct MTProto upload destination update to workspace's linked channel
+    await forwardToPython('POST', '/storage', { storage_chat: linkedChannel }).catch(() => {});
 
     const originalName = req.file.originalname;
     const customFileName = req.body.file_name || originalName;
@@ -1974,11 +1996,12 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
       await restoreSessionFromMysql().catch(() => {});
     }
 
-    // 5. Execute MTProto Upload via Telethon Daemon (uses user session, fallback to Admin session)
+    // 5. Execute MTProto Upload via Telethon Daemon directly to workspace's linked channel
     const pyResult = await forwardToPython('POST', '/upload', {
       file_path: filePath,
       file_name: customFileName,
       caption,
+      storage_chat: linkedChannel,
       session_str: sessionStrToUse,
     });
 
@@ -1991,14 +2014,14 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
       res.status(isConnLost ? 401 : pyResult.status).json({
         success: false,
         error: isConnLost ? 'telegram_connectivity_lost' : errMsg,
-        message: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
-        reconnect_required: true,
+        message: 'Telegram connectivity lost or channel permission error. Verify channel link and admin status.',
+        reconnect_required: isConnLost,
       });
       return;
     }
 
     const messageId = pyResult.data.message_id;
-    const telegramChat = pyResult.data.chat_id || targetWs?.storage_chat || 'me';
+    const telegramChat = pyResult.data.chat_id || linkedChannel;
 
     let telegramLink = 'https://t.me/me';
     if (telegramChat && String(telegramChat).startsWith('-100')) {
@@ -2335,6 +2358,13 @@ async function streamCdnFile(
     const ownerSession = await getUserTelegramSessionFromDb(file.telegram_id);
     if (ownerSession && !ownerSession.is_expired && ownerSession.session_status === 'active') {
       userSessionStr = ownerSession.session_str || '';
+    }
+  }
+
+  if (!userSessionStr) {
+    const sysSession = await getTelegramSystemSessionFromDb().catch(() => null);
+    if (sysSession && sysSession.session_str) {
+      userSessionStr = sysSession.session_str;
     }
   }
 

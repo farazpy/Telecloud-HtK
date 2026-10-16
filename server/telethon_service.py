@@ -34,6 +34,7 @@ from telethon.tl.types import (
     DocumentAttributeAudio,
     MessageMediaDocument,
     MessageMediaPhoto,
+    PeerChannel,
 )
 from telethon.errors import (
     SessionPasswordNeededError,
@@ -418,27 +419,62 @@ class TelethonManager:
             return None
 
     async def resolve_entity_for_client(self, client: TelegramClient, target: Any):
-        if not target or target == "me":
+        if not target or str(target).strip().lower() == "me":
             return "me"
+
         target_str = str(target).strip()
+
+        async def _try_fetch(t_val):
+            t_s = str(t_val).strip()
+            if (t_s.startswith("-100") and t_s[4:].isdigit()) or \
+               (t_s.startswith("-") and t_s[1:].isdigit()) or \
+               t_s.isdigit():
+                t_int = int(t_s)
+                try:
+                    return await client.get_input_entity(t_int)
+                except Exception:
+                    try:
+                        return await client.get_entity(t_int)
+                    except Exception:
+                        if t_s.startswith("-100"):
+                            try:
+                                channel_id = int(t_s[4:])
+                                return await client.get_input_entity(PeerChannel(channel_id))
+                            except Exception:
+                                try:
+                                    return await client.get_entity(PeerChannel(channel_id))
+                                except Exception:
+                                    pass
+                        return None
+            try:
+                return await client.get_input_entity(t_s)
+            except Exception:
+                try:
+                    return await client.get_entity(t_s)
+                except Exception:
+                    return None
+
+        # 1. Attempt immediate resolution from local cache
+        resolved = await _try_fetch(target_str)
+        if resolved is not None:
+            return resolved
+
+        # 2. If entity not in cache, fetch user's dialog list to populate Telethon's internal entity DB
+        try:
+            logger.info(f"Populating Telethon entity cache via get_dialogs for target '{target_str}'...")
+            await client.get_dialogs(limit=150)
+            resolved = await _try_fetch(target_str)
+            if resolved is not None:
+                return resolved
+        except Exception as e:
+            logger.warning(f"Notice fetching dialogs for target '{target_str}': {e}")
+
+        # 3. Final fallback: return numeric integer or string
         if (target_str.startswith("-100") and target_str[4:].isdigit()) or \
            (target_str.startswith("-") and target_str[1:].isdigit()) or \
            target_str.isdigit():
-            target_int = int(target_str)
-            try:
-                return await client.get_input_entity(target_int)
-            except Exception:
-                try:
-                    return await client.get_entity(target_int)
-                except Exception:
-                    return target_int
-        try:
-            return await client.get_input_entity(target_str)
-        except Exception:
-            try:
-                return await client.get_entity(target_str)
-            except Exception:
-                return target_str
+            return int(target_str)
+        return target_str
 
     async def send_code_request(self, api_id: int, api_hash: str, phone: str, storage_chat: str = "me"):
         phone_clean = phone.strip().replace(" ", "").replace("-", "").replace("(", "").replace(")", "")
@@ -831,7 +867,7 @@ class TelethonManager:
             logger.error(f"Error resolving target entity '{target}': {e}")
             raise ValueError(f"Could not resolve storage chat entity '{target}'. Verify channel ID or admin access.")
 
-    async def upload_file(self, file_path: str, file_name: str, caption: Optional[str] = None, session_str: Optional[str] = None):
+    async def upload_file(self, file_path: str, file_name: str, caption: Optional[str] = None, session_str: Optional[str] = None, storage_chat: Optional[str] = None):
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found on disk: {file_path}")
 
@@ -857,8 +893,9 @@ class TelethonManager:
             else:
                 raise ValueError("Telegram connectivity lost, login to dashboard and click reconnect button.")
 
-        entity = await self.resolve_entity_for_client(active_client, self.storage_chat)
-        logger.info(f"Uploading '{file_name}' ({file_size} bytes) via {session_type} session to '{self.storage_chat}'...")
+        target_chat = storage_chat or self.storage_chat or "me"
+        entity = await self.resolve_entity_for_client(active_client, target_chat)
+        logger.info(f"Uploading '{file_name}' ({file_size} bytes) via {session_type} session to '{target_chat}'...")
 
         # Progress tracking callback
         uploaded_bytes = 0
@@ -1194,11 +1231,12 @@ async def handle_upload(request: web.Request):
         file_name = data.get("file_name")
         caption = data.get("caption")
         session_str = data.get("session_str") or data.get("user_session")
+        storage_chat = data.get("storage_chat") or data.get("chat_id")
 
         if not file_path or not file_name:
             return web.json_response({"error": "Missing file_path or file_name"}, status=400)
 
-        result = await manager.upload_file(file_path, file_name, caption, session_str=session_str)
+        result = await manager.upload_file(file_path, file_name, caption, session_str=session_str, storage_chat=storage_chat)
         return web.json_response(result)
     except Exception as e:
         logger.exception("Error uploading file")
@@ -1245,21 +1283,31 @@ async def handle_stream_file(request: web.Request):
         entity = None
         msg = None
 
+        # Build list of target chats to try in priority order
+        chats_to_try = []
+        if chat_param and str(chat_param).strip():
+            chats_to_try.append(str(chat_param).strip())
+        if manager.storage_chat and manager.storage_chat not in chats_to_try:
+            chats_to_try.append(manager.storage_chat)
+        if "me" not in chats_to_try:
+            chats_to_try.append("me")
+
         # 1. Try with user's Telegram session if provided
         if user_session and str(user_session).strip():
             try:
                 user_client = await manager.get_client_for_session(user_session)
                 if user_client and await user_client.is_user_authorized():
-                    target_chat = chat_param or manager.storage_chat or "me"
-                    user_entity = await manager.resolve_entity_for_client(user_client, target_chat)
-                    try:
-                        candidate = await user_client.get_messages(user_entity, ids=msg_id)
-                        if candidate and candidate.media:
-                            msg = candidate
-                            active_client = user_client
-                            entity = user_entity
-                    except Exception as ue:
-                        logger.warning(f"User session get_messages notice for #{msg_id}: {ue}")
+                    for target_chat in chats_to_try:
+                        try:
+                            user_entity = await manager.resolve_entity_for_client(user_client, target_chat)
+                            candidate = await user_client.get_messages(user_entity, ids=msg_id)
+                            if candidate and candidate.media:
+                                msg = candidate
+                                active_client = user_client
+                                entity = user_entity
+                                break
+                        except Exception as ue:
+                            logger.warning(f"User session get_messages notice for #{msg_id} in '{target_chat}': {ue}")
             except Exception as e:
                 logger.warning(f"User session stream init error: {e}")
 
@@ -1274,32 +1322,24 @@ async def handle_stream_file(request: web.Request):
 
             if manager.client and manager.is_connected:
                 admin_client = manager.client
-                target_chat = chat_param or manager.storage_chat or "me"
-                admin_entity = await manager.resolve_entity_for_client(admin_client, target_chat)
-                try:
-                    candidate = await admin_client.get_messages(admin_entity, ids=msg_id)
-                    if candidate and candidate.media:
-                        msg = candidate
-                        active_client = admin_client
-                        entity = admin_entity
-                except Exception as ae:
-                    logger.warning(f"Admin session entity notice for #{msg_id}: {ae}")
-
-                # Secondary fallback to 'me' in admin session
-                if (not msg or not msg.media) and target_chat != "me":
+                for target_chat in chats_to_try:
                     try:
-                        candidate = await admin_client.get_messages("me", ids=msg_id)
+                        admin_entity = await manager.resolve_entity_for_client(admin_client, target_chat)
+                        candidate = await admin_client.get_messages(admin_entity, ids=msg_id)
                         if candidate and candidate.media:
                             msg = candidate
                             active_client = admin_client
-                            entity = "me"
-                    except Exception:
-                        pass
+                            entity = admin_entity
+                            break
+                    except Exception as ae:
+                        logger.warning(f"Admin session entity notice for #{msg_id} in '{target_chat}': {ae}")
 
         if not msg or not msg.media or not active_client:
+            is_connected_somewhere = (manager.client and manager.is_connected)
+            err_msg = "File not found in Telegram channel storage or message was deleted." if is_connected_somewhere else "Telegram connectivity lost, login to dashboard and click reconnect button."
             return web.Response(
-                text="Telegram connectivity lost or file not found. Login to dashboard and click reconnect button.",
-                status=404
+                text=err_msg,
+                status=404 if is_connected_somewhere else 503
             )
 
         file_name = "download"
