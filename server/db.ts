@@ -859,7 +859,7 @@ export async function saveFileToDb(fileData: {
   if (!pool || !isDbConnected) {
     loadLocalStore();
     const existingIdx = localStore.user_files.findIndex(
-      (f) => String(f.telegram_id) === tgId && String(f.message_id) === msgId
+      (f) => String(f.telegram_id) === tgId && String(f.storage_chat || 'me') === String(fileData.storage_chat || 'me') && String(f.message_id) === msgId
     );
 
     const record = {
@@ -901,6 +901,10 @@ export async function saveFileToDb(fileData: {
         workspace_name = COALESCE(VALUES(workspace_name), workspace_name),
         file_slug = COALESCE(file_slug, VALUES(file_slug)),
         file_name = VALUES(file_name),
+        original_name = VALUES(original_name),
+        file_size = VALUES(file_size),
+        mime_type = VALUES(mime_type),
+        storage_chat = VALUES(storage_chat),
         caption = VALUES(caption),
         direct_link = VALUES(direct_link),
         download_password = VALUES(download_password),

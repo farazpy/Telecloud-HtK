@@ -51,25 +51,250 @@ from telethon.errors import (
 )
 
 from telethon.tl.alltlobjects import tlobjects
-from telethon.tl.types import User, Dialog, Chat, Channel, PeerChat, NotificationSoundLocal
+from telethon.tl.types import User, Dialog, Chat, Channel, PeerChat, NotificationSoundLocal, Message, MessageMediaDocument
 from telethon.tl.types.messages import ChannelMessages, Messages, MessagesSlice, Dialogs, DialogsSlice
 
-# Register newer Telegram MTProto layer constructor IDs safely without overwriting core MTProto types
+class ChannelLegacy142:
+    CONSTRUCTOR_ID = 0x8261ac61
+    @classmethod
+    def from_reader(cls, reader):
+        flags = reader.read_int()
+        _creator = bool(flags & 1)
+        _left = bool(flags & 4)
+        _broadcast = bool(flags & 32)
+        _verified = bool(flags & 128)
+        _megagroup = bool(flags & 256)
+        _restricted = bool(flags & 512)
+        _signatures = bool(flags & 2048)
+        _min = bool(flags & 4096)
+        _id = reader.read_long()
+        _access_hash = reader.read_long() if (flags & 8192) else None
+        _title = reader.tgread_string()
+        _username = reader.tgread_string() if (flags & 64) else None
+        _photo = reader.tgread_object()
+        _date = reader.tgread_date()
+        _restriction_reason = reader.tgread_vector() if (flags & 512) else []
+        _admin_rights = reader.tgread_object() if (flags & 16384) else None
+        _banned_rights = reader.tgread_object() if (flags & 32768) else None
+        _default_banned_rights = reader.tgread_object() if (flags & 262144) else None
+        _participants_count = reader.read_int() if (flags & 131072) else None
+
+        return Channel(
+            id=_id,
+            title=_title,
+            photo=_photo,
+            date=_date,
+            creator=_creator,
+            left=_left,
+            broadcast=_broadcast,
+            verified=_verified,
+            megagroup=_megagroup,
+            restricted=_restricted,
+            signatures=_signatures,
+            min=_min,
+            access_hash=_access_hash,
+            username=_username,
+            restriction_reason=_restriction_reason,
+            admin_rights=_admin_rights,
+            banned_rights=_banned_rights,
+            default_banned_rights=_default_banned_rights,
+            participants_count=_participants_count
+        )
+
+class MessageMediaDocumentLegacy9cb070d7(MessageMediaDocument):
+    CONSTRUCTOR_ID = 0x9cb070d7
+    SUBCLASS_OF_ID = 0xfe31a949
+
+    @classmethod
+    def from_reader(cls, reader):
+        flags = reader.read_int()
+        _nopremium = bool(flags & 8)
+        _spoiler = bool(flags & 16)
+        if flags & 1:
+            _document = reader.tgread_object()
+        else:
+            _document = None
+        if flags & 4:
+            _ttl_seconds = reader.read_int()
+        else:
+            _ttl_seconds = None
+        return cls(nopremium=_nopremium, spoiler=_spoiler, document=_document, ttl_seconds=_ttl_seconds)
+
+class MessageLegacy38116ee0(Message):
+    CONSTRUCTOR_ID = 0x38116ee0
+    SUBCLASS_OF_ID = 0x7900a013
+
+    @classmethod
+    def from_reader(cls, reader):
+        flags = reader.read_int()
+        _out = bool(flags & 2)
+        _mentioned = bool(flags & 16)
+        _media_unread = bool(flags & 32)
+        _silent = bool(flags & 8192)
+        _post = bool(flags & 16384)
+        _from_scheduled = bool(flags & 262144)
+        _legacy = bool(flags & 524288)
+        _edit_hide = bool(flags & 2097152)
+        _pinned = bool(flags & 16777216)
+        _noforwards = bool(flags & 67108864)
+
+        _id = reader.read_int()
+        if flags & 256:
+            _from_id = reader.tgread_object()
+        else:
+            _from_id = None
+        _peer_id = reader.tgread_object()
+        if flags & 4:
+            _fwd_from = reader.tgread_object()
+        else:
+            _fwd_from = None
+        if flags & 2048:
+            _via_bot_id = reader.read_long()
+        else:
+            _via_bot_id = None
+        if flags & 8:
+            _reply_to = reader.tgread_object()
+        else:
+            _reply_to = None
+        _date = reader.tgread_date()
+        _message = reader.tgread_string()
+        if flags & 512:
+            _media = reader.tgread_object()
+        else:
+            _media = None
+        if flags & 64:
+            _reply_markup = reader.tgread_object()
+        else:
+            _reply_markup = None
+        if flags & 128:
+            reader.read_int()
+            _entities = []
+            for _ in range(reader.read_int()):
+                _x = reader.tgread_object()
+                _entities.append(_x)
+        else:
+            _entities = None
+        if flags & 1024:
+            _views = reader.read_int()
+            _forwards = reader.read_int()
+        else:
+            _views = None
+            _forwards = None
+        if flags & 8388608:
+            _replies = reader.tgread_object()
+        else:
+            _replies = None
+        if flags & 32768:
+            _edit_date = reader.tgread_date()
+        else:
+            _edit_date = None
+        if flags & 65536:
+            _post_author = reader.tgread_string()
+        else:
+            _post_author = None
+        if flags & 131072:
+            _grouped_id = reader.read_long()
+        else:
+            _grouped_id = None
+        if flags & 1048576:
+            _reactions = reader.tgread_object()
+        else:
+            _reactions = None
+        if flags & 4194304:
+            reader.read_int()
+            _restriction_reason = []
+            for _ in range(reader.read_int()):
+                _x = reader.tgread_object()
+                _restriction_reason.append(_x)
+        else:
+            _restriction_reason = None
+        if flags & 33554432:
+            _ttl_period = reader.read_int()
+        else:
+            _ttl_period = None
+
+        return cls(
+            id=_id,
+            peer_id=_peer_id,
+            date=_date,
+            message=_message,
+            out=_out,
+            mentioned=_mentioned,
+            media_unread=_media_unread,
+            silent=_silent,
+            post=_post,
+            from_scheduled=_from_scheduled,
+            legacy=_legacy,
+            edit_hide=_edit_hide,
+            pinned=_pinned,
+            noforwards=_noforwards,
+            from_id=_from_id,
+            fwd_from=_fwd_from,
+            via_bot_id=_via_bot_id,
+            reply_to=_reply_to,
+            media=_media,
+            reply_markup=_reply_markup,
+            entities=_entities,
+            views=_views,
+            forwards=_forwards,
+            replies=_replies,
+            edit_date=_edit_date,
+            post_author=_post_author,
+            grouped_id=_grouped_id,
+            reactions=_reactions,
+            restriction_reason=_restriction_reason,
+            ttl_period=_ttl_period
+        )
+
+class MessagesLegacy8c718e87(Messages):
+    CONSTRUCTOR_ID = 0x8c718e87
+    SUBCLASS_OF_ID = 0xd4b40b5
+
+    @classmethod
+    def from_reader(cls, reader):
+        reader.read_int()
+        _messages = []
+        for _ in range(reader.read_int()):
+            _x = reader.tgread_object()
+            _messages.append(_x)
+        reader.read_int()
+        _chats = []
+        for _ in range(reader.read_int()):
+            _x = reader.tgread_object()
+            _chats.append(_x)
+        reader.read_int()
+        _users = []
+        for _ in range(reader.read_int()):
+            _x = reader.tgread_object()
+            _users.append(_x)
+        return cls(messages=_messages, topics=[], chats=_chats, users=_users)
+
+# Register newer & legacy Telegram MTProto layer constructor IDs safely without overwriting core MTProto types
 NEW_TLOBJECT_MAP = {
     0x3ff6ecb0: User,
     0xa8edd0f5: Dialog,
     0x64479808: ChannelMessages,
     0x03d7e580: ChannelMessages,
+    0x8261ac61: ChannelLegacy142,
+    0x38116ee0: MessageLegacy38116ee0,
+    0x9cb070d7: MessageMediaDocumentLegacy9cb070d7,
+    0x8c718e87: MessagesLegacy8c718e87,
 }
 for _cid, _cls in NEW_TLOBJECT_MAP.items():
-    if _cid not in tlobjects:
-        tlobjects[_cid] = _cls
+    tlobjects[_cid] = _cls
 
 # Explicitly ensure core MTProto constructors are preserved and never overwritten
 tlobjects[0x36c6019a] = PeerChat
 tlobjects[0x830b9ae4] = NotificationSoundLocal
+tlobjects[0x8261ac61] = ChannelLegacy142
+tlobjects[0x38116ee0] = MessageLegacy38116ee0
+tlobjects[0x9cb070d7] = MessageMediaDocumentLegacy9cb070d7
+tlobjects[0x8c718e87] = MessagesLegacy8c718e87
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=[
+    logging.StreamHandler(sys.stderr),
+    logging.FileHandler("/tmp/telethon.log", mode="a")
+])
 logging.getLogger("telethon").setLevel(logging.ERROR)
 logging.getLogger("telethon.network").setLevel(logging.ERROR)
 logger = logging.getLogger("telethon_storage")
@@ -105,6 +330,40 @@ def parse_proxy(proxy_url: Optional[str]):
     except Exception as e:
         logger.warning(f"Error parsing proxy '{proxy_url}': {e}")
         return None
+
+async def safe_disconnect(cl: Optional[TelegramClient]):
+    if not cl:
+        return
+    try:
+        if hasattr(cl, "disconnect"):
+            await cl.disconnect()
+    except Exception:
+        pass
+
+    try:
+        sender = getattr(cl, "_sender", None)
+        if sender:
+            for task_attr in ["_recv_loop", "_send_loop"]:
+                t = getattr(sender, task_attr, None)
+                if t and not t.done():
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+            conn = getattr(sender, "_connection", None)
+            if conn:
+                for task_attr in ["_recv_loop", "_send_loop"]:
+                    t = getattr(conn, task_attr, None)
+                    if t and not t.done():
+                        t.cancel()
+                        try:
+                            await t
+                        except (asyncio.CancelledError, Exception):
+                            pass
+    except Exception:
+        pass
 
 class TelethonManager:
     def __init__(self):
@@ -316,10 +575,15 @@ class TelethonManager:
                 err_str = str(e).lower()
                 logger.error(f"Failed to auto-connect with saved session: {e}")
                 self.is_connected = False
-                if "authorization key" in err_str or "two different ip" in err_str or "authkey" in err_str or "revoked" in err_str:
+                if isinstance(e, AuthKeyDuplicatedError) or "authorization key" in err_str or "two different ip" in err_str or "authkey" in err_str or "revoked" in err_str:
                     logger.warning("Telegram session was invalidated due to concurrent multi-IP usage or key conflict. Resetting stale session...")
                     self.session_str = None
                     self.active_user = None
+                    if self.client:
+                        try:
+                            await self.client.disconnect()
+                        except Exception:
+                            pass
                     self.client = None
                     self.save_config()
 
@@ -358,7 +622,7 @@ class TelethonManager:
             return {"success": True, "user": self.active_user, "session_str": self.session_str}
         except Exception as e:
             logger.error(f"Error connecting bot: {e}")
-            raise e
+            return {"success": False, "error": str(e)}
 
     async def connect_session_string(self, api_id: int, api_hash: str, session_str: str, storage_chat: str = "me"):
         try:
@@ -396,8 +660,20 @@ class TelethonManager:
             self.save_config()
             return {"success": True, "user": self.active_user, "session_str": self.session_str}
         except Exception as e:
+            err_str = str(e).lower()
+            if isinstance(e, AuthKeyDuplicatedError) or "authorization key" in err_str or "two different ip" in err_str or "authkey" in err_str:
+                logger.warning(f"Authorization key conflict on session string: {e}")
+                self.session_str = None
+                self.is_connected = False
+                self.client = None
+                self.save_config()
+                return {
+                    "success": False,
+                    "error": "Session authorization key was invalidated due to simultaneous multi-IP logins. Please login again with QR Code or Phone OTP.",
+                    "is_expired": True
+                }
             logger.error(f"Error connecting session string: {e}")
-            raise e
+            return {"success": False, "error": str(e)}
 
     async def get_client_for_session(self, session_str: Optional[str] = None) -> Optional[TelegramClient]:
         if not session_str or not str(session_str).strip():
@@ -718,6 +994,10 @@ class TelethonManager:
         try:
             if hasattr(self, "qr_task") and self.qr_task and not self.qr_task.done():
                 self.qr_task.cancel()
+                try:
+                    await self.qr_task
+                except (asyncio.CancelledError, Exception):
+                    pass
                 self.qr_task = None
 
             if self.qr_client:
@@ -1432,7 +1712,7 @@ async def handle_stream_file(request: web.Request):
         if "me" not in chats_to_try:
             chats_to_try.append("me")
 
-        logger.info(f"[STREAM REQUEST] msg_id={msg_id}, chats_to_try={chats_to_try}")
+        logger.warning(f"[STREAM REQUEST] msg_id={msg_id}, chats_to_try={chats_to_try}")
         # 1. Try with user's Telegram session if provided
         user_client = None
         if user_session and str(user_session).strip():
@@ -1442,9 +1722,9 @@ async def handle_stream_file(request: web.Request):
                     for target_chat in chats_to_try:
                         try:
                             user_entity = await manager.resolve_entity_for_client(user_client, target_chat)
-                            logger.info(f"[STREAM USER TRY] target_chat={target_chat}, user_entity={user_entity}")
+                            logger.warning(f"[STREAM USER TRY] target_chat={target_chat}, user_entity={user_entity}")
                             candidate = await user_client.get_messages(user_entity, ids=msg_id)
-                            logger.info(f"[STREAM USER CANDIDATE] msg_id={msg_id}, has_candidate={bool(candidate)}, media={type(getattr(candidate, 'media', None)).__name__ if candidate else None}")
+                            logger.warning(f"[STREAM USER CANDIDATE] msg_id={msg_id}, has_candidate={bool(candidate)}, media={type(getattr(candidate, 'media', None)).__name__ if candidate else None}")
                             if candidate and candidate.media:
                                 msg = candidate
                                 active_client = user_client
@@ -1468,9 +1748,9 @@ async def handle_stream_file(request: web.Request):
                 for target_chat in chats_to_try:
                     try:
                         admin_entity = await manager.resolve_entity_for_client(admin_client, target_chat)
-                        logger.info(f"[STREAM ADMIN TRY] target_chat={target_chat}, admin_entity={admin_entity}")
+                        logger.warning(f"[STREAM ADMIN TRY] target_chat={target_chat}, admin_entity={admin_entity}")
                         candidate = await admin_client.get_messages(admin_entity, ids=msg_id)
-                        logger.info(f"[STREAM ADMIN CANDIDATE] msg_id={msg_id}, has_candidate={bool(candidate)}, media={type(getattr(candidate, 'media', None)).__name__ if candidate else None}")
+                        logger.warning(f"[STREAM ADMIN CANDIDATE] msg_id={msg_id}, has_candidate={bool(candidate)}, media={type(getattr(candidate, 'media', None)).__name__ if candidate else None}")
                         if candidate and candidate.media:
                             msg = candidate
                             active_client = admin_client
@@ -1626,17 +1906,27 @@ async def on_startup(app: web.Application):
     await manager.init_saved_client()
 
 async def on_cleanup(app: web.Application):
-    logger.info("Aiohttp server cleanup: closing Telegram client session...")
+    logger.info("Aiohttp server cleanup: closing all active Telegram MTProto client sessions...")
+    if hasattr(manager, "qr_task") and manager.qr_task and not manager.qr_task.done():
+        manager.qr_task.cancel()
+        try:
+            await manager.qr_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        manager.qr_task = None
+
     if manager.client:
-        try:
-            await manager.client.disconnect()
-        except Exception:
-            pass
+        await safe_disconnect(manager.client)
+        manager.client = None
+
     if manager.qr_client:
-        try:
-            await manager.qr_client.disconnect()
-        except Exception:
-            pass
+        await safe_disconnect(manager.qr_client)
+        manager.qr_client = None
+
+    for sess_key, u_cl in list(manager.user_clients.items()):
+        await safe_disconnect(u_cl)
+    manager.user_clients.clear()
+    manager.is_connected = False
 
 def init_app():
     app = web.Application(client_max_size=2000 * 1024 * 1024)

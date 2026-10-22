@@ -272,8 +272,8 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v1.9.2
-  const APP_VERSION = "v1.9.2";
+  // App Version in Header - Incremented to v1.9.6
+  const APP_VERSION = "v1.9.6";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
