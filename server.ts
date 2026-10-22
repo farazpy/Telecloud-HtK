@@ -23,6 +23,7 @@ import {
   deleteWorkspaceInDb,
   setActiveWorkspaceInDb,
   getActiveWorkspaceFromDb,
+  getWorkspaceById,
   getUserByApiKey,
   getUserApiKey,
   regenerateUserApiKey,
@@ -146,6 +147,32 @@ const handleUploadMiddleware = (req: Request, res: Response, next: any) => {
 };
 
 app.use(express.json());
+
+// Enforce MySQL Database Availability: If MySQL fails, directly return database error and do not allow app API operations
+app.use((req: Request, res: Response, next) => {
+  // Allow health & status endpoints so UI and background polling can silently monitor reconnection
+  if (
+    req.path === '/api/db/status' ||
+    req.path === '/api/status' ||
+    req.path === '/api/py/status'
+  ) {
+    return next();
+  }
+
+  if (req.path.startsWith('/api/')) {
+    const dbStatus = getDbStatus();
+    if (!dbStatus.connected) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database Connection Error: Unable to connect to MySQL database.',
+        db_error: true,
+        db_status: dbStatus,
+        message: 'TeleCloud execution is halted because the MySQL database is unreachable. Retrying automatically in background.'
+      });
+    }
+  }
+  next();
+});
 
 // Spawn Python Telethon daemon
 let pyProcess: ChildProcess | null = null;
@@ -2183,13 +2210,12 @@ async function streamCdnFile(
 ): Promise<void> {
   const identifier = String(slugOrId).trim();
 
-  // Set global public CDN CORS & caching headers for direct embedding & streaming
+  // Set global public CDN CORS headers for direct embedding & streaming
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Type, Content-Disposition, ETag');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
   if (req.method === 'OPTIONS') {
     res.status(204).end();
@@ -2203,6 +2229,25 @@ async function streamCdnFile(
   }
   if (!file) {
     file = await getFileByMessageId(identifier);
+  }
+
+  // If file record does not exist and identifier is not a raw numeric message ID, return 404 immediately
+  if (!file && !/^\d+$/.test(identifier)) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const isApiRequest =
+      req.path.startsWith('/api/') ||
+      req.path.startsWith('/stream/') ||
+      (req.headers.accept && req.headers.accept.includes('application/json'));
+
+    if (isApiRequest) {
+      res.status(404).json({
+        success: false,
+        error: 'File not found or message was deleted.',
+      });
+      return;
+    }
+    res.status(404).send('File not found in Telegram channel storage or message was deleted.');
+    return;
   }
 
   const msgId = file ? String(file.message_id) : identifier;
@@ -2315,6 +2360,7 @@ async function streamCdnFile(
         res.setHeader('Accept-Ranges', 'bytes');
         res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
         res.setHeader('ETag', `"${cacheKeySanitized}-${stat.size}"`);
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
         if (range) {
           const parts = range.replace(/bytes=/, '').split('-');
@@ -2368,19 +2414,35 @@ async function streamCdnFile(
     }
   }
 
-  const pyUrl = `${PY_BASE}/stream/${msgId}?storage_chat=${encodeURIComponent(targetStorageChat)}&session_str=${encodeURIComponent(userSessionStr)}`;
+  let workspaceChat = '';
+  if (file && file.workspace_id) {
+    const ws = await getWorkspaceById(Number(file.workspace_id)).catch(() => null);
+    if (ws && ws.storage_chat) {
+      workspaceChat = ws.storage_chat;
+    }
+  }
+
+  const finalStorageChat = targetStorageChat || workspaceChat || '';
+  const finalWorkspaceChat = workspaceChat || targetStorageChat || '';
+
+  const pyUrl = `${PY_BASE}/stream/${msgId}?storage_chat=${encodeURIComponent(finalStorageChat)}&workspace_chat=${encodeURIComponent(finalWorkspaceChat)}`;
   const headers: Record<string, string> = {};
+  if (userSessionStr) {
+    headers['x-telegram-session'] = userSessionStr;
+  }
   if (req.headers.range) {
     headers['Range'] = req.headers.range;
   }
 
   let pyRes: any = null;
+  console.log(`[streamCdnFile] Fetching msgId=${msgId}, pyUrl=${pyUrl}, sessLen=${userSessionStr.length}`);
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       pyRes = await fetch(pyUrl, {
         method: req.method === 'HEAD' ? 'HEAD' : 'GET',
         headers,
       });
+      console.log(`[streamCdnFile] attempt ${attempt} status=${pyRes.status}`);
       if (pyRes.ok || pyRes.status === 206) {
         break;
       }
@@ -2394,6 +2456,7 @@ async function streamCdnFile(
   }
 
   if (!pyRes || (!pyRes.ok && pyRes.status !== 206)) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     const errText = pyRes ? await pyRes.text() : 'Service Unavailable';
     res.status(pyRes ? pyRes.status : 503).send(errText);
     return;
@@ -2411,6 +2474,7 @@ async function streamCdnFile(
   if (contentRange) res.setHeader('Content-Range', contentRange);
   res.setHeader('Accept-Ranges', acceptRanges);
   res.setHeader('Content-Disposition', contentDisposition);
+  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
   if (req.method === 'HEAD' || !pyRes.body) {
     res.end();

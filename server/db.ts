@@ -244,16 +244,39 @@ export async function initDb() {
     console.log(`[MySQL] Connection established successfully with database: ${DB_NAME}`);
   } catch (err: any) {
     isDbConnected = false;
-    dbInitError = err.message;
-    console.warn(`[MySQL Notice] Running with persistent fault-tolerant store (${err.message}). MySQL auto-reconnect scheduled.`);
-    
-    if (!reconnectTimer) {
-      reconnectTimer = setInterval(async () => {
-        if (!isDbConnected) {
-          await initDb().catch(() => {});
-        }
-      }, 10000);
-    }
+    dbInitError = err.message || 'Failed to connect to MySQL database.';
+    console.warn(`[MySQL Error] Database connection failed: ${dbInitError}`);
+  }
+
+  if (!reconnectTimer) {
+    reconnectTimer = setInterval(async () => {
+      await checkDbConnection().catch(() => {});
+    }, 3000);
+  }
+}
+
+export async function checkDbConnection(): Promise<boolean> {
+  if (!pool) {
+    await initDb().catch(() => {});
+    return isDbConnected;
+  }
+  try {
+    const conn = await pool.getConnection();
+    await conn.query('SELECT 1');
+    conn.release();
+    isDbConnected = true;
+    dbInitError = null;
+    return true;
+  } catch (err: any) {
+    isDbConnected = false;
+    dbInitError = err.message || 'MySQL database connection lost.';
+    try {
+      if (pool) {
+        await pool.end().catch(() => {});
+        pool = null;
+      }
+    } catch {}
+    return false;
   }
 }
 
@@ -265,7 +288,7 @@ export function getDbStatus() {
     user: DB_USER,
     database: DB_NAME,
     error: dbInitError,
-    storage_mode: isDbConnected ? 'mysql' : 'resilient_local_store',
+    storage_mode: isDbConnected ? 'mysql' : 'disconnected',
   };
 }
 
@@ -572,6 +595,24 @@ export async function setActiveWorkspaceInDb(
 export async function getActiveWorkspaceFromDb(telegramId: number | string): Promise<WorkspaceRecord | null> {
   const { workspaces, active_workspace_id } = await getWorkspacesFromDb(telegramId);
   return workspaces.find((w) => w.id === active_workspace_id) || workspaces[0] || null;
+}
+
+export async function getWorkspaceById(workspaceId: number): Promise<WorkspaceRecord | null> {
+  if (!isDbConnected || !pool) {
+    const ws = localStore.workspaces.find((w) => Number(w.id) === Number(workspaceId));
+    return ws || null;
+  }
+  try {
+    const [rows]: any = await pool.query('SELECT * FROM workspaces WHERE id = ?', [workspaceId]);
+    if (Array.isArray(rows) && rows.length > 0) {
+      return rows[0] as WorkspaceRecord;
+    }
+    return null;
+  } catch (err: any) {
+    console.warn('[MySQL] getWorkspaceById error:', err.message);
+    const ws = localStore.workspaces.find((w) => Number(w.id) === Number(workspaceId));
+    return ws || null;
+  }
 }
 
 export function generateApiKey(): string {

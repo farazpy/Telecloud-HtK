@@ -35,6 +35,8 @@ from telethon.tl.types import (
     MessageMediaDocument,
     MessageMediaPhoto,
     PeerChannel,
+    InputPeerChannel,
+    Channel,
 )
 from telethon.errors import (
     SessionPasswordNeededError,
@@ -47,6 +49,25 @@ from telethon.errors import (
     AuthKeyDuplicatedError,
     RPCError,
 )
+
+from telethon.tl.alltlobjects import tlobjects
+from telethon.tl.types import User, Dialog, Chat, Channel, PeerChat, NotificationSoundLocal
+from telethon.tl.types.messages import ChannelMessages, Messages, MessagesSlice, Dialogs, DialogsSlice
+
+# Register newer Telegram MTProto layer constructor IDs safely without overwriting core MTProto types
+NEW_TLOBJECT_MAP = {
+    0x3ff6ecb0: User,
+    0xa8edd0f5: Dialog,
+    0x64479808: ChannelMessages,
+    0x03d7e580: ChannelMessages,
+}
+for _cid, _cls in NEW_TLOBJECT_MAP.items():
+    if _cid not in tlobjects:
+        tlobjects[_cid] = _cls
+
+# Explicitly ensure core MTProto constructors are preserved and never overwritten
+tlobjects[0x36c6019a] = PeerChat
+tlobjects[0x830b9ae4] = NotificationSoundLocal
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logging.getLogger("telethon").setLevel(logging.ERROR)
@@ -98,6 +119,18 @@ class TelethonManager:
         self.active_user: Optional[Dict[str, Any]] = None
         self.is_connected = False
         self.user_clients: Dict[str, TelegramClient] = {}
+        # In-memory fast channel peer cache (channel_id -> InputPeerChannel) to prevent slow entity resolution
+        self.channel_peer_map: Dict[str, InputPeerChannel] = {
+            "4375482614": InputPeerChannel(4375482614, 5710112122720099569),
+            "-1004375482614": InputPeerChannel(4375482614, 5710112122720099569),
+            "beyounges3": InputPeerChannel(4375482614, 5710112122720099569),
+            "4412742519": InputPeerChannel(4412742519, -8402166414472808128),
+            "-1004412742519": InputPeerChannel(4412742519, -8402166414472808128),
+            "4416901245": InputPeerChannel(4416901245, -6084948190269295985),
+            "-1004416901245": InputPeerChannel(4416901245, -6084948190269295985),
+            "3975639568": InputPeerChannel(3975639568, -1498371844986489895),
+            "-1003975639568": InputPeerChannel(3975639568, -1498371844986489895),
+        }
 
         # Custom Device Identity & Location/Proxy Configuration
         self.device_model: str = "TeleCloud Vault"
@@ -275,6 +308,7 @@ class TelethonManager:
                         "phone": getattr(me, "phone", "")
                     }
                     logger.info(f"Authorized as: {self.active_user.get('first_name')} (@{self.active_user.get('username')})")
+                    await self.refresh_channel_peer_map()
                 else:
                     self.is_connected = False
                     logger.warning("Saved session is not authorized.")
@@ -373,6 +407,13 @@ class TelethonManager:
             return None
 
         clean_session = str(session_str).strip()
+
+        # Check if requested session matches primary manager session to reuse existing active client
+        if self.session_str and clean_session == str(self.session_str).strip():
+            await self.ensure_connected()
+            if self.client and self.is_connected:
+                return self.client
+
         # Check active client pool
         if clean_session in self.user_clients:
             existing = self.user_clients[clean_session]
@@ -418,14 +459,86 @@ class TelethonManager:
             logger.warning(f"Error connecting user session client: {e}")
             return None
 
+    def cache_channel_entity(self, channel_id: int, access_hash: int, username: Optional[str] = None):
+        ch_id_str = str(channel_id)
+        inp = InputPeerChannel(channel_id, access_hash)
+        self.channel_peer_map[ch_id_str] = inp
+        self.channel_peer_map[f"-100{ch_id_str}"] = inp
+        if username:
+            self.channel_peer_map[username.lower().lstrip('@')] = inp
+
+    async def refresh_channel_peer_map(self, client: Optional[TelegramClient] = None):
+        target_client = client or self.client
+        if not target_client or not target_client.is_connected():
+            return
+        try:
+            # First attempt high-level get_dialogs which handles entity caching safely
+            found_count = 0
+            try:
+                dialogs = await target_client.get_dialogs(limit=100)
+                for d in dialogs:
+                    c = getattr(d, 'entity', None)
+                    if c:
+                        ch_id = getattr(c, 'id', None)
+                        acc_hash = getattr(c, 'access_hash', None)
+                        if ch_id and acc_hash:
+                            self.cache_channel_entity(ch_id, acc_hash, getattr(c, 'username', None))
+                            found_count += 1
+                            if getattr(c, 'title', None):
+                                norm_title = c.title.lower().replace(' ', '')
+                                self.channel_peer_map[norm_title] = InputPeerChannel(ch_id, acc_hash)
+            except Exception:
+                # Fallback to direct GetDialogsRequest if needed
+                from telethon.tl.functions.messages import GetDialogsRequest
+                from telethon.tl.types import InputPeerEmpty
+                res = await target_client(GetDialogsRequest(
+                    offset_date=None,
+                    offset_id=0,
+                    offset_peer=InputPeerEmpty(),
+                    limit=100,
+                    hash=0
+                ))
+                for c in getattr(res, 'chats', []):
+                    ch_id = getattr(c, 'id', None)
+                    acc_hash = getattr(c, 'access_hash', None)
+                    if ch_id and acc_hash:
+                        self.cache_channel_entity(ch_id, acc_hash, getattr(c, 'username', None))
+                        found_count += 1
+                        if getattr(c, 'title', None):
+                            norm_title = c.title.lower().replace(' ', '')
+                            self.channel_peer_map[norm_title] = InputPeerChannel(ch_id, acc_hash)
+            logger.info(f"Refreshed channel peer map ({len(self.channel_peer_map)} mapped channels/peers, {found_count} detected).")
+        except Exception as e:
+            logger.warning(f"Notice refreshing channel peer map: {e}")
+
     async def resolve_entity_for_client(self, client: TelegramClient, target: Any):
         if not target or str(target).strip().lower() == "me":
             return "me"
 
         target_str = str(target).strip()
 
+        # Direct 0ms instant resolution from pre-seeded / in-memory peer map
+        if target_str in self.channel_peer_map:
+            return self.channel_peer_map[target_str]
+        clean_target = target_str[4:] if target_str.startswith("-100") else target_str
+        if clean_target in self.channel_peer_map:
+            return self.channel_peer_map[clean_target]
+        lower_target = target_str.lower().lstrip('@')
+        if lower_target in self.channel_peer_map:
+            return self.channel_peer_map[lower_target]
+
+        # Refresh channel peer map from dialogs if target not in cache yet
+        await self.refresh_channel_peer_map(client)
+        if target_str in self.channel_peer_map:
+            return self.channel_peer_map[target_str]
+        if clean_target in self.channel_peer_map:
+            return self.channel_peer_map[clean_target]
+        if lower_target in self.channel_peer_map:
+            return self.channel_peer_map[lower_target]
+
         async def _try_fetch(t_val):
             t_s = str(t_val).strip()
+            # 1. Try direct numeric ID
             if (t_s.startswith("-100") and t_s[4:].isdigit()) or \
                (t_s.startswith("-") and t_s[1:].isdigit()) or \
                t_s.isdigit():
@@ -436,16 +549,20 @@ class TelethonManager:
                     try:
                         return await client.get_entity(t_int)
                     except Exception:
-                        if t_s.startswith("-100"):
-                            try:
-                                channel_id = int(t_s[4:])
-                                return await client.get_input_entity(PeerChannel(channel_id))
-                            except Exception:
-                                try:
-                                    return await client.get_entity(PeerChannel(channel_id))
-                                except Exception:
-                                    pass
-                        return None
+                        pass
+                
+                # 2. For channels starting with -100, try PeerChannel directly
+                if t_s.startswith("-100") and t_s[4:].isdigit():
+                    try:
+                        channel_id = int(t_s[4:])
+                        return await client.get_input_entity(PeerChannel(channel_id))
+                    except Exception:
+                        try:
+                            return await client.get_entity(PeerChannel(channel_id))
+                        except Exception:
+                            pass
+
+            # 3. Try string username or peer representation
             try:
                 return await client.get_input_entity(t_s)
             except Exception:
@@ -459,15 +576,17 @@ class TelethonManager:
         if resolved is not None:
             return resolved
 
-        # 2. If entity not in cache, fetch user's dialog list to populate Telethon's internal entity DB
+        # 2. If entity not in cache, safely iterate dialogs to populate Telethon's internal entity DB
         try:
-            logger.info(f"Populating Telethon entity cache via get_dialogs for target '{target_str}'...")
-            await client.get_dialogs(limit=150)
+            logger.info(f"Populating Telethon entity cache for target '{target_str}'...")
+            async for d in client.iter_dialogs(limit=50):
+                if str(d.id) == target_str or str(getattr(d.entity, 'id', '')) == target_str:
+                    return d.entity or d.input_entity
             resolved = await _try_fetch(target_str)
             if resolved is not None:
                 return resolved
         except Exception as e:
-            logger.warning(f"Notice fetching dialogs for target '{target_str}': {e}")
+            logger.warning(f"Notice during safe dialog iteration for '{target_str}': {e}")
 
         # 3. Final fallback: return numeric integer or string
         if (target_str.startswith("-100") and target_str[4:].isdigit()) or \
@@ -766,25 +885,37 @@ class TelethonManager:
             return dialogs
 
         try:
-            # 1. Primary method: get_dialogs with ignore_migrated
-            d_list = await self.client.get_dialogs(limit=40, ignore_migrated=True)
-            for d in d_list:
+            # 1. Primary method: GetDialogsRequest direct MTProto RPC
+            from telethon.tl.functions.messages import GetDialogsRequest
+            from telethon.tl.types import InputPeerEmpty
+            res = await self.client(GetDialogsRequest(
+                offset_date=None,
+                offset_id=0,
+                offset_peer=InputPeerEmpty(),
+                limit=100,
+                hash=0
+            ))
+            for c in getattr(res, "chats", []):
                 try:
-                    if d.is_channel or d.is_group:
-                        cid = str(d.id)
-                        if not any(item["id"] == cid for item in dialogs):
-                            dialogs.append({
-                                "id": cid,
-                                "title": getattr(d, "name", None) or getattr(d, "title", None) or f"Chat {cid}",
-                                "type": "channel" if d.is_channel else "group",
-                                "is_self": False,
-                                "badge": "Storage Channel" if d.is_channel else "Group Chat",
-                                "description": f"ID: {cid}"
-                            })
+                    cid = str(getattr(c, "id", ""))
+                    if not cid:
+                        continue
+                    full_cid = f"-100{cid}" if not cid.startswith("-") else cid
+                    title = getattr(c, "title", None) or getattr(c, "name", None) or f"Chat {cid}"
+                    is_ch = getattr(c, "broadcast", False) or getattr(c, "megagroup", False)
+                    if not any(item["id"] == full_cid or item["id"] == cid for item in dialogs):
+                        dialogs.append({
+                            "id": full_cid,
+                            "title": title,
+                            "type": "channel" if is_ch else "group",
+                            "is_self": False,
+                            "badge": "Storage Channel" if is_ch else "Group Chat",
+                            "description": f"ID: {full_cid}"
+                        })
                 except Exception:
                     continue
         except Exception as e1:
-            logger.debug(f"get_dialogs notice: {e1}")
+            logger.debug(f"GetDialogsRequest notice: {e1}")
             # 2. Fallback method: safe iter_dialogs
             try:
                 async for d in self.client.iter_dialogs(limit=30, ignore_migrated=True):
@@ -1275,9 +1406,16 @@ async def handle_delete_file(request: web.Request):
 
 async def handle_stream_file(request: web.Request):
     try:
-        msg_id = int(request.match_info["message_id"])
+        await manager.ensure_connected()
+        try:
+            msg_id = int(request.match_info["message_id"])
+        except (ValueError, TypeError):
+            return web.Response(text="Invalid message ID format for file streaming.", status=400)
+
         chat_param = request.query.get("storage_chat") or request.query.get("chat_id")
-        user_session = request.query.get("session_str") or request.query.get("user_session")
+        workspace_chat = request.query.get("workspace_chat")
+        raw_session = request.headers.get("x-telegram-session") or request.query.get("session_str") or request.query.get("user_session")
+        user_session = raw_session.strip().replace(" ", "+") if raw_session and isinstance(raw_session, str) else None
 
         active_client = None
         entity = None
@@ -1285,14 +1423,18 @@ async def handle_stream_file(request: web.Request):
 
         # Build list of target chats to try in priority order
         chats_to_try = []
-        if chat_param and str(chat_param).strip():
+        if workspace_chat and str(workspace_chat).strip():
+            chats_to_try.append(str(workspace_chat).strip())
+        if chat_param and str(chat_param).strip() and str(chat_param).strip() not in chats_to_try:
             chats_to_try.append(str(chat_param).strip())
         if manager.storage_chat and manager.storage_chat not in chats_to_try:
             chats_to_try.append(manager.storage_chat)
         if "me" not in chats_to_try:
             chats_to_try.append("me")
 
+        logger.info(f"[STREAM REQUEST] msg_id={msg_id}, chats_to_try={chats_to_try}")
         # 1. Try with user's Telegram session if provided
+        user_client = None
         if user_session and str(user_session).strip():
             try:
                 user_client = await manager.get_client_for_session(user_session)
@@ -1300,20 +1442,21 @@ async def handle_stream_file(request: web.Request):
                     for target_chat in chats_to_try:
                         try:
                             user_entity = await manager.resolve_entity_for_client(user_client, target_chat)
+                            logger.info(f"[STREAM USER TRY] target_chat={target_chat}, user_entity={user_entity}")
                             candidate = await user_client.get_messages(user_entity, ids=msg_id)
+                            logger.info(f"[STREAM USER CANDIDATE] msg_id={msg_id}, has_candidate={bool(candidate)}, media={type(getattr(candidate, 'media', None)).__name__ if candidate else None}")
                             if candidate and candidate.media:
                                 msg = candidate
                                 active_client = user_client
                                 entity = user_entity
                                 break
                         except Exception as ue:
-                            logger.warning(f"User session get_messages notice for #{msg_id} in '{target_chat}': {ue}")
+                            logger.warning(f"User session get_messages notice for #{msg_id} in '{target_chat}': {ue}", exc_info=True)
             except Exception as e:
-                logger.warning(f"User session stream init error: {e}")
+                logger.warning(f"User session stream init error: {e}", exc_info=True)
 
         # 2. Fallback to Admin / System Session if user session unavailable or message not found
         if not msg or not msg.media:
-            logger.info(f"Using Admin session fallback for stream message #{msg_id}...")
             for attempt in range(3):
                 await manager.ensure_connected()
                 if manager.client and manager.is_connected:
@@ -1325,18 +1468,51 @@ async def handle_stream_file(request: web.Request):
                 for target_chat in chats_to_try:
                     try:
                         admin_entity = await manager.resolve_entity_for_client(admin_client, target_chat)
+                        logger.info(f"[STREAM ADMIN TRY] target_chat={target_chat}, admin_entity={admin_entity}")
                         candidate = await admin_client.get_messages(admin_entity, ids=msg_id)
+                        logger.info(f"[STREAM ADMIN CANDIDATE] msg_id={msg_id}, has_candidate={bool(candidate)}, media={type(getattr(candidate, 'media', None)).__name__ if candidate else None}")
                         if candidate and candidate.media:
                             msg = candidate
                             active_client = admin_client
                             entity = admin_entity
                             break
                     except Exception as ae:
-                        logger.warning(f"Admin session entity notice for #{msg_id} in '{target_chat}': {ae}")
+                        logger.warning(f"Admin session entity notice for #{msg_id} in '{target_chat}': {ae}", exc_info=True)
+
+        # 3. Deep search across Telegram channel/group dialogs if message not found in specified targets
+        if not msg or not msg.media:
+            search_clients = []
+            if user_client and await user_client.is_user_authorized():
+                search_clients.append(user_client)
+            if manager.client and manager.is_connected and manager.client not in search_clients:
+                search_clients.append(manager.client)
+
+            for cl in search_clients:
+                try:
+                    async for d in cl.iter_dialogs(limit=50):
+                        d_id_str = str(d.id)
+                        if d_id_str not in chats_to_try:
+                            try:
+                                candidate = await cl.get_messages(d.entity, ids=msg_id)
+                                if candidate and candidate.media:
+                                    msg = candidate
+                                    active_client = cl
+                                    entity = d.entity
+                                    logger.info(f"Discovered message #{msg_id} in channel '{d.title}' ({d.id}) via dialog discovery!")
+                                    break
+                            except Exception:
+                                pass
+                        if msg and msg.media:
+                            break
+                except Exception as de:
+                    logger.warning(f"Dialog search notice: {de}")
+                if msg and msg.media:
+                    break
 
         if not msg or not msg.media or not active_client:
-            is_connected_somewhere = (manager.client and manager.is_connected)
+            is_connected_somewhere = (manager.client and manager.is_connected) or (user_client and await user_client.is_user_authorized())
             err_msg = "File not found in Telegram channel storage or message was deleted." if is_connected_somewhere else "Telegram connectivity lost, login to dashboard and click reconnect button."
+            logger.warning(f"[STREAM 404 REASON] msg_id={msg_id}, chats_to_try={chats_to_try}, is_connected={is_connected_somewhere}")
             return web.Response(
                 text=err_msg,
                 status=404 if is_connected_somewhere else 503

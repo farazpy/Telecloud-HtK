@@ -272,8 +272,8 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v1.8.6
-  const APP_VERSION = "v1.8.6";
+  // App Version in Header - Incremented to v1.9.2
+  const APP_VERSION = "v1.9.2";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -448,6 +448,12 @@ export default function App() {
   const [storageChat, setStorageChat] = useState<string>('me');
   const [hasSession, setHasSession] = useState<boolean>(false);
   const [stats, setStats] = useState<StatsData | null>(null);
+
+  // MySQL Database Connection Health & Error State
+  const [dbConnected, setDbConnected] = useState<boolean>(true);
+  const [dbError, setDbError] = useState<string | null>(null);
+  const [dbStatusDetails, setDbStatusDetails] = useState<{ host?: string; port?: number; user?: string; database?: string } | null>(null);
+  const [checkingDb, setCheckingDb] = useState<boolean>(false);
 
   // Multi-Workspace State (Multiple Workspaces connected to Telegram Account in MySQL)
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -842,14 +848,66 @@ export default function App() {
     return activeWorkspace.total_bytes ?? 0;
   }, [activeWorkspace, files, stats]);
 
+  const checkDbStatus = async () => {
+    setCheckingDb(true);
+    try {
+      const res = await fetch('/api/db/status');
+      if (!res.ok) {
+        setDbConnected(false);
+        setDbError(`MySQL database service unreachable (HTTP ${res.status}).`);
+        return false;
+      }
+      const data = await res.json();
+      if (data && data.connected === false) {
+        setDbConnected(false);
+        setDbError(data.error || 'Failed to establish connection to MySQL database.');
+        setDbStatusDetails({
+          host: data.host,
+          port: data.port,
+          user: data.user,
+          database: data.database,
+        });
+        return false;
+      } else {
+        setDbConnected(true);
+        setDbError(null);
+        if (data) {
+          setDbStatusDetails({
+            host: data.host,
+            port: data.port,
+            user: data.user,
+            database: data.database,
+          });
+        }
+        return true;
+      }
+    } catch (err: any) {
+      setDbConnected(false);
+      setDbError(err.message || 'Unable to connect to MySQL database service.');
+      return false;
+    } finally {
+      setCheckingDb(false);
+    }
+  };
+
+  // Initial check on load and silent background polling for MySQL connection
   useEffect(() => {
+    checkDbStatus();
     checkStatus();
     fetchDeviceConfig();
     fetchPublicBranding();
   }, []);
 
   useEffect(() => {
-    if (connected) {
+    const interval = setInterval(() => {
+      checkDbStatus();
+    }, dbConnected ? 15000 : 3000);
+
+    return () => clearInterval(interval);
+  }, [dbConnected]);
+
+  useEffect(() => {
+    if (connected && dbConnected) {
       fetchWorkspaces();
       fetchFiles();
       fetchStats();
@@ -857,7 +915,7 @@ export default function App() {
       fetchUserApiKey();
       fetchDeviceConfig();
     }
-  }, [connected, user]);
+  }, [connected, user, dbConnected]);
 
   const safeJsonFetch = async (url: string, options?: RequestInit) => {
     const res = await fetch(url, options);
@@ -2522,6 +2580,11 @@ export default function App() {
     );
   }
 
+  // GLOBAL DATABASE HALT: If MySQL connection fails, directly show database error message and do NOT let application run at all
+  if (!dbConnected) {
+    return renderDatabaseErrorScreen();
+  }
+
   // =========================================================================
   // VIEW: DEDICATED /admin SYSTEM CONTROL PANEL (Protected by PIN 9890)
   // =========================================================================
@@ -2569,6 +2632,10 @@ export default function App() {
         a: "Absolutely. All communication between your browser, your VPS, and Telegram's data centers is fully encrypted using Telegram's enterprise-grade MTProto cryptosystem. TeleCloud never sees or stores your master credentials; you authenticate securely through native OTP or Bot tokens."
       }
     ];
+
+    if (!dbConnected) {
+      return renderDatabaseErrorScreen();
+    }
 
     return (
       <div className={`min-h-screen flex flex-col font-sans selection:bg-sky-500 selection:text-white relative overflow-x-hidden transition-colors duration-300 ${containerBg}`}>
@@ -8054,6 +8121,90 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
       {renderCleanupModal()}
     </div>
   );
+
+  function renderDatabaseErrorScreen() {
+    return (
+      <div className={`fixed inset-0 z-[100] flex items-center justify-center p-4 backdrop-blur-2xl ${
+        darkMode ? 'bg-slate-950/95 text-slate-100' : 'bg-slate-900/95 text-slate-100'
+      }`}>
+        <div className="max-w-lg w-full p-8 rounded-3xl bg-slate-900/90 border border-rose-500/30 shadow-2xl relative space-y-6 text-center antialiased">
+          {/* Pulsing Warning Icon */}
+          <div className="relative w-20 h-20 mx-auto">
+            <div className="absolute inset-0 rounded-3xl bg-rose-500/20 animate-ping" />
+            <div className="relative w-20 h-20 rounded-3xl bg-rose-950 border-2 border-rose-500/50 flex items-center justify-center text-rose-400 shadow-xl shadow-rose-950/50">
+              <Database className="w-10 h-10 animate-bounce text-rose-400" />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="inline-flex items-center space-x-2 px-3.5 py-1 rounded-full bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-bold uppercase tracking-wider">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>Database Connection Failure</span>
+            </div>
+            <h2 className="text-2xl font-extrabold text-white tracking-tight">
+              MySQL Database Error
+            </h2>
+            <p className="text-xs text-slate-300 leading-relaxed max-w-sm mx-auto">
+              Application execution is halted because the MySQL database is unreachable.
+            </p>
+          </div>
+
+          {/* Database Error Details Card */}
+          <div className="p-4 rounded-2xl bg-slate-950/90 border border-rose-900/40 text-left space-y-3 font-mono text-xs">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2 text-[11px]">
+              <span className="text-slate-400 font-sans font-bold">Error Message:</span>
+              <span className="text-rose-400 font-bold uppercase tracking-wide">Connection Failed</span>
+            </div>
+            <p className="text-rose-300 break-all text-[11px] leading-relaxed bg-rose-950/40 p-2.5 rounded-xl border border-rose-900/30">
+              {dbError || 'Failed to establish connection to target MySQL server.'}
+            </p>
+
+            {dbStatusDetails && (
+              <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-400 pt-1 border-t border-slate-800/80 font-sans">
+                <div>
+                  <span className="text-slate-500 block">Database Host:</span>
+                  <span className="font-mono text-slate-200 font-semibold">{dbStatusDetails.host || '127.0.0.1'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 block">Port:</span>
+                  <span className="font-mono text-slate-200 font-semibold">{dbStatusDetails.port || 3306}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 block">Database Name:</span>
+                  <span className="font-mono text-slate-200 font-semibold">{dbStatusDetails.database || 'telecloud'}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500 block">User:</span>
+                  <span className="font-mono text-slate-200 font-semibold">{dbStatusDetails.user || 'root'}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Silent Background Polling Indicator & Manual Action */}
+          <div className="space-y-3 pt-2">
+            <div className="flex items-center justify-center space-x-2 text-xs text-sky-400 font-medium">
+              <RefreshCw className="w-3.5 h-3.5 animate-spin text-sky-400" />
+              <span>Silently checking MySQL connection in background...</span>
+            </div>
+
+            <button
+              onClick={() => checkDbStatus()}
+              disabled={checkingDb}
+              className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-rose-500 to-rose-600 hover:from-rose-400 hover:to-rose-500 text-white font-extrabold text-xs transition shadow-lg shadow-rose-900/30 flex items-center justify-center space-x-2 cursor-pointer active:scale-95 disabled:opacity-50"
+            >
+              {checkingDb ? (
+                <RefreshCw className="w-4 h-4 animate-spin text-white" />
+              ) : (
+                <Database className="w-4 h-4 text-white" />
+              )}
+              <span>{checkingDb ? 'Testing Connection...' : 'Retry Connection Now'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   function renderCleanupModal() {
     if (!cleanupModalRule) return null;
