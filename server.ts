@@ -154,7 +154,8 @@ app.use((req: Request, res: Response, next) => {
   if (
     req.path === '/api/db/status' ||
     req.path === '/api/status' ||
-    req.path === '/api/py/status'
+    req.path === '/api/py/status' ||
+    req.path.startsWith('/api/app-lock')
   ) {
     return next();
   }
@@ -432,6 +433,61 @@ async function restoreSessionFromMysql(): Promise<boolean> {
 }
 
 // API Routes
+
+// ============================================================================
+// APP LOCK (Web GUI Dashboard PIN Protection configured in .env)
+// Note: Public file streaming (/f/:file_id, /api/download/:messageId, etc.) is NEVER blocked.
+// ============================================================================
+const getDashboardPin = (): string => {
+  return String(process.env.DASHBOARD_PIN || process.env.APP_LOCK_PIN || '1234').trim();
+};
+
+const getDashboardLockSecret = (): string => {
+  const pin = getDashboardPin();
+  return crypto.createHmac('sha256', 'telecloud_dashboard_salt_2026').update(pin).digest('hex');
+};
+
+app.get('/api/app-lock/status', (_req: Request, res: Response) => {
+  return res.json({
+    enabled: true,
+    has_custom_pin: Boolean(process.env.DASHBOARD_PIN || process.env.APP_LOCK_PIN),
+    message: 'Dashboard requires App Lock PIN configured in environment (.env)',
+  });
+});
+
+app.post('/api/app-lock/verify', (req: Request, res: Response) => {
+  const submittedPin = String(req.body?.pin || '').trim();
+  const configuredPin = getDashboardPin();
+
+  if (!submittedPin) {
+    return res.status(400).json({ success: false, error: 'PIN is required to unlock the dashboard.' });
+  }
+
+  if (submittedPin === configuredPin) {
+    const token = getDashboardLockSecret();
+    return res.json({
+      success: true,
+      token,
+      message: 'Dashboard unlocked successfully.',
+    });
+  }
+
+  return res.status(401).json({
+    success: false,
+    error: 'Incorrect PIN. Please enter the valid Dashboard PIN set in .env.',
+  });
+});
+
+app.post('/api/app-lock/verify-token', (req: Request, res: Response) => {
+  const submittedToken = String(req.body?.token || '').trim();
+  const validToken = getDashboardLockSecret();
+
+  if (submittedToken && submittedToken === validToken) {
+    return res.json({ success: true, valid: true });
+  }
+
+  return res.status(401).json({ success: false, valid: false, error: 'Dashboard lock session expired or invalid.' });
+});
 
 app.get('/api/status', async (req: Request, res: Response) => {
   let result = await forwardToPython('GET', '/status');

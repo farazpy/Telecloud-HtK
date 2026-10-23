@@ -72,6 +72,9 @@ import {
   FileQuestion,
   Clock,
   AlertTriangle,
+  Unlock,
+  EyeOff,
+  Shield,
 } from 'lucide-react';
 import { ApiConsolePage } from './components/ApiConsolePage';
 import FeaturesPage from './pages/FeaturesPage';
@@ -272,8 +275,8 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v1.9.6
-  const APP_VERSION = "v1.9.6";
+  // App Version in Header - Incremented to v1.9.7
+  const APP_VERSION = "v1.9.7";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -329,6 +332,92 @@ export default function App() {
     } catch (e) {
       console.warn('Notice loading public branding:', e);
     }
+  };
+
+  // =========================================================================
+  // APP LOCK (Web GUI Dashboard PIN Protection configured in .env)
+  // Blocks access to web GUI dashboard while leaving public file CDN active
+  // =========================================================================
+  const [isAppLocked, setIsAppLocked] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      const sessionToken = sessionStorage.getItem('telecloud_dashboard_pin_unlocked');
+      const localToken = localStorage.getItem('telecloud_dashboard_pin_unlocked');
+      return !(sessionToken || localToken);
+    }
+    return true;
+  });
+  const [appLockPin, setAppLockPin] = useState<string>('');
+  const [appLockError, setAppLockError] = useState<string>('');
+  const [appLockLoading, setAppLockLoading] = useState<boolean>(false);
+  const [showAppLockPin, setShowAppLockPin] = useState<boolean>(false);
+  const [rememberLockSession, setRememberLockSession] = useState<boolean>(true);
+  const [appLockShaking, setAppLockShaking] = useState<boolean>(false);
+
+  useEffect(() => {
+    const token = sessionStorage.getItem('telecloud_dashboard_pin_unlocked') || localStorage.getItem('telecloud_dashboard_pin_unlocked');
+    if (token) {
+      safeJsonFetch('/api/app-lock/verify-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      }).then((res) => {
+        if (!res?.valid) {
+          sessionStorage.removeItem('telecloud_dashboard_pin_unlocked');
+          localStorage.removeItem('telecloud_dashboard_pin_unlocked');
+          setIsAppLocked(true);
+        } else {
+          setIsAppLocked(false);
+        }
+      }).catch(() => {});
+    }
+  }, []);
+
+  const handleUnlockApp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!appLockPin.trim()) {
+      setAppLockError('Please enter your Dashboard PIN.');
+      triggerLockShake();
+      return;
+    }
+    setAppLockLoading(true);
+    setAppLockError('');
+    try {
+      const res = await safeJsonFetch('/api/app-lock/verify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pin: appLockPin.trim() }),
+      });
+      if (res?.success && res.token) {
+        if (rememberLockSession) {
+          localStorage.setItem('telecloud_dashboard_pin_unlocked', res.token);
+        }
+        sessionStorage.setItem('telecloud_dashboard_pin_unlocked', res.token);
+        setIsAppLocked(false);
+        setAppLockPin('');
+        setAppLockError('');
+      } else {
+        setAppLockError(res?.error || 'Incorrect Dashboard PIN. Please try again.');
+        triggerLockShake();
+      }
+    } catch (err: any) {
+      setAppLockError('Failed to verify PIN. Please try again.');
+      triggerLockShake();
+    } finally {
+      setAppLockLoading(false);
+    }
+  };
+
+  const handleLockApp = () => {
+    sessionStorage.removeItem('telecloud_dashboard_pin_unlocked');
+    localStorage.removeItem('telecloud_dashboard_pin_unlocked');
+    setIsAppLocked(true);
+    setAppLockPin('');
+    setAppLockError('');
+  };
+
+  const triggerLockShake = () => {
+    setAppLockShaking(true);
+    setTimeout(() => setAppLockShaking(false), 500);
   };
 
   // Routing State for Public Marketing Pages & Deep Links
@@ -2586,6 +2675,14 @@ export default function App() {
   }
 
   // =========================================================================
+  // APP LOCK (Web GUI Dashboard PIN Protection configured in .env)
+  // If app is locked, block access to the entire web GUI dashboard
+  // =========================================================================
+  if (isAppLocked) {
+    return renderAppLockScreen();
+  }
+
+  // =========================================================================
   // VIEW: DEDICATED /admin SYSTEM CONTROL PANEL (Protected by PIN 9890)
   // =========================================================================
   if (currentRoute === '/admin') {
@@ -2724,6 +2821,19 @@ export default function App() {
 
             {/* Zone 3: Primary Actions */}
             <div className="flex items-center gap-3">
+              <button
+                onClick={handleLockApp}
+                className={`p-2.5 rounded-xl border transition-colors flex items-center space-x-1.5 text-xs font-semibold cursor-pointer ${
+                  darkMode
+                    ? 'bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800 hover:text-white'
+                    : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200 hover:text-slate-950'
+                }`}
+                title="Lock Dashboard (Requires PIN set in .env to unlock)"
+              >
+                <Lock className="w-4 h-4 text-sky-400" />
+                <span className="hidden sm:inline">Lock</span>
+              </button>
+
               <button
                 onClick={toggleDarkMode}
                 className={`p-2.5 rounded-xl border transition-colors ${
@@ -3466,6 +3576,20 @@ export default function App() {
 
         {/* Right Header Status Badges & Profile */}
         <div className="flex items-center space-x-1.5 sm:space-x-2.5">
+          {/* Dashboard Lock Button */}
+          <button
+            onClick={handleLockApp}
+            className={`flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border transition text-xs font-bold cursor-pointer ${
+              darkMode
+                ? 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700 hover:text-white shadow-xs'
+                : 'bg-slate-100/90 text-slate-700 border-slate-200 hover:bg-slate-200/80 hover:text-slate-900 shadow-2xs'
+            }`}
+            title="Lock Dashboard (Requires PIN set in .env to unlock)"
+          >
+            <Lock className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+            <span className="hidden sm:inline">Lock</span>
+          </button>
+
           {/* Theme Toggle Button */}
           <button
             onClick={toggleDarkMode}
@@ -8200,6 +8324,203 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
               )}
               <span>{checkingDb ? 'Testing Connection...' : 'Retry Connection Now'}</span>
             </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderAppLockScreen() {
+    return (
+      <div className={`min-h-screen flex flex-col items-center justify-center p-4 relative overflow-hidden transition-colors duration-300 ${darkMode ? 'bg-slate-950 text-white' : 'bg-slate-50 text-slate-900'}`}>
+        {/* Subtle background glow */}
+        <div className="absolute inset-0 bg-[linear-gradient(to_right,#8080800a_1px,transparent_1px),linear-gradient(to_bottom,#8080800a_1px,transparent_1px)] bg-[size:14px_24px] pointer-events-none" />
+        <div className="fixed inset-0 pointer-events-none overflow-hidden z-0">
+          <div className={`absolute -top-40 -left-40 w-[30rem] h-[30rem] rounded-full blur-[140px] ${darkMode ? 'bg-indigo-950/30' : 'bg-indigo-100/60'}`} />
+          <div className={`absolute -bottom-40 -right-40 w-[30rem] h-[30rem] rounded-full blur-[140px] ${darkMode ? 'bg-sky-950/25' : 'bg-sky-100/50'}`} />
+        </div>
+
+        <div className={`max-w-md w-full rounded-3xl p-6 sm:p-8 relative z-10 shadow-2xl border transition-all duration-300 ${
+          darkMode ? 'bg-slate-900/90 border-slate-800 shadow-indigo-950/50' : 'bg-white/95 border-slate-200 shadow-slate-200/80'
+        } ${appLockShaking ? 'animate-bounce' : ''}`}>
+          
+          {/* Header & Lock Icon */}
+          <div className="text-center space-y-3 mb-6">
+            <div className="inline-flex relative">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-sky-500 via-indigo-500 to-purple-600 flex items-center justify-center text-white shadow-lg shadow-indigo-500/25">
+                <Lock className="w-8 h-8" />
+              </div>
+              <span className="absolute -bottom-1 -right-1 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-500 text-slate-950 border-2 border-slate-900">
+                PIN
+              </span>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-center space-x-2">
+                <h1 className="text-xl sm:text-2xl font-black tracking-tight">
+                  {publicBranding.brand_name || 'TeleCloud Vault'}
+                </h1>
+                <span className="px-2 py-0.5 text-[10px] font-mono font-bold bg-sky-500/10 text-sky-400 border border-sky-500/25 rounded-md">
+                  {APP_VERSION}
+                </span>
+              </div>
+              <p className="text-xs sm:text-sm text-slate-400 mt-1 font-medium">
+                Enter the Dashboard PIN configured in your <span className="font-mono text-sky-400">.env</span> file to access the web GUI.
+              </p>
+            </div>
+
+            <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-full text-[11px] font-semibold bg-sky-500/10 text-sky-400 border border-sky-500/20">
+              <Shield className="w-3.5 h-3.5" />
+              <span>App Lock Active (.env Protected)</span>
+            </div>
+          </div>
+
+          {/* PIN Form */}
+          <form onSubmit={handleUnlockApp} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-400">
+                Security PIN
+              </label>
+              <div className="relative">
+                <input
+                  type={showAppLockPin ? 'text' : 'password'}
+                  inputMode="numeric"
+                  value={appLockPin}
+                  onChange={(e) => {
+                    setAppLockPin(e.target.value);
+                    if (appLockError) setAppLockError('');
+                  }}
+                  placeholder="Enter Dashboard PIN"
+                  autoFocus
+                  className={`w-full px-4 py-3 rounded-2xl font-mono text-lg tracking-widest text-center border transition focus:outline-none focus:ring-2 ${
+                    appLockError
+                      ? 'border-rose-500 focus:ring-rose-500/20 bg-rose-500/5'
+                      : darkMode
+                      ? 'bg-slate-950/70 border-slate-700 focus:border-sky-500 focus:ring-sky-500/20 text-white placeholder-slate-600'
+                      : 'bg-slate-50 border-slate-300 focus:border-sky-500 focus:ring-sky-500/20 text-slate-900 placeholder-slate-400'
+                  }`}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowAppLockPin(!showAppLockPin)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 text-slate-400 hover:text-slate-200 transition"
+                  title={showAppLockPin ? 'Hide PIN' : 'Show PIN'}
+                >
+                  {showAppLockPin ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+              {appLockError && (
+                <p className="text-xs text-rose-500 font-semibold flex items-center justify-center space-x-1 mt-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{appLockError}</span>
+                </p>
+              )}
+            </div>
+
+            {/* Quick Numeric Keypad for fast touch/click entry */}
+            <div className="grid grid-cols-3 gap-2 pt-1">
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
+                <button
+                  key={num}
+                  type="button"
+                  onClick={() => setAppLockPin((prev) => prev + num)}
+                  className={`py-2.5 rounded-xl font-mono font-bold text-base transition active:scale-95 border cursor-pointer ${
+                    darkMode
+                      ? 'bg-slate-800/80 hover:bg-slate-700/80 border-slate-700 text-white'
+                      : 'bg-slate-100 hover:bg-slate-200/80 border-slate-200 text-slate-800'
+                  }`}
+                >
+                  {num}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => setAppLockPin('')}
+                className={`py-2.5 rounded-xl text-xs font-bold transition active:scale-95 border cursor-pointer ${
+                  darkMode
+                    ? 'bg-slate-800/50 hover:bg-slate-800 border-slate-700 text-slate-400 hover:text-white'
+                    : 'bg-slate-100/70 hover:bg-slate-200 border-slate-200 text-slate-500'
+                }`}
+              >
+                Clear
+              </button>
+              <button
+                type="button"
+                onClick={() => setAppLockPin((prev) => prev + '0')}
+                className={`py-2.5 rounded-xl font-mono font-bold text-base transition active:scale-95 border cursor-pointer ${
+                  darkMode
+                    ? 'bg-slate-800/80 hover:bg-slate-700/80 border-slate-700 text-white'
+                    : 'bg-slate-100 hover:bg-slate-200/80 border-slate-200 text-slate-800'
+                }`}
+              >
+                0
+              </button>
+              <button
+                type="button"
+                onClick={() => setAppLockPin((prev) => prev.slice(0, -1))}
+                className={`py-2.5 rounded-xl text-xs font-bold transition active:scale-95 border cursor-pointer ${
+                  darkMode
+                    ? 'bg-slate-800/50 hover:bg-slate-800 border-slate-700 text-slate-400 hover:text-white'
+                    : 'bg-slate-100/70 hover:bg-slate-200 border-slate-200 text-slate-500'
+                }`}
+              >
+                ⌫ Back
+              </button>
+            </div>
+
+            {/* Remember Session Checkbox */}
+            <div className="flex items-center justify-between text-xs pt-1">
+              <label className="flex items-center space-x-2 text-slate-400 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={rememberLockSession}
+                  onChange={(e) => setRememberLockSession(e.target.checked)}
+                  className="rounded border-slate-700 text-sky-500 focus:ring-sky-500"
+                />
+                <span>Remember on this browser</span>
+              </label>
+              <button
+                type="button"
+                onClick={toggleDarkMode}
+                className="text-slate-400 hover:text-slate-200 transition text-[11px] cursor-pointer"
+              >
+                {darkMode ? '☀️ Light' : '🌙 Dark'}
+              </button>
+            </div>
+
+            {/* Unlock Button */}
+            <button
+              type="submit"
+              disabled={appLockLoading || !appLockPin}
+              className={`w-full py-3.5 rounded-2xl font-bold text-sm transition shadow-lg flex items-center justify-center space-x-2 active:scale-98 ${
+                appLockLoading || !appLockPin
+                  ? 'opacity-50 cursor-not-allowed bg-slate-700 text-slate-400'
+                  : 'bg-gradient-to-r from-sky-500 via-indigo-600 to-purple-600 hover:from-sky-400 hover:to-indigo-500 text-white shadow-indigo-500/25 cursor-pointer'
+              }`}
+            >
+              {appLockLoading ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  <span>Verifying PIN...</span>
+                </>
+              ) : (
+                <>
+                  <Unlock className="w-4 h-4" />
+                  <span>Unlock Dashboard</span>
+                </>
+              )}
+            </button>
+          </form>
+
+          {/* Public File Serving Notice */}
+          <div className={`mt-6 pt-4 border-t text-center space-y-1.5 ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+            <p className="text-[11px] text-emerald-400 font-semibold flex items-center justify-center space-x-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>Public File Streaming & CDN Links Active</span>
+            </p>
+            <p className="text-[10px] text-slate-400 leading-relaxed">
+              Direct shortlinks (<span className="font-mono text-slate-300">/f/:slug</span>) and API streaming downloads continue to serve files worldwide without requiring PIN authentication.
+            </p>
           </div>
         </div>
       </div>
