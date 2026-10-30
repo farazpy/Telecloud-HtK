@@ -1209,65 +1209,97 @@ class TelethonManager:
                     "description": "Telegram Channel or Group where bot is Administrator"
                 }]
         except Exception:
-            pass
+            me = None
+
+        me_id = getattr(me, 'id', None)
 
         try:
-            # 1. Primary method: GetDialogsRequest direct MTProto RPC
-            from telethon.tl.functions.messages import GetDialogsRequest
-            from telethon.tl.types import InputPeerEmpty
-            res = await target_client(GetDialogsRequest(
-                offset_date=None,
-                offset_id=0,
-                offset_peer=InputPeerEmpty(),
-                limit=100,
-                hash=0
-            ))
-            for c in getattr(res, "chats", []):
+            # 1. Primary method: Telethon high-level get_dialogs async call
+            raw_dialogs = await target_client.get_dialogs(limit=100)
+            for d in raw_dialogs:
                 try:
-                    cid = str(getattr(c, "id", ""))
-                    if not cid:
+                    c_entity = getattr(d, 'entity', None)
+                    if not c_entity:
                         continue
-                    acc_hash = getattr(c, "access_hash", None)
+
+                    # Skip self/me dialog as it's already first
+                    if d.is_user and (d.is_self or (me_id and getattr(c_entity, 'id', None) == me_id)):
+                        continue
+
+                    raw_id = getattr(c_entity, 'id', None) or d.id
+                    if not raw_id:
+                        continue
+
+                    acc_hash = getattr(c_entity, 'access_hash', None)
                     if acc_hash:
                         try:
-                            self.cache_channel_entity(int(cid), int(acc_hash), getattr(c, "username", None))
+                            self.cache_channel_entity(int(raw_id), int(acc_hash), getattr(c_entity, 'username', None))
                         except Exception:
                             pass
-                    full_cid = f"-100{cid}" if not cid.startswith("-") else cid
-                    title = getattr(c, "title", None) or getattr(c, "name", None) or f"Chat {cid}"
-                    is_ch = getattr(c, "broadcast", False) or getattr(c, "megagroup", False)
-                    if not any(item["id"] == full_cid or item["id"] == cid for item in dialogs):
+
+                    title = getattr(c_entity, 'title', None) or getattr(c_entity, 'first_name', None) or getattr(d, 'name', None) or f"Chat {raw_id}"
+                    if getattr(c_entity, 'last_name', None):
+                        title = f"{title} {c_entity.last_name}".strip()
+
+                    is_channel = getattr(d, 'is_channel', False) or isinstance(c_entity, Channel)
+                    is_group = getattr(d, 'is_group', False) or getattr(c_entity, 'megagroup', False) or isinstance(c_entity, Chat)
+                    is_user = getattr(d, 'is_user', False) or isinstance(c_entity, User)
+
+                    # Determine formatted string ID for Telegram API calls
+                    if is_channel:
+                        cid = str(d.id) if str(d.id).startswith("-100") else f"-100{raw_id}"
+                    elif is_group:
+                        cid = str(d.id) if str(d.id).startswith("-") else f"-{raw_id}"
+                    else:
+                        cid = str(raw_id)
+
+                    chat_type = "channel" if is_channel else ("group" if is_group else "user")
+                    badge = "Storage Channel" if is_channel else ("Group Chat" if is_group else "Private Chat")
+                    if is_channel and getattr(c_entity, 'megagroup', False):
+                        badge = "Supergroup"
+                        chat_type = "group"
+
+                    if not any(item["id"] == cid or item["id"] == str(raw_id) for item in dialogs):
                         dialogs.append({
-                            "id": full_cid,
+                            "id": cid,
                             "title": title,
-                            "type": "channel" if is_ch else "group",
+                            "type": chat_type,
                             "is_self": False,
-                            "badge": "Storage Channel" if is_ch else "Group Chat",
-                            "description": f"ID: {full_cid}"
+                            "badge": badge,
+                            "description": f"ID: {cid}"
                         })
-                except Exception:
-                    continue
+                except Exception as de:
+                    logger.debug(f"Error parsing dialog item: {de}")
         except Exception as e1:
-            logger.debug(f"GetDialogsRequest notice: {e1}")
-            # 2. Fallback method: safe iter_dialogs
+            logger.warning(f"get_dialogs primary call notice: {e1}")
             try:
-                async for d in target_client.iter_dialogs(limit=30, ignore_migrated=True):
+                async for d in target_client.iter_dialogs(limit=50):
                     try:
-                        if d.is_channel or d.is_group:
-                            cid = str(d.id)
-                            if not any(item["id"] == cid for item in dialogs):
-                                dialogs.append({
-                                    "id": cid,
-                                    "title": getattr(d, "name", None) or getattr(d, "title", None) or f"Chat {cid}",
-                                    "type": "channel" if d.is_channel else "group",
-                                    "is_self": False,
-                                    "badge": "Storage Channel" if d.is_channel else "Group Chat",
-                                    "description": f"ID: {cid}"
-                                })
+                        c_entity = getattr(d, 'entity', None)
+                        if not c_entity:
+                            continue
+                        if d.is_user and (d.is_self or (me_id and getattr(c_entity, 'id', None) == me_id)):
+                            continue
+                        raw_id = getattr(c_entity, 'id', None) or d.id
+                        cid = str(d.id)
+                        title = getattr(c_entity, 'title', None) or getattr(c_entity, 'first_name', None) or getattr(d, 'name', None) or f"Chat {cid}"
+                        is_ch = d.is_channel
+                        is_gr = d.is_group
+                        chat_type = "channel" if is_ch else ("group" if is_gr else "user")
+                        badge = "Storage Channel" if is_ch else ("Group Chat" if is_gr else "Private Chat")
+                        if not any(item["id"] == cid for item in dialogs):
+                            dialogs.append({
+                                "id": cid,
+                                "title": title,
+                                "type": chat_type,
+                                "is_self": False,
+                                "badge": badge,
+                                "description": f"ID: {cid}"
+                            })
                     except Exception:
                         continue
             except Exception as e2:
-                logger.debug(f"iter_dialogs notice: {e2}")
+                logger.warning(f"iter_dialogs fallback notice: {e2}")
 
         return dialogs
 
@@ -1665,11 +1697,13 @@ async def handle_qr_check(request: web.Request):
 
 async def handle_list_dialogs(request: web.Request):
     try:
-        session_str = request.query.get("session_str") or request.headers.get("x-telegram-session")
-        storage_chat = request.query.get("storage_chat") or manager.storage_chat or "me"
+        data = await request.json() if request.can_read_body else {}
+        session_str = data.get("session_str") or request.query.get("session_str") or request.headers.get("x-telegram-session")
+        storage_chat = data.get("storage_chat") or request.query.get("storage_chat") or manager.storage_chat or "me"
         dialogs = await manager.list_dialogs(session_str=session_str)
         return web.json_response({"dialogs": dialogs, "current": storage_chat})
     except Exception as e:
+        logger.exception("Error in handle_list_dialogs")
         return web.json_response({
             "dialogs": [{"id": "me", "title": "Self (Saved Messages)", "is_self": True, "badge": "Private & Default"}],
             "current": manager.storage_chat or "me"
@@ -2024,6 +2058,7 @@ def init_app():
     app.router.add_post("/api/py/disconnect", handle_disconnect)
     app.router.add_post("/api/py/storage", handle_update_storage)
     app.router.add_get("/api/py/dialogs", handle_list_dialogs)
+    app.router.add_post("/api/py/dialogs", handle_list_dialogs)
     app.router.add_post("/api/py/upload", handle_upload)
     app.router.add_get("/api/py/files", handle_list_files)
     app.router.add_post("/api/py/fetch_history", handle_fetch_history)
