@@ -378,6 +378,7 @@ class TelethonManager:
         self.active_user: Optional[Dict[str, Any]] = None
         self.is_connected = False
         self.user_clients: Dict[str, TelegramClient] = {}
+        self.pending_auths: Dict[str, Dict[str, Any]] = {}
         # In-memory fast channel peer cache (channel_id -> InputPeerChannel) to prevent slow entity resolution
         self.channel_peer_map: Dict[str, InputPeerChannel] = {
             "4375482614": InputPeerChannel(4375482614, 5710112122720099569),
@@ -626,30 +627,20 @@ class TelethonManager:
 
     async def connect_session_string(self, api_id: int, api_hash: str, session_str: str, storage_chat: str = "me"):
         try:
-            if self.client:
-                try:
-                    await self.client.disconnect()
-                except Exception:
-                    pass
-
             try:
                 current_loop = asyncio.get_running_loop()
             except RuntimeError:
                 current_loop = None
 
-            client = self.create_telegram_client(StringSession(session_str), api_id=api_id, api_hash=api_hash, loop=current_loop)
+            clean_sess = session_str.strip()
+            client = self.create_telegram_client(StringSession(clean_sess), api_id=api_id, api_hash=api_hash, loop=current_loop)
             await client.connect()
             if not await client.is_user_authorized():
+                await safe_disconnect(client)
                 raise ValueError("Session string is invalid or expired.")
 
             me = await client.get_me()
-            self.client = client
-            self.api_id = api_id
-            self.api_hash = api_hash
-            self.session_str = session_str
-            self.storage_chat = storage_chat
-            self.is_connected = True
-            self.active_user = {
+            user_info = {
                 "id": me.id,
                 "first_name": getattr(me, "first_name", ""),
                 "last_name": getattr(me, "last_name", ""),
@@ -657,8 +648,20 @@ class TelethonManager:
                 "is_bot": getattr(me, "bot", False),
                 "phone": getattr(me, "phone", "")
             }
-            self.save_config()
-            return {"success": True, "user": self.active_user, "session_str": self.session_str}
+            self.user_clients[clean_sess] = client
+            await self.refresh_channel_peer_map(client)
+
+            if not self.client or not self.is_connected:
+                self.client = client
+                self.api_id = api_id
+                self.api_hash = api_hash
+                self.session_str = clean_sess
+                self.storage_chat = storage_chat
+                self.is_connected = True
+                self.active_user = user_info
+                self.save_config()
+
+            return {"success": True, "user": user_info, "session_str": clean_sess}
         except Exception as e:
             err_str = str(e).lower()
             if isinstance(e, AuthKeyDuplicatedError) or "authorization key" in err_str or "two different ip" in err_str or "authkey" in err_str:
@@ -876,9 +879,11 @@ class TelethonManager:
         if not phone_clean.startswith("+"):
             phone_clean = "+" + phone_clean
 
-        if self.client:
+        # Disconnect any previous pending client for this specific phone number only
+        old_pending = self.pending_auths.pop(phone_clean, None)
+        if old_pending and old_pending.get("client"):
             try:
-                await self.client.disconnect()
+                await safe_disconnect(old_pending["client"])
             except Exception:
                 pass
 
@@ -894,14 +899,19 @@ class TelethonManager:
         try:
             res = await client.send_code_request(phone_clean)
         except PhoneNumberInvalidError:
+            await safe_disconnect(client)
             raise ValueError(f"Invalid phone number format '{phone}'. Please check your country code and digits.") from None
         except PhoneNumberBannedError:
+            await safe_disconnect(client)
             raise ValueError(f"The phone number '{phone}' has been banned by Telegram.") from None
         except FloodWaitError as e:
+            await safe_disconnect(client)
             raise ValueError(f"Telegram rate limit: please wait {e.seconds} seconds before requesting a code again.") from None
         except ApiIdInvalidError:
+            await safe_disconnect(client)
             raise ValueError("Invalid Telegram API ID or API Hash configuration.") from None
         except Exception as first_err:
+            await safe_disconnect(client)
             err_text = str(first_err)
             if "UPDATE_APP_TO_LOGIN" in err_text or "406" in err_text:
                 raise ValueError(
@@ -910,13 +920,20 @@ class TelethonManager:
                 ) from None
             raise first_err from None
 
-        self.client = client
+        pending_sess_str = session.save()
+        self.pending_auths[phone_clean] = {
+            "client": client,
+            "session_str": pending_sess_str,
+            "phone_code_hash": res.phone_code_hash,
+            "api_id": api_id,
+            "api_hash": api_hash,
+            "storage_chat": storage_chat,
+        }
         self.api_id = api_id
         self.api_hash = api_hash
         self.pending_phone = phone_clean
         self.pending_phone_code_hash = res.phone_code_hash
-        self.storage_chat = storage_chat
-        self.phone_session_str = session.save()
+        self.phone_session_str = pending_sess_str
         return {
             "success": True,
             "phone_code_hash": res.phone_code_hash,
@@ -934,47 +951,69 @@ class TelethonManager:
         except RuntimeError:
             current_loop = None
 
-        if not self.client or not self.client.is_connected():
-            if self.phone_session_str and self.api_id and self.api_hash:
-                self.client = self.create_telegram_client(StringSession(self.phone_session_str), loop=current_loop)
-                await self.client.connect()
-            elif self.session_str and self.api_id and self.api_hash:
-                self.client = self.create_telegram_client(StringSession(self.session_str), loop=current_loop)
-                await self.client.connect()
+        pending = self.pending_auths.get(phone_clean)
+        auth_client: Optional[TelegramClient] = pending.get("client") if pending else None
+        p_api_id = (pending.get("api_id") if pending else None) or self.api_id or 27254692
+        p_api_hash = (pending.get("api_hash") if pending else None) or self.api_hash or "9f6f826a62b78378292fd224e943cb65"
+        p_sess_str = (pending.get("session_str") if pending else None) or self.phone_session_str
+
+        if not auth_client or not auth_client.is_connected():
+            if p_sess_str:
+                auth_client = self.create_telegram_client(
+                    StringSession(p_sess_str),
+                    api_id=p_api_id,
+                    api_hash=p_api_hash,
+                    loop=current_loop
+                )
+                await auth_client.connect()
+                if pending is not None:
+                    pending["client"] = auth_client
             else:
-                raise ValueError("No active Telegram connection. Please request verification code first.")
+                raise ValueError("No active verification session for this phone number. Please request a verification code first.")
 
         try:
             if password:
                 # 2FA Step: first attempt password directly if already in 2FA state
                 try:
-                    await self.client.sign_in(password=password)
+                    await auth_client.sign_in(password=password)
                 except Exception:
                     # If not in 2FA state yet, try phone+code then password
                     try:
-                        await self.client.sign_in(phone=phone_clean, code=code_clean, phone_code_hash=phone_code_hash)
+                        await auth_client.sign_in(phone=phone_clean, code=code_clean, phone_code_hash=phone_code_hash)
                     except SessionPasswordNeededError:
-                        await self.client.sign_in(password=password)
+                        await auth_client.sign_in(password=password)
             else:
                 # Code Step:
                 try:
-                    await self.client.sign_in(phone=phone_clean, code=code_clean, phone_code_hash=phone_code_hash)
+                    await auth_client.sign_in(phone=phone_clean, code=code_clean, phone_code_hash=phone_code_hash)
                 except SessionPasswordNeededError:
                     return {"requires_password": True, "message": "Two-factor authentication (2FA) password required."}
 
-            me = await self.client.get_me()
-            self.session_str = self.client.session.save()
-            self.is_connected = True
-            self.active_user = {
+            me = await auth_client.get_me()
+            user_session_str = auth_client.session.save()
+            user_info = {
                 "id": me.id,
                 "first_name": getattr(me, "first_name", ""),
                 "last_name": getattr(me, "last_name", ""),
                 "username": getattr(me, "username", ""),
                 "is_bot": getattr(me, "bot", False),
-                "phone": getattr(me, "phone", "")
+                "phone": getattr(me, "phone", "") or phone_clean
             }
-            self.save_config()
-            return {"success": True, "user": self.active_user, "session_str": self.session_str}
+
+            # Store in isolated per-user client pool
+            self.user_clients[user_session_str] = auth_client
+            self.pending_auths.pop(phone_clean, None)
+            await self.refresh_channel_peer_map(auth_client)
+
+            # Only set global fallback if no primary client is connected yet
+            if not self.client or not self.is_connected:
+                self.client = auth_client
+                self.session_str = user_session_str
+                self.is_connected = True
+                self.active_user = user_info
+                self.save_config()
+
+            return {"success": True, "user": user_info, "session_str": user_session_str}
         except PhoneCodeInvalidError:
             raise ValueError("Invalid verification code. Please check the code in your Telegram app and try again.")
         except PhoneCodeExpiredError:
@@ -1138,19 +1177,13 @@ class TelethonManager:
 
         return {"status": "waiting"}
 
-    async def list_dialogs(self):
-        await self.ensure_connected()
-        is_bot = bool(self.active_user and self.active_user.get("is_bot"))
-
-        if is_bot:
-            return [{
-                "id": self.storage_chat if self.storage_chat != "me" else "custom",
-                "title": f"Bot Storage Channel ({self.storage_chat})",
-                "type": "channel",
-                "is_self": False,
-                "badge": "Bot Channel",
-                "description": "Telegram Channel or Group where bot is Administrator"
-            }]
+    async def list_dialogs(self, session_str: Optional[str] = None):
+        target_client = None
+        if session_str and str(session_str).strip():
+            target_client = await self.get_client_for_session(session_str)
+        if not target_client:
+            await self.ensure_connected()
+            target_client = self.client if self.is_connected else None
 
         dialogs = [{
             "id": "me",
@@ -1161,14 +1194,28 @@ class TelethonManager:
             "description": "Your personal Telegram Saved Messages chat"
         }]
 
-        if not self.client or not self.is_connected:
+        if not target_client:
             return dialogs
+
+        try:
+            me = await target_client.get_me()
+            if getattr(me, "bot", False):
+                return [{
+                    "id": self.storage_chat if self.storage_chat != "me" else "custom",
+                    "title": f"Bot Storage Channel ({self.storage_chat})",
+                    "type": "channel",
+                    "is_self": False,
+                    "badge": "Bot Channel",
+                    "description": "Telegram Channel or Group where bot is Administrator"
+                }]
+        except Exception:
+            pass
 
         try:
             # 1. Primary method: GetDialogsRequest direct MTProto RPC
             from telethon.tl.functions.messages import GetDialogsRequest
             from telethon.tl.types import InputPeerEmpty
-            res = await self.client(GetDialogsRequest(
+            res = await target_client(GetDialogsRequest(
                 offset_date=None,
                 offset_id=0,
                 offset_peer=InputPeerEmpty(),
@@ -1180,6 +1227,12 @@ class TelethonManager:
                     cid = str(getattr(c, "id", ""))
                     if not cid:
                         continue
+                    acc_hash = getattr(c, "access_hash", None)
+                    if acc_hash:
+                        try:
+                            self.cache_channel_entity(int(cid), int(acc_hash), getattr(c, "username", None))
+                        except Exception:
+                            pass
                     full_cid = f"-100{cid}" if not cid.startswith("-") else cid
                     title = getattr(c, "title", None) or getattr(c, "name", None) or f"Chat {cid}"
                     is_ch = getattr(c, "broadcast", False) or getattr(c, "megagroup", False)
@@ -1198,7 +1251,7 @@ class TelethonManager:
             logger.debug(f"GetDialogsRequest notice: {e1}")
             # 2. Fallback method: safe iter_dialogs
             try:
-                async for d in self.client.iter_dialogs(limit=30, ignore_migrated=True):
+                async for d in target_client.iter_dialogs(limit=30, ignore_migrated=True):
                     try:
                         if d.is_channel or d.is_group:
                             cid = str(d.id)
@@ -1412,13 +1465,19 @@ class TelethonManager:
 
         return files
 
-    async def delete_file(self, message_id: int):
-        await self.ensure_connected()
-        if not self.client or not self.is_connected:
+    async def delete_file(self, message_id: int, session_str: Optional[str] = None, storage_chat: Optional[str] = None):
+        target_client = None
+        if session_str and str(session_str).strip():
+            target_client = await self.get_client_for_session(session_str)
+        if not target_client:
+            await self.ensure_connected()
+            target_client = self.client if self.is_connected else None
+        if not target_client:
             raise ValueError("Telegram client not connected")
 
-        entity = await self.get_target_entity()
-        await self.client.delete_messages(entity, [message_id])
+        target_chat = storage_chat or self.storage_chat or "me"
+        entity = await self.resolve_entity_for_client(target_client, target_chat)
+        await target_client.delete_messages(entity, [message_id])
         return {"success": True}
 
 manager = TelethonManager()
@@ -1606,8 +1665,10 @@ async def handle_qr_check(request: web.Request):
 
 async def handle_list_dialogs(request: web.Request):
     try:
-        dialogs = await manager.list_dialogs()
-        return web.json_response({"dialogs": dialogs, "current": manager.storage_chat})
+        session_str = request.query.get("session_str") or request.headers.get("x-telegram-session")
+        storage_chat = request.query.get("storage_chat") or manager.storage_chat or "me"
+        dialogs = await manager.list_dialogs(session_str=session_str)
+        return web.json_response({"dialogs": dialogs, "current": storage_chat})
     except Exception as e:
         return web.json_response({
             "dialogs": [{"id": "me", "title": "Self (Saved Messages)", "is_self": True, "badge": "Private & Default"}],
@@ -1616,6 +1677,13 @@ async def handle_list_dialogs(request: web.Request):
 
 async def handle_disconnect(request: web.Request):
     try:
+        data = await request.json() if request.can_read_body else {}
+        session_str = data.get("session_str")
+        if session_str and str(session_str).strip() in manager.user_clients:
+            cl = manager.user_clients.pop(str(session_str).strip(), None)
+            if cl:
+                await safe_disconnect(cl)
+            return web.json_response({"success": True})
         res = await manager.disconnect()
         return web.json_response(res)
     except Exception as e:
@@ -1625,12 +1693,19 @@ async def handle_update_storage(request: web.Request):
     try:
         data = await request.json()
         storage_chat = str(data.get("storage_chat", "me")).strip()
+        session_str = data.get("session_str")
+        if session_str and str(session_str).strip():
+            user_client = await manager.get_client_for_session(session_str)
+            if user_client:
+                entity = await manager.resolve_entity_for_client(user_client, storage_chat)
+                entity_name = "Saved Messages (me)" if storage_chat == "me" else getattr(entity, "title", getattr(entity, "first_name", storage_chat))
+                return web.json_response({"success": True, "storage_chat": storage_chat, "entity_name": str(entity_name)})
         manager.storage_chat = storage_chat
         manager.save_config()
         if manager.is_connected:
-            entity = await manager.get_target_entity()
+            entity = await manager.get_target_entity(storage_chat)
             entity_name = getattr(entity, "title", getattr(entity, "first_name", storage_chat))
-            return web.json_response({"success": True, "storage_chat": storage_chat, "entity_name": entity_name})
+            return web.json_response({"success": True, "storage_chat": storage_chat, "entity_name": str(entity_name)})
         return web.json_response({"success": True, "storage_chat": storage_chat})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)
@@ -1679,7 +1754,10 @@ async def handle_fetch_history(request: web.Request):
 async def handle_delete_file(request: web.Request):
     try:
         msg_id = int(request.match_info["message_id"])
-        res = await manager.delete_file(msg_id)
+        data = await request.json() if request.can_read_body else {}
+        session_str = data.get("session_str") or request.query.get("session_str") or request.headers.get("x-telegram-session")
+        storage_chat = data.get("storage_chat") or request.query.get("storage_chat")
+        res = await manager.delete_file(msg_id, session_str=session_str, storage_chat=storage_chat)
         return web.json_response(res)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)

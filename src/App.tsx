@@ -275,8 +275,8 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v1.9.7
-  const APP_VERSION = "v1.9.7";
+  // App Version in Header - Incremented to v2.0.0
+  const APP_VERSION = "v2.0.0";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -400,7 +400,7 @@ export default function App() {
         triggerLockShake();
       }
     } catch (err: any) {
-      setAppLockError('Failed to verify PIN. Please try again.');
+      setAppLockError(err?.message || 'Incorrect PIN. Please try again.');
       triggerLockShake();
     } finally {
       setAppLockLoading(false);
@@ -424,7 +424,7 @@ export default function App() {
   const [currentRoute, setCurrentRoute] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       const path = window.location.pathname.toLowerCase();
-      if (['/features', '/benefits', '/architecture', '/streaming-cdn', '/streaming', '/security', '/pricing', '/contact', '/admin'].includes(path)) {
+      if (['/features', '/benefits', '/architecture', '/streaming-cdn', '/streaming', '/security', '/pricing', '/contact', '/admin', '/login', '/register'].includes(path)) {
         return path;
       }
       const hash = window.location.hash.toLowerCase();
@@ -537,6 +537,31 @@ export default function App() {
   const [storageChat, setStorageChat] = useState<string>('me');
   const [hasSession, setHasSession] = useState<boolean>(false);
   const [stats, setStats] = useState<StatsData | null>(null);
+
+  // Multi-Tenant Web Account State (Username & Password Registration / Login)
+  const [webUser, setWebUser] = useState<{
+    id: number;
+    username: string;
+    telegram_id: string | null;
+    storage_chat: string;
+  } | null>(null);
+  const [webAuthMode, setWebAuthMode] = useState<'login' | 'register'>('login');
+  const [webUsernameInput, setWebUsernameInput] = useState<string>('');
+  const [webPasswordInput, setWebPasswordInput] = useState<string>('');
+  const [webConfirmPasswordInput, setWebConfirmPasswordInput] = useState<string>('');
+  const [webAuthError, setWebAuthError] = useState<string | null>(null);
+  const [webAuthLoading, setWebAuthLoading] = useState<boolean>(false);
+  const [storageTargetMode, setStorageTargetMode] = useState<'me' | 'custom'>('me');
+
+  useEffect(() => {
+    if (currentRoute === '/login') {
+      setWebAuthMode('login');
+      setShowAuthModal(true);
+    } else if (currentRoute === '/register') {
+      setWebAuthMode('register');
+      setShowAuthModal(true);
+    }
+  }, [currentRoute]);
 
   // MySQL Database Connection Health & Error State
   const [dbConnected, setDbConnected] = useState<boolean>(true);
@@ -763,8 +788,8 @@ export default function App() {
   const [testingConnection, setTestingConnection] = useState<boolean>(false);
   const [testConnectionResult, setTestConnectionResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // Settings / Connect form
-  const [authMode, setAuthMode] = useState<'qr' | 'phone' | 'bot' | 'session'>('qr');
+  // Settings / Connect form (Defaults to Live Phone Number & Telegram OTP)
+  const [authMode, setAuthMode] = useState<'qr' | 'phone' | 'bot' | 'session'>('phone');
   const [apiId, setApiId] = useState<string>('');
   const [apiHash, setApiHash] = useState<string>('');
   const [botToken, setBotToken] = useState<string>('');
@@ -996,7 +1021,7 @@ export default function App() {
   }, [dbConnected]);
 
   useEffect(() => {
-    if (connected && dbConnected) {
+    if ((connected || webUser) && dbConnected) {
       fetchWorkspaces();
       fetchFiles();
       fetchStats();
@@ -1004,10 +1029,21 @@ export default function App() {
       fetchUserApiKey();
       fetchDeviceConfig();
     }
-  }, [connected, user, dbConnected]);
+  }, [connected, user, webUser, dbConnected]);
 
   const safeJsonFetch = async (url: string, options?: RequestInit) => {
-    const res = await fetch(url, options);
+    const webToken = typeof window !== 'undefined' ? (localStorage.getItem('telecloud_web_token') || '') : '';
+    const mergedHeaders: Record<string, string> = {
+      ...(options?.headers as Record<string, string> || {}),
+    };
+    if (webToken && !mergedHeaders['x-auth-token']) {
+      mergedHeaders['x-auth-token'] = webToken;
+    }
+
+    const res = await fetch(url, {
+      ...options,
+      headers: mergedHeaders,
+    });
     const text = await res.text();
     let data: any = null;
     const isJson = (res.headers.get('content-type') || '').includes('application/json') ||
@@ -1038,20 +1074,30 @@ export default function App() {
   const checkStatus = async () => {
     setLoadingStatus(true);
     try {
-      const storedTgId = localStorage.getItem('telecloud_user_tg_id') || '';
-      const data = await safeJsonFetch(`/api/status${storedTgId ? `?telegram_id=${storedTgId}` : ''}`);
+      const data = await safeJsonFetch('/api/status');
       const isConn = Boolean(data?.connected);
       const isConnLost = Boolean(data?.connectivity_lost || data?.reconnect_required);
       setConnected(isConn);
       setConnectivityLost(isConnLost);
+      if (data?.web_user) {
+        setWebUser(data.web_user);
+      } else {
+        setWebUser(null);
+      }
       if (data?.user_session?.expires_at) {
         setSessionExpiresAt(data.user_session.expires_at);
       }
-      if (data?.user) {
+      if (data?.user && isConn) {
         setUser(data.user);
         localStorage.setItem('telecloud_user_tg_id', String(data.user.id));
+      } else {
+        setUser(null);
       }
-      if (data?.storage_chat) setStorageChat(data.storage_chat);
+      if (data?.storage_chat) {
+        setStorageChat(data.storage_chat);
+        setTargetChatInput(data.storage_chat);
+        setStorageTargetMode(data.storage_chat === 'me' ? 'me' : 'custom');
+      }
       setHasSession(Boolean(data?.has_session));
       if (data?.api_id) {
         setApiId(String(data.api_id));
@@ -1064,6 +1110,77 @@ export default function App() {
       console.warn('Status check notice:', e?.message || e);
     } finally {
       setLoadingStatus(false);
+    }
+  };
+
+  const handleWebAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setWebAuthError(null);
+    const cleanUsername = webUsernameInput.trim();
+    if (!cleanUsername || !webPasswordInput) {
+      setWebAuthError('Please enter both username and password.');
+      return;
+    }
+    if (webAuthMode === 'register' && webPasswordInput !== webConfirmPasswordInput) {
+      setWebAuthError('Passwords do not match.');
+      return;
+    }
+
+    setWebAuthLoading(true);
+    try {
+      const endpoint = webAuthMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+      const data = await safeJsonFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: cleanUsername,
+          password: webPasswordInput,
+        }),
+      });
+
+      if (data?.token) {
+        localStorage.setItem('telecloud_web_token', data.token);
+      }
+      if (data?.user) {
+        setWebUser(data.user);
+      }
+      setWebPasswordInput('');
+      setWebConfirmPasswordInput('');
+      await checkStatus();
+      if (currentRoute === '/login' || currentRoute === '/register') {
+        navigate('/');
+      }
+      // If user already has an active Telegram account linked, close modal; otherwise keep modal open on Step 2 (Phone OTP)
+      const statusAfter = await safeJsonFetch('/api/status');
+      if (statusAfter?.connected) {
+        setShowAuthModal(false);
+        setDashboardTab('overview');
+      } else {
+        setAuthMode('phone');
+        setShowAuthModal(true);
+      }
+    } catch (err: any) {
+      setWebAuthError(err.message || 'Authentication failed.');
+    } finally {
+      setWebAuthLoading(false);
+    }
+  };
+
+  const handleWebLogout = async () => {
+    try {
+      await safeJsonFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    } finally {
+      localStorage.removeItem('telecloud_web_token');
+      localStorage.removeItem('telecloud_user_tg_id');
+      setWebUser(null);
+      setConnected(false);
+      setUser(null);
+      setFiles([]);
+      setWorkspaces([]);
+      setActiveWorkspace(null);
+      setPhoneCodeHash(null);
+      setAuthCode('');
+      navigate('/');
     }
   };
 
@@ -1913,12 +2030,14 @@ export default function App() {
   };
 
   const handleDisconnect = async () => {
-    if (!confirm('Are you sure you want to disconnect your Telegram account?\n\nTip: You can export your session file beforehand to easily log back in without an OTP or QR scan.')) return;
+    if (!confirm('Are you sure you want to disconnect your Telegram account from your web profile?\n\nTip: You can export your session file beforehand to easily log back in without an OTP or QR scan.')) return;
     try {
-      await fetch('/api/disconnect', { method: 'POST' });
+      await safeJsonFetch('/api/disconnect', { method: 'POST' });
       localStorage.removeItem('telecloud_user_tg_id');
       await checkStatus();
       setFiles([]);
+      setWorkspaces([]);
+      setActiveWorkspace(null);
     } catch (e) {
       console.error('Error disconnecting', e);
     }
@@ -2697,7 +2816,7 @@ export default function App() {
   // ==========================================
   // VIEW A: LANDING PAGE (UNAUTHENTICATED)
   // ==========================================
-  if (!connected) {
+  if (!connected && !webUser) {
     const handleSimulate = () => {
       setSimStep('uploading');
       setSimProgress(0);
@@ -3604,20 +3723,35 @@ export default function App() {
             <span className="hidden sm:inline">{darkMode ? 'Light' : 'Dark'}</span>
           </button>
 
-          {/* Visual Storage Chat Quick Indicator Button */}
-          <button
-            onClick={() => setDashboardTab('settings')}
-            className={`hidden sm:flex items-center space-x-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl border text-xs transition ${
-              darkMode ? 'bg-slate-800 hover:bg-slate-700/80 border-slate-700 text-slate-200' : 'bg-slate-100/90 hover:bg-slate-200/80 border-slate-200 text-slate-700'
-            }`}
-            title="Active Telegram chat storage destination - Click to choose destination"
-          >
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse flex-shrink-0" />
-            <span className={`hidden md:inline text-[11px] ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Storage:</span>
-            <span className={`font-bold max-w-[100px] sm:max-w-[130px] truncate text-[11px] ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-              {storageChat === 'me' ? 'Self' : storageChat}
-            </span>
-          </button>
+          {/* Visual Storage Chat Quick Toggle (Saved Messages vs Custom Channel) */}
+          <div className={`hidden sm:flex items-center rounded-xl p-0.5 border text-xs ${
+            darkMode ? 'bg-slate-900 border-slate-700' : 'bg-slate-100 border-slate-200'
+          }`}>
+            <button
+              type="button"
+              onClick={() => selectStorageDestination('me', 'Saved Messages')}
+              className={`px-2.5 py-1 rounded-lg font-bold text-[11px] transition cursor-pointer ${
+                storageChat === 'me'
+                  ? 'bg-sky-500 text-white shadow-2xs'
+                  : (darkMode ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')
+              }`}
+              title="Store uploaded files in your private Telegram Saved Messages"
+            >
+              Saved Messages
+            </button>
+            <button
+              type="button"
+              onClick={() => setDashboardTab('settings')}
+              className={`px-2.5 py-1 rounded-lg font-bold text-[11px] transition cursor-pointer flex items-center space-x-1 ${
+                storageChat !== 'me'
+                  ? 'bg-indigo-600 text-white shadow-2xs'
+                  : (darkMode ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')
+              }`}
+              title="Store uploaded files in a Custom Telegram Channel"
+            >
+              <span>{storageChat !== 'me' ? `Channel (${storageChat})` : 'Custom Channel'}</span>
+            </button>
+          </div>
 
           {/* Quick Upload Button */}
           <button
@@ -3628,35 +3762,45 @@ export default function App() {
             <span className="hidden xs:inline">Upload</span>
           </button>
 
-          {/* User Profile Pill */}
-          {user && (
+          {/* User Profile & Web Account Pill */}
+          {(user || webUser) && (
             <div className={`flex items-center space-x-1.5 sm:space-x-2 pl-1.5 sm:pl-2 border-l ${darkMode ? 'border-slate-800' : 'border-slate-200'}`}>
               <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-gradient-to-tr from-sky-500 via-indigo-500 to-purple-600 text-white font-extrabold flex items-center justify-center text-xs shadow-2xs flex-shrink-0">
-                {user.first_name ? user.first_name[0].toUpperCase() : 'T'}
+                {user?.first_name ? user.first_name[0].toUpperCase() : (webUser?.username ? webUser.username[0].toUpperCase() : 'U')}
               </div>
               <div className="hidden md:block text-left text-xs">
                 <p className={`font-bold leading-tight ${darkMode ? 'text-white' : 'text-slate-900'}`}>
-                  {user.first_name} {user.last_name || ''}
+                  {user ? `${user.first_name} ${user.last_name || ''}`.trim() : webUser?.username}
                 </p>
                 <p className="text-[10px] text-slate-400 font-mono">
-                  @{user.username || user.id}
+                  {webUser ? `Account: @${webUser.username}` : `@${user?.username || user?.id}`}
                 </p>
               </div>
+              {connected ? (
+                <button
+                  onClick={handleOpenExportModal}
+                  title="Backup / Download Session File (.telecloud) for instant login without OTP/QR"
+                  className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-xl border text-xs font-semibold transition cursor-pointer flex items-center space-x-1.5 shadow-xs ${
+                    darkMode
+                      ? 'bg-amber-950/30 hover:bg-amber-950/60 border-amber-800/60 text-amber-300'
+                      : 'bg-amber-50 hover:bg-amber-100 border-amber-200 text-amber-800'
+                  }`}
+                >
+                  <FileKey className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span className="hidden lg:inline text-[11px]">Backup Key</span>
+                </button>
+              ) : (
+                <button
+                  onClick={() => { setAuthMode('phone'); setShowAuthModal(true); }}
+                  className="px-2.5 py-1.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-extrabold text-[11px] transition cursor-pointer flex items-center space-x-1 shadow-xs"
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>Link Telegram</span>
+                </button>
+              )}
               <button
-                onClick={handleOpenExportModal}
-                title="Backup / Download Session File (.telecloud) for instant login without OTP/QR"
-                className={`p-1.5 sm:px-2.5 sm:py-1.5 rounded-xl border text-xs font-semibold transition cursor-pointer flex items-center space-x-1.5 shadow-xs ${
-                  darkMode
-                    ? 'bg-amber-950/30 hover:bg-amber-950/60 border-amber-800/60 text-amber-300'
-                    : 'bg-amber-50 hover:bg-amber-100 border-amber-200 text-amber-800'
-                }`}
-              >
-                <FileKey className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                <span className="hidden lg:inline text-[11px]">Backup Key</span>
-              </button>
-              <button
-                onClick={handleDisconnect}
-                title="Sign out / Disconnect"
+                onClick={webUser ? handleWebLogout : handleDisconnect}
+                title={webUser ? "Sign out of Web Account" : "Disconnect Telegram"}
                 className={`p-1 sm:p-1.5 rounded-xl transition cursor-pointer ${darkMode ? 'hover:bg-rose-950/60 text-slate-400 hover:text-rose-400' : 'hover:bg-rose-50 text-slate-400 hover:text-rose-600'}`}
               >
                 <LogOut className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
@@ -3892,43 +4036,45 @@ export default function App() {
         {/* MAIN DASHBOARD CONTENT AREA */}
         <main className="flex-1 p-3 sm:p-5 lg:p-6 overflow-y-auto min-w-0 pb-24 md:pb-8 space-y-4">
           
-          {/* Telegram Connectivity Lost Alert Banner */}
+          {/* Telegram Account Link / Reconnect Alert Banner */}
           {(connectivityLost || !connected) && (
             <div className={`p-4 sm:p-5 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 border shadow-xl backdrop-blur-xl ${
               darkMode 
-                ? 'bg-amber-500/10 border-amber-500/30 text-amber-200' 
-                : 'bg-amber-50 border-amber-200 text-amber-900'
+                ? 'bg-sky-500/10 border-sky-500/30 text-sky-200' 
+                : 'bg-sky-50 border-sky-200 text-sky-900'
             }`}>
               <div className="flex items-start sm:items-center gap-3.5">
                 <div className={`p-2.5 rounded-xl shrink-0 ${
-                  darkMode ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-100 text-amber-700'
+                  darkMode ? 'bg-sky-500/20 text-sky-400' : 'bg-sky-100 text-sky-700'
                 }`}>
-                  <AlertCircle className="w-5 h-5" />
+                  <Smartphone className="w-5 h-5" />
                 </div>
                 <div>
                   <h4 className={`text-sm font-black flex items-center gap-2 ${
-                    darkMode ? 'text-amber-300' : 'text-amber-800'
+                    darkMode ? 'text-sky-300' : 'text-sky-800'
                   }`}>
-                    <span>Telegram connectivity lost</span>
+                    <span>{connectivityLost ? 'Telegram connectivity lost' : 'Connect Your Personal Telegram Account'}</span>
                     <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded-md font-bold ${
-                      darkMode ? 'bg-amber-500/20 text-amber-300' : 'bg-amber-200/60 text-amber-800'
-                    }`}>Action Required</span>
+                      darkMode ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-200/60 text-sky-800'
+                    }`}>Step 2 of 2</span>
                   </h4>
                   <p className={`text-xs mt-1 max-w-2xl leading-relaxed ${
-                    darkMode ? 'text-amber-200/95' : 'text-amber-950/85'
+                    darkMode ? 'text-sky-200/95' : 'text-sky-950/85'
                   }`}>
-                    Telegram connectivity lost, login to dashboard and click reconnect button. Your 30-day session expired or Telegram connection was disconnected.
+                    {connectivityLost
+                      ? 'Your Telegram session expired or was disconnected. Click below to reconnect your personal Telegram account.'
+                      : 'Link your personal Telegram account via Phone Number & OTP to unlock your isolated unlimited cloud storage space.'}
                   </p>
                 </div>
               </div>
               <button
-                onClick={() => setShowAuthModal(true)}
+                onClick={() => { setAuthMode('phone'); setShowAuthModal(true); }}
                 className={`px-5 py-2.5 rounded-xl font-black text-xs shadow-lg transition active:scale-95 shrink-0 flex items-center justify-center space-x-2 cursor-pointer ${
-                  darkMode ? 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-amber-500/20' : 'bg-amber-600 hover:bg-amber-500 text-white shadow-amber-600/10'
+                  darkMode ? 'bg-sky-500 hover:bg-sky-400 text-slate-950 shadow-sky-500/20' : 'bg-sky-600 hover:bg-sky-500 text-white shadow-sky-600/10'
                 }`}
               >
-                <RefreshCw className="w-4 h-4" />
-                <span>Reconnect Telegram</span>
+                <Smartphone className="w-4 h-4" />
+                <span>{connectivityLost ? 'Reconnect Telegram' : 'Connect Telegram (Phone OTP)'}</span>
               </button>
             </div>
           )}
@@ -8759,11 +8905,166 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
   function renderAuthModal() {
     if (!showAuthModal) return null;
 
+    // STEP 1: WEB ACCOUNT LOGIN & REGISTRATION (USERNAME & PASSWORD)
+    if (!webUser) {
+      return (
+        <div className={`fixed inset-0 z-50 backdrop-blur-md flex items-center justify-center p-4 ${
+          darkMode ? 'bg-slate-950/75' : 'bg-slate-900/45'
+        }`}>
+          <div className={`rounded-3xl max-w-md w-full p-7 shadow-2xl relative space-y-5 border transition-colors ${
+            darkMode ? 'bg-slate-900/95 border-slate-800 text-slate-100' : 'bg-white/95 border-white/90 text-slate-900'
+          }`}>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-sky-500 to-indigo-600 text-white flex items-center justify-center shadow-md">
+                  <UserCheck className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className={`text-base font-extrabold ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    {webAuthMode === 'login' ? 'Sign In to Your Cloud Account' : 'Create Your Cloud Account'}
+                  </h3>
+                  <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Isolated personal space powered by your own Telegram account
+                  </p>
+                </div>
+              </div>
+
+              <button
+                onClick={() => {
+                  setShowAuthModal(false);
+                  if (currentRoute === '/login' || currentRoute === '/register') navigate('/');
+                }}
+                className={`p-2 rounded-xl transition cursor-pointer ${
+                  darkMode ? 'bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Login vs Register Switcher */}
+            <div className={`grid grid-cols-2 gap-1.5 p-1 rounded-2xl border ${
+              darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'
+            }`}>
+              <button
+                type="button"
+                onClick={() => { setWebAuthMode('login'); setWebAuthError(null); }}
+                className={`py-2.5 px-3 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+                  webAuthMode === 'login'
+                    ? (darkMode ? 'bg-slate-800 text-white shadow-xs border border-sky-500/30' : 'bg-white text-slate-900 shadow-xs border border-sky-500/30')
+                    : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
+                }`}
+              >
+                Sign In
+              </button>
+              <button
+                type="button"
+                onClick={() => { setWebAuthMode('register'); setWebAuthError(null); }}
+                className={`py-2.5 px-3 rounded-xl text-xs font-extrabold transition cursor-pointer ${
+                  webAuthMode === 'register'
+                    ? (darkMode ? 'bg-slate-800 text-white shadow-xs border border-sky-500/30' : 'bg-white text-slate-900 shadow-xs border border-sky-500/30')
+                    : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
+                }`}
+              >
+                Create Account
+              </button>
+            </div>
+
+            <form onSubmit={handleWebAuthSubmit} className="space-y-4">
+              <div>
+                <label className={`block text-xs font-bold mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                  Username
+                </label>
+                <input
+                  type="text"
+                  required
+                  autoFocus
+                  value={webUsernameInput}
+                  onChange={(e) => setWebUsernameInput(e.target.value)}
+                  placeholder="Enter your username (e.g. alex_cloud)"
+                  className={`w-full rounded-xl px-4 py-2.5 text-xs font-medium ${inputBg}`}
+                />
+              </div>
+
+              <div>
+                <label className={`block text-xs font-bold mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                  Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={webPasswordInput}
+                  onChange={(e) => setWebPasswordInput(e.target.value)}
+                  placeholder={webAuthMode === 'register' ? 'At least 6 characters' : 'Enter your password'}
+                  className={`w-full rounded-xl px-4 py-2.5 text-xs font-medium ${inputBg}`}
+                />
+              </div>
+
+              {webAuthMode === 'register' && (
+                <div>
+                  <label className={`block text-xs font-bold mb-1.5 ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>
+                    Confirm Password
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={webConfirmPasswordInput}
+                    onChange={(e) => setWebConfirmPasswordInput(e.target.value)}
+                    placeholder="Re-enter your password"
+                    className={`w-full rounded-xl px-4 py-2.5 text-xs font-medium ${inputBg}`}
+                  />
+                </div>
+              )}
+
+              {webAuthError && (
+                <div className={`p-3 rounded-xl border text-xs flex items-center space-x-2 ${
+                  darkMode ? 'bg-rose-950/60 border-rose-800 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-700'
+                }`}>
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{webAuthError}</span>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={webAuthLoading}
+                className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white font-bold text-xs transition shadow-lg shadow-sky-500/20 flex items-center justify-center space-x-2 cursor-pointer"
+              >
+                {webAuthLoading ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : (
+                  <ArrowRight className="w-4 h-4" />
+                )}
+                <span>
+                  {webAuthLoading
+                    ? 'Authenticating...'
+                    : webAuthMode === 'login'
+                    ? 'Sign In to Dashboard'
+                    : 'Create Account & Continue'}
+                </span>
+              </button>
+            </form>
+
+            <div className={`p-3.5 rounded-2xl border text-[11px] space-y-1 ${subCardBg}`}>
+              <p className="font-bold flex items-center gap-1.5 text-sky-400">
+                <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                <span>100% Isolated Personal Cloud</span>
+              </p>
+              <p className={darkMode ? 'text-slate-400' : 'text-slate-500'}>
+                After signing in, you will connect your own Telegram account via Phone Number & OTP and choose between Saved Messages or a Custom Channel for storage.
+              </p>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // STEP 2: CONNECT PERSONAL TELEGRAM ACCOUNT (LIVE PHONE NUMBER & OTP + STORAGE TARGET TOGGLE)
     return (
       <div className={`fixed inset-0 z-50 backdrop-blur-md flex items-center justify-center p-4 ${
         darkMode ? 'bg-slate-950/70' : 'bg-slate-900/40'
       }`}>
-        <div className={`rounded-3xl max-w-lg w-full p-7 shadow-2xl relative space-y-5 border transition-colors ${
+        <div className={`rounded-3xl max-w-lg w-full p-7 shadow-2xl relative space-y-4 border transition-colors max-h-[92vh] overflow-y-auto ${
           darkMode ? 'bg-slate-900/95 border-slate-800 text-slate-100' : 'bg-white/95 border-white/90 text-slate-900'
         }`}>
           <div className="flex items-center justify-between">
@@ -8772,8 +9073,17 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
                 <Smartphone className="w-5 h-5" />
               </div>
               <div>
-                <h3 className={`text-base font-extrabold ${darkMode ? 'text-white' : 'text-slate-900'}`}>Sign in / Register with Telegram</h3>
-                <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>Zero passwords or emails. 100% Telegram MTProto.</p>
+                <div className="flex items-center gap-2">
+                  <h3 className={`text-base font-extrabold ${darkMode ? 'text-white' : 'text-slate-900'}`}>
+                    Connect Your Telegram Account
+                  </h3>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                    @{webUser.username}
+                  </span>
+                </div>
+                <p className={`text-xs ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>
+                  Link your personal Telegram account for unlimited cloud storage
+                </p>
               </div>
             </div>
 
@@ -8787,9 +9097,76 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
             </button>
           </div>
 
+          {/* Storage Destination Toggle: Saved Messages vs Custom Channel */}
+          <div className={`p-3.5 rounded-2xl border space-y-2.5 ${subCardBg}`}>
+            <div className="flex items-center justify-between">
+              <label className={`text-xs font-extrabold ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>
+                Default File Storage Destination
+              </label>
+              <span className="text-[10px] font-mono text-sky-400 font-bold">
+                {storageTargetMode === 'me' ? 'Saved Messages (me)' : 'Custom Channel'}
+              </span>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setStorageTargetMode('me');
+                  setTargetChatInput('me');
+                }}
+                className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center justify-center space-x-1.5 ${
+                  storageTargetMode === 'me'
+                    ? 'bg-sky-500 text-white border-sky-500 shadow-xs'
+                    : (darkMode ? 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50')
+                }`}
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span>Saved Messages</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setStorageTargetMode('custom');
+                  if (targetChatInput === 'me') setTargetChatInput('');
+                }}
+                className={`py-2 px-3 rounded-xl text-xs font-bold border transition cursor-pointer flex items-center justify-center space-x-1.5 ${
+                  storageTargetMode === 'custom'
+                    ? 'bg-indigo-600 text-white border-indigo-500 shadow-xs'
+                    : (darkMode ? 'bg-slate-900 text-slate-300 border-slate-800 hover:border-slate-700' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50')
+                }`}
+              >
+                <Layers className="w-3.5 h-3.5" />
+                <span>Custom Channel</span>
+              </button>
+            </div>
+            {storageTargetMode === 'custom' && (
+              <div className="pt-1">
+                <input
+                  type="text"
+                  value={targetChatInput === 'me' ? '' : targetChatInput}
+                  onChange={(e) => setTargetChatInput(e.target.value.trim() || 'me')}
+                  placeholder="Enter Channel ID (e.g. -1001234567890) or @channel_username"
+                  className={`w-full rounded-xl px-3.5 py-2 text-xs font-mono ${inputBg}`}
+                />
+              </div>
+            )}
+          </div>
+
           <div className={`grid grid-cols-2 sm:grid-cols-4 gap-1.5 p-1 rounded-2xl border ${
             darkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-100 border-slate-200'
           }`}>
+            <button
+              type="button"
+              onClick={() => { setAuthMode('phone'); stopQrPolling(); }}
+              className={`py-2 px-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 ${
+                authMode === 'phone'
+                  ? (darkMode ? 'bg-slate-800 text-white shadow-xs border border-indigo-500/30' : 'bg-white text-slate-900 shadow-xs border border-indigo-500/30')
+                  : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
+              }`}
+            >
+              <Smartphone className="w-3.5 h-3.5 text-indigo-400" />
+              <span>Phone OTP</span>
+            </button>
             <button
               type="button"
               onClick={() => { setAuthMode('qr'); handleStartQrLogin(); }}
@@ -8801,19 +9178,6 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
             >
               <QrCode className="w-3.5 h-3.5 text-sky-400" />
               <span>QR Scan</span>
-              <span className="text-[9px] px-1 rounded-sm bg-sky-500 text-white uppercase font-bold">Fast</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => { setAuthMode('phone'); stopQrPolling(); }}
-              className={`py-2 px-2 rounded-xl text-xs font-bold transition flex items-center justify-center space-x-1.5 ${
-                authMode === 'phone'
-                  ? (darkMode ? 'bg-slate-800 text-white shadow-xs' : 'bg-white text-slate-900 shadow-xs')
-                  : (darkMode ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
-              }`}
-            >
-              <Smartphone className="w-3.5 h-3.5 text-indigo-400" />
-              <span>Phone OTP</span>
             </button>
             <button
               type="button"

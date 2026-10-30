@@ -48,6 +48,15 @@ import {
   recordFileAccess,
   getFilesAnalyticsFromDb,
   deleteUnaccessedFilesFromDb,
+  registerWebUser,
+  loginWebUser,
+  getWebUserByToken,
+  linkTelegramToWebUser,
+  unlinkTelegramFromWebUser,
+  updateWebUserStorageChat,
+  logoutWebUser,
+  getUserByTelegramIdFromDb,
+  WebUserRecord,
 } from './server/db.ts';
 
 const app = express();
@@ -71,13 +80,66 @@ function getCookie(req: Request, name: string): string | null {
   return null;
 }
 
+function getWebAuthToken(req: Request): string | null {
+  const headerToken = (req.headers['x-auth-token'] as string) || (req.headers['x-web-token'] as string);
+  if (headerToken && headerToken.trim()) return headerToken.trim();
+  const cookieToken = getCookie(req, 'telecloud_web_token');
+  if (cookieToken && cookieToken.trim()) return cookieToken.trim();
+  const queryToken = (req.query?.auth_token as string) || (req.body?.auth_token as string);
+  if (queryToken && String(queryToken).trim()) return String(queryToken).trim();
+  return null;
+}
+
 // Resilient helper to fetch Telegram ID across cookies, query parameters, or request body
 function getTelegramId(req: Request): string | undefined {
-  const cookieTgId = getCookie(req, 'telecloud_tg_id');
-  if (cookieTgId) return cookieTgId;
   const bodyTgId = req.body?.telegram_id || req.body?.userId;
   const queryTgId = req.query.telegram_id || req.query.userId;
-  return (queryTgId || bodyTgId) ? String(queryTgId || bodyTgId) : undefined;
+  if (queryTgId || bodyTgId) return String(queryTgId || bodyTgId);
+  const cookieTgId = getCookie(req, 'telecloud_tg_id');
+  if (cookieTgId) return cookieTgId;
+  return undefined;
+}
+
+async function resolveCurrentUserContext(req: Request): Promise<{
+  webUser: WebUserRecord | null;
+  telegramId: string | undefined;
+  sessionStr: string | undefined;
+  storageChat: string;
+}> {
+  const token = getWebAuthToken(req);
+  if (token) {
+    const webUser = await getWebUserByToken(token);
+    if (webUser) {
+      const tgId = webUser.telegram_id ? String(webUser.telegram_id) : undefined;
+      let sessionStr: string | undefined = undefined;
+      let storageChat = webUser.storage_chat || 'me';
+      if (tgId) {
+        const uSess = await getUserTelegramSessionFromDb(tgId);
+        if (uSess && uSess.session_str && !uSess.is_expired) {
+          sessionStr = uSess.session_str;
+        }
+        const activeWs = await getActiveWorkspaceFromDb(tgId).catch(() => null);
+        if (activeWs?.storage_chat) {
+          storageChat = activeWs.storage_chat;
+        }
+      }
+      return { webUser, telegramId: tgId, sessionStr, storageChat };
+    }
+  }
+
+  const explicitTgId = getTelegramId(req);
+  if (explicitTgId) {
+    const uSess = await getUserTelegramSessionFromDb(explicitTgId);
+    const activeWs = await getActiveWorkspaceFromDb(explicitTgId).catch(() => null);
+    return {
+      webUser: null,
+      telegramId: explicitTgId,
+      sessionStr: uSess?.session_str || undefined,
+      storageChat: activeWs?.storage_chat || 'me',
+    };
+  }
+
+  return { webUser: null, telegramId: undefined, sessionStr: undefined, storageChat: 'me' };
 }
 
 // Helper to wait until Python MTProto daemon is ready before sending requests
@@ -438,33 +500,75 @@ async function restoreSessionFromMysql(): Promise<boolean> {
 // APP LOCK (Web GUI Dashboard PIN Protection configured in .env)
 // Note: Public file streaming (/f/:file_id, /api/download/:messageId, etc.) is NEVER blocked.
 // ============================================================================
-const getDashboardPin = (): string => {
-  return String(process.env.DASHBOARD_PIN || process.env.APP_LOCK_PIN || '1234').trim();
+const getFileEnvPins = (): string[] => {
+  const pins: string[] = [];
+  try {
+    const envPath = path.resolve(process.cwd(), '.env');
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      const lines = content.split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const match = trimmed.match(/^(?:DASHBOARD_PIN|APP_LOCK_PIN)\s*=\s*(.*)$/i);
+        if (match) {
+          let val = match[1].trim();
+          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1).trim();
+          }
+          if (val) pins.push(val);
+        }
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  return pins;
 };
 
-const getDashboardLockSecret = (): string => {
-  const pin = getDashboardPin();
+const getAllValidDashboardPins = (): string[] => {
+  const filePins = getFileEnvPins();
+  const envPins = [
+    process.env.DASHBOARD_PIN,
+    process.env.APP_LOCK_PIN,
+  ]
+    .filter(Boolean)
+    .map((p) => String(p).trim().replace(/^["']|["']$/g, ''));
+
+  const all = Array.from(new Set([...filePins, ...envPins].filter(Boolean)));
+  if (all.length === 0) {
+    all.push('1234');
+  }
+  return all;
+};
+
+const getDashboardLockSecretForPin = (pin: string): string => {
   return crypto.createHmac('sha256', 'telecloud_dashboard_salt_2026').update(pin).digest('hex');
 };
 
+const getAllValidTokens = (): string[] => {
+  return getAllValidDashboardPins().map(getDashboardLockSecretForPin);
+};
+
 app.get('/api/app-lock/status', (_req: Request, res: Response) => {
+  const validPins = getAllValidDashboardPins();
   return res.json({
     enabled: true,
-    has_custom_pin: Boolean(process.env.DASHBOARD_PIN || process.env.APP_LOCK_PIN),
+    has_custom_pin: validPins.length > 0,
     message: 'Dashboard requires App Lock PIN configured in environment (.env)',
   });
 });
 
 app.post('/api/app-lock/verify', (req: Request, res: Response) => {
-  const submittedPin = String(req.body?.pin || '').trim();
-  const configuredPin = getDashboardPin();
+  const submittedPin = String(req.body?.pin || '').trim().replace(/^["']|["']$/g, '');
+  const validPins = getAllValidDashboardPins();
 
   if (!submittedPin) {
     return res.status(400).json({ success: false, error: 'PIN is required to unlock the dashboard.' });
   }
 
-  if (submittedPin === configuredPin) {
-    const token = getDashboardLockSecret();
+  if (validPins.includes(submittedPin)) {
+    const token = getDashboardLockSecretForPin(submittedPin);
     return res.json({
       success: true,
       token,
@@ -480,111 +584,208 @@ app.post('/api/app-lock/verify', (req: Request, res: Response) => {
 
 app.post('/api/app-lock/verify-token', (req: Request, res: Response) => {
   const submittedToken = String(req.body?.token || '').trim();
-  const validToken = getDashboardLockSecret();
+  const validTokens = getAllValidTokens();
 
-  if (submittedToken && submittedToken === validToken) {
+  if (submittedToken && validTokens.includes(submittedToken)) {
     return res.json({ success: true, valid: true });
   }
 
   return res.status(401).json({ success: false, valid: false, error: 'Dashboard lock session expired or invalid.' });
 });
 
-app.get('/api/status', async (req: Request, res: Response) => {
-  let result = await forwardToPython('GET', '/status');
-  if (result.status === 200 && !result.data?.connected) {
-    // Attempt auto-restoration from MySQL before returning disconnected
-    const restored = await restoreSessionFromMysql();
-    if (restored) {
-      result = await forwardToPython('GET', '/status');
+// ============================================================================
+// MULTI-USER WEB AUTHENTICATION ENDPOINTS (Username & Password + Isolated Space)
+// ============================================================================
+app.post('/api/auth/register', async (req: Request, res: Response) => {
+  try {
+    const { username, password, display_name } = req.body || {};
+    const result = await registerWebUser(username, password, display_name);
+    if (!result.success || !result.user || !result.token) {
+      return res.status(400).json({ success: false, error: result.error || 'Registration failed.' });
     }
+
+    res.cookie('telecloud_web_token', result.token, {
+      httpOnly: true,
+      secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+      sameSite: 'lax',
+      path: '/',
+    });
+    res.clearCookie('telecloud_tg_id', { path: '/' });
+
+    return res.json({
+      success: true,
+      token: result.token,
+      web_user: result.user,
+      message: 'Account created successfully! Please connect your personal Telegram account.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Server error during registration.' });
+  }
+});
+
+app.post('/api/auth/login', async (req: Request, res: Response) => {
+  try {
+    const { username, password } = req.body || {};
+    const result = await loginWebUser(username, password);
+    if (!result.success || !result.user || !result.token) {
+      return res.status(401).json({ success: false, error: result.error || 'Invalid username or password.' });
+    }
+
+    res.cookie('telecloud_web_token', result.token, {
+      httpOnly: true,
+      secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+      sameSite: 'lax',
+      path: '/',
+    });
+
+    if (result.user.telegram_id) {
+      res.cookie('telecloud_tg_id', String(result.user.telegram_id), {
+        httpOnly: true,
+        secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        sameSite: 'lax',
+        path: '/',
+      });
+    } else {
+      res.clearCookie('telecloud_tg_id', { path: '/' });
+    }
+
+    return res.json({
+      success: true,
+      token: result.token,
+      web_user: result.user,
+      message: 'Logged in successfully.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Server error during login.' });
+  }
+});
+
+app.post('/api/auth/logout', async (req: Request, res: Response) => {
+  try {
+    const token = getWebAuthToken(req);
+    if (token) {
+      await logoutWebUser(token).catch(() => {});
+    }
+    res.clearCookie('telecloud_web_token', { path: '/' });
+    res.clearCookie('telecloud_tg_id', { path: '/' });
+    return res.json({ success: true, message: 'Logged out of web account successfully.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/auth/me', async (req: Request, res: Response) => {
+  try {
+    const token = getWebAuthToken(req);
+    if (!token) {
+      return res.json({ authenticated: false, web_user: null, telegram_user: null });
+    }
+    const webUser = await getWebUserByToken(token);
+    if (!webUser) {
+      return res.json({ authenticated: false, web_user: null, telegram_user: null });
+    }
+    let telegramUser: any = null;
+    if (webUser.telegram_id) {
+      telegramUser = await getUserByTelegramIdFromDb(webUser.telegram_id);
+    }
+    return res.json({
+      authenticated: true,
+      web_user: webUser,
+      telegram_user: telegramUser,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ authenticated: false, error: err.message });
+  }
+});
+
+app.get('/api/status', async (req: Request, res: Response) => {
+  const ctx = await resolveCurrentUserContext(req);
+  const defaultApiId = Number(process.env.TELEGRAM_API_ID || 27254692);
+  const defaultApiHash = String(process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim();
+
+  // Strictly isolate each user's space: never expose the global admin session to unauthenticated visitors or other users
+  if (!ctx.telegramId) {
+    return res.json({
+      connected: false,
+      has_session: false,
+      web_authenticated: Boolean(ctx.webUser),
+      web_user: ctx.webUser,
+      user: null,
+      storage_chat: ctx.webUser?.storage_chat || 'me',
+      api_id: defaultApiId,
+      api_hash: defaultApiHash,
+      connectivity_lost: false,
+    });
   }
 
-  // Check user session status if a specific user ID is passed
-  const queryTgId = getTelegramId(req);
+  const queryTgId = ctx.telegramId;
+  const uSess = await getUserTelegramSessionFromDb(queryTgId);
+  const tgProfile = await getUserByTelegramIdFromDb(queryTgId);
   let userSessionInfo: any = null;
   let connectivityLost = false;
+  let isConnected = false;
 
-  if (queryTgId) {
-    const uSess = await getUserTelegramSessionFromDb(queryTgId);
-    if (!uSess?.session_str && result.data?.connected && String(result.data?.user?.id) === String(queryTgId)) {
-      // Auto-heal session string in MySQL if user is already connected in Python
-      await syncSessionToMysql(queryTgId);
-    }
-
-    if (uSess) {
-      if (uSess.is_expired || uSess.session_status === 'disconnected') {
+  if (uSess) {
+    if (uSess.is_expired || uSess.session_status === 'disconnected') {
+      connectivityLost = true;
+      userSessionInfo = {
+        connected: false,
+        connectivity_lost: true,
+        reconnect_required: true,
+        error: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
+        expires_at: uSess.expires_at,
+        status: uSess.is_expired ? 'expired' : 'disconnected',
+      };
+    } else if (uSess.session_str) {
+      const verifyRes = await forwardToPython('POST', '/verify_session', { session_str: uSess.session_str });
+      if (verifyRes.data?.valid) {
+        isConnected = true;
+        userSessionInfo = {
+          connected: true,
+          connectivity_lost: false,
+          expires_at: uSess.expires_at,
+          status: 'active',
+        };
+      } else {
+        await markUserSessionLostInDb(queryTgId);
         connectivityLost = true;
         userSessionInfo = {
           connected: false,
           connectivity_lost: true,
           reconnect_required: true,
           error: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
-          expires_at: uSess.expires_at,
-          status: uSess.is_expired ? 'expired' : 'disconnected',
+          status: 'disconnected',
         };
-      } else if (uSess.session_str) {
-        // Validate with Telethon daemon
-        const verifyRes = await forwardToPython('POST', '/verify_session', { session_str: uSess.session_str });
-        if (verifyRes.data?.valid) {
-          userSessionInfo = {
-            connected: true,
-            connectivity_lost: false,
-            expires_at: uSess.expires_at,
-            status: 'active',
-          };
-        } else {
-          await markUserSessionLostInDb(queryTgId);
-          connectivityLost = true;
-          userSessionInfo = {
-            connected: false,
-            connectivity_lost: true,
-            reconnect_required: true,
-            error: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
-            status: 'disconnected',
-          };
-        }
       }
     }
-  } else if (result.data?.connected && result.data?.user?.id) {
-    // Sync current active session to admin/user in MySQL quietly
-    syncSessionToMysql(result.data.user.id).catch(() => {});
   }
 
-  if (result.status === 200 && result.data && result.data.user) {
-    // Sync active telegram user to MySQL
-    saveUserToDb({
-      telegram_id: result.data.user.id,
-      first_name: result.data.user.first_name,
-      last_name: result.data.user.last_name,
-      username: result.data.user.username,
-      phone: result.data.user.phone,
-      storage_chat: result.data.storage_chat,
-    }).catch((e) => console.error('[MySQL] User sync error:', e));
+  const resolvedUser = tgProfile
+    ? {
+        id: Number(tgProfile.telegram_id) || tgProfile.telegram_id,
+        first_name: tgProfile.first_name,
+        last_name: tgProfile.last_name,
+        username: tgProfile.username,
+        phone: tgProfile.phone,
+      }
+    : null;
 
-    res.json({
-      ...result.data,
-      user_session: userSessionInfo,
-      connectivity_lost: connectivityLost,
-      error: connectivityLost ? 'Telegram connectivity lost, login to dashboard and click reconnect button.' : undefined,
-    });
-  } else if (result.status === 200) {
-    res.json({
-      ...result.data,
-      user_session: userSessionInfo,
-      connectivity_lost: connectivityLost,
-      error: connectivityLost ? 'Telegram connectivity lost, login to dashboard and click reconnect button.' : undefined,
-    });
-  } else {
-    // Graceful fallback status so frontend never fails with 503 or HTML errors
-    res.json({
-      connected: false,
-      has_session: false,
-      status: 'starting',
-      connectivity_lost: true,
-      error: 'Telegram connectivity lost, login to dashboard and click reconnect button.',
-      message: result.data?.error || 'Telegram MTProto service is initializing',
-    });
-  }
+  return res.json({
+    connected: isConnected,
+    has_session: Boolean(uSess?.session_str),
+    web_authenticated: Boolean(ctx.webUser),
+    web_user: ctx.webUser,
+    api_id: uSess?.api_id || defaultApiId,
+    api_hash: uSess?.api_hash || defaultApiHash,
+    storage_chat: ctx.storageChat || tgProfile?.storage_chat || 'me',
+    user: resolvedUser,
+    user_session: userSessionInfo,
+    connectivity_lost: connectivityLost,
+    error: connectivityLost ? 'Telegram connectivity lost, login to dashboard and click reconnect button.' : undefined,
+  });
 });
 
 app.get('/api/db/status', (_req: Request, res: Response) => {
@@ -603,11 +804,13 @@ app.post('/api/device-config', async (req: Request, res: Response) => {
 });
 
 app.post('/api/connect', async (req: Request, res: Response) => {
+  const ctx = await resolveCurrentUserContext(req);
+  const targetStorageChat = req.body.storage_chat || ctx.webUser?.storage_chat || 'me';
   const payload = {
     ...req.body,
     api_id: req.body.api_id || process.env.TELEGRAM_API_ID || 27254692,
     api_hash: req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65',
-    storage_chat: req.body.storage_chat || 'me',
+    storage_chat: targetStorageChat,
   };
   const result = await forwardToPython('POST', '/connect', payload);
   if (result.status === 200 && result.data?.user) {
@@ -615,14 +818,24 @@ app.post('/api/connect', async (req: Request, res: Response) => {
     await saveUserToDb({
       telegram_id: result.data.user.id,
       first_name: result.data.user.first_name,
+      last_name: result.data.user.last_name,
       username: result.data.user.username,
-      storage_chat: req.body.storage_chat || 'me',
+      phone: result.data.user.phone,
+      storage_chat: targetStorageChat,
       session_str: sessionStr,
       bot_token: req.body.bot_token || undefined,
     }).catch((e) => console.error('[MySQL] saveUserToDb error:', e));
 
-    // Persist session to MySQL (User 30-Day & System Fallback)
-    await syncSessionToMysql(result.data.user.id, sessionStr, req.body.bot_token);
+    await saveUserTelegramSessionInDb(result.data.user.id, {
+      session_str: sessionStr || '',
+      api_id: Number(payload.api_id),
+      api_hash: String(payload.api_hash),
+      bot_token: req.body.bot_token || null,
+    }).catch(() => {});
+
+    if (ctx.webUser) {
+      await linkTelegramToWebUser(ctx.webUser.id, result.data.user.id, targetStorageChat);
+    }
 
     // Set secure HTTP-Only cookie for the session
     res.cookie('telecloud_tg_id', String(result.data.user.id), {
@@ -653,10 +866,12 @@ app.post('/api/send_code', async (req: Request, res: Response) => {
 });
 
 app.post('/api/sign_in', async (req: Request, res: Response) => {
+  const ctx = await resolveCurrentUserContext(req);
   let phone = String(req.body.phone || '').trim().replace(/[\s\-\(\)]/g, '');
   if (phone && !phone.startsWith('+')) {
     phone = `+${phone}`;
   }
+  const targetStorageChat = req.body.storage_chat || ctx.webUser?.storage_chat || 'me';
   const payload = {
     ...req.body,
     phone,
@@ -672,12 +887,21 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
       last_name: result.data.user.last_name,
       username: result.data.user.username,
       phone: result.data.user.phone || phone,
-      storage_chat: 'me',
+      storage_chat: targetStorageChat,
       session_str: sessionStr,
     }).catch((e) => console.error('[MySQL] user save error:', e));
 
-    // Persist 30-day session to MySQL
-    await syncSessionToMysql(result.data.user.id, sessionStr);
+    if (sessionStr) {
+      await saveUserTelegramSessionInDb(result.data.user.id, {
+        session_str: sessionStr,
+        api_id: payload.api_id,
+        api_hash: payload.api_hash,
+      }).catch(() => {});
+    }
+
+    if (ctx.webUser) {
+      await linkTelegramToWebUser(ctx.webUser.id, result.data.user.id, targetStorageChat);
+    }
 
     // Set secure HTTP-Only cookie for the session
     res.cookie('telecloud_tg_id', String(result.data.user.id), {
@@ -703,21 +927,32 @@ app.post(['/api/qr/start', '/api/telegram/qr/start'], async (req: Request, res: 
 });
 
 app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: Response) => {
+  const ctx = await resolveCurrentUserContext(req);
   const result = await forwardToPython('POST', '/qr/check', req.body);
   if (result.status === 200 && result.data?.user) {
     const sessionStr = result.data.session_str || undefined;
+    const targetStorageChat = ctx.webUser?.storage_chat || 'me';
     await saveUserToDb({
       telegram_id: result.data.user.id,
       first_name: result.data.user.first_name,
       last_name: result.data.user.last_name,
       username: result.data.user.username,
       phone: result.data.user.phone || '',
-      storage_chat: 'me',
+      storage_chat: targetStorageChat,
       session_str: sessionStr,
     }).catch((e) => console.error('[MySQL] user save error:', e));
 
-    // Persist session to MySQL on successful QR authorization (30-day user session + admin fallback)
-    await syncSessionToMysql(result.data.user.id, sessionStr);
+    if (sessionStr) {
+      await saveUserTelegramSessionInDb(result.data.user.id, {
+        session_str: sessionStr,
+        api_id: Number(process.env.TELEGRAM_API_ID || 27254692),
+        api_hash: String(process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+      }).catch(() => {});
+    }
+
+    if (ctx.webUser) {
+      await linkTelegramToWebUser(ctx.webUser.id, result.data.user.id, targetStorageChat);
+    }
 
     // Set secure HTTP-Only cookie for the session
     res.cookie('telecloud_tg_id', String(result.data.user.id), {
@@ -734,41 +969,25 @@ app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: 
 // Export active session as a reusable .telecloud file or JSON
 app.get(['/api/session/export', '/api/user/session-export'], async (req: Request, res: Response) => {
   try {
-    let tgId = getTelegramId(req);
-    let sessionStr: string | null = null;
+    const ctx = await resolveCurrentUserContext(req);
+    let tgId = ctx.telegramId;
+    let sessionStr: string | null = ctx.sessionStr || null;
     let activeUser: any = null;
 
-    // Check Python daemon active session first
-    const sessionRes = await forwardToPython('GET', '/session_data');
-    if (sessionRes.status === 200 && sessionRes.data?.session_str) {
-      sessionStr = sessionRes.data.session_str;
-      activeUser = sessionRes.data.user;
-      if (!tgId && activeUser?.id) {
-        tgId = String(activeUser.id);
-      }
-    }
-
-    // Fallback to MySQL user session
-    if (!sessionStr && tgId) {
-      const uSess = await getUserTelegramSessionFromDb(tgId);
-      if (uSess?.session_str) {
-        sessionStr = uSess.session_str;
-      }
-    }
-
-    // Fallback to MySQL system admin session
-    if (!sessionStr) {
-      const sysSess = await getTelegramSystemSessionFromDb();
-      if (sysSess?.session_str) {
-        sessionStr = sysSess.session_str;
-        activeUser = sysSess.active_user || activeUser;
+    if (tgId) {
+      activeUser = await getUserByTelegramIdFromDb(tgId);
+      if (!sessionStr) {
+        const uSess = await getUserTelegramSessionFromDb(tgId);
+        if (uSess?.session_str) {
+          sessionStr = uSess.session_str;
+        }
       }
     }
 
     if (!sessionStr) {
       return res.status(404).json({
         success: false,
-        error: 'No active Telegram MTProto session found to export. Please connect first.',
+        error: 'No active Telegram MTProto session found for your account. Please connect your Telegram account first.',
       });
     }
 
@@ -809,14 +1028,19 @@ app.get(['/api/session/export', '/api/user/session-export'], async (req: Request
 });
 
 app.post('/api/disconnect', async (req: Request, res: Response) => {
-  const tgId = req.body?.telegram_id || getCookie(req, 'telecloud_tg_id');
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId || req.body?.telegram_id;
+  if (ctx.webUser) {
+    await unlinkTelegramFromWebUser(ctx.webUser.id).catch(() => {});
+  }
   if (tgId) {
     await markUserSessionLostInDb(tgId).catch(() => {});
   }
-  await clearTelegramSystemSessionInDb().catch((e) => console.error('[MySQL] clear error:', e));
-  const result = await forwardToPython('POST', '/disconnect');
+  if (ctx.sessionStr) {
+    await forwardToPython('POST', '/disconnect', { session_str: ctx.sessionStr }).catch(() => {});
+  }
   res.clearCookie('telecloud_tg_id', { path: '/' });
-  res.status(result.status).json(result.data);
+  res.json({ success: true, message: 'Telegram account disconnected from your personal space.' });
 });
 
 app.post('/api/user/delete-account', async (req: Request, res: Response) => {
@@ -1236,8 +1460,8 @@ app.get(['/api/workspaces', '/api/v1/workspaces'], async (req: Request, res: Res
       }
     }
     if (!tgId) {
-      const statusRes = await forwardToPython('GET', '/status');
-      tgId = statusRes.data?.user?.id;
+      const ctx = await resolveCurrentUserContext(req);
+      tgId = ctx.telegramId || '';
     }
     if (!tgId) {
       res.json({ workspaces: [], active_workspace_id: null });
@@ -1254,13 +1478,10 @@ app.get(['/api/workspaces', '/api/v1/workspaces'], async (req: Request, res: Res
 });
 
 app.post('/api/workspaces', async (req: Request, res: Response): Promise<void> => {
-  let tgId = req.body.telegram_id as string;
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId || (req.body.telegram_id as string);
   if (!tgId) {
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
-  }
-  if (!tgId) {
-    res.status(401).json({ error: 'User not authenticated' });
+    res.status(401).json({ error: 'Please sign in and connect your Telegram account first.' });
     return;
   }
 
@@ -1281,11 +1502,8 @@ app.post('/api/workspaces', async (req: Request, res: Response): Promise<void> =
 
 app.put('/api/workspaces/:id', async (req: Request, res: Response): Promise<void> => {
   const wsId = Number(req.params.id);
-  let tgId = req.body.telegram_id as string;
-  if (!tgId) {
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
-  }
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId || (req.body.telegram_id as string);
   if (!tgId) {
     res.status(401).json({ error: 'User not authenticated' });
     return;
@@ -1295,7 +1513,13 @@ app.put('/api/workspaces/:id', async (req: Request, res: Response): Promise<void
     const result = await updateWorkspaceInDb(wsId, tgId, req.body);
     const activeWs = await getActiveWorkspaceFromDb(tgId);
     if (activeWs && activeWs.id === wsId && req.body.storage_chat) {
-      await forwardToPython('POST', '/storage', { storage_chat: req.body.storage_chat });
+      if (ctx.webUser) {
+        await updateWebUserStorageChat(ctx.webUser.id, req.body.storage_chat);
+      }
+      await forwardToPython('POST', '/storage', {
+        storage_chat: req.body.storage_chat,
+        session_str: ctx.sessionStr,
+      });
     }
     res.json(result);
   } catch (e: any) {
@@ -1305,8 +1529,8 @@ app.put('/api/workspaces/:id', async (req: Request, res: Response): Promise<void
 
 app.delete('/api/workspaces/:id', async (req: Request, res: Response): Promise<void> => {
   const wsId = Number(req.params.id);
-  const statusRes = await forwardToPython('GET', '/status');
-  let tgId = statusRes.data?.user?.id || req.body.telegram_id || req.query.telegram_id;
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId || req.body.telegram_id || req.query.telegram_id;
   if (!tgId) {
     res.status(401).json({ error: 'User not authenticated' });
     return;
@@ -1316,7 +1540,13 @@ app.delete('/api/workspaces/:id', async (req: Request, res: Response): Promise<v
     await deleteWorkspaceInDb(wsId, tgId);
     const activeWs = await getActiveWorkspaceFromDb(tgId);
     if (activeWs) {
-      await forwardToPython('POST', '/storage', { storage_chat: activeWs.storage_chat });
+      if (ctx.webUser) {
+        await updateWebUserStorageChat(ctx.webUser.id, activeWs.storage_chat);
+      }
+      await forwardToPython('POST', '/storage', {
+        storage_chat: activeWs.storage_chat,
+        session_str: ctx.sessionStr,
+      });
     }
     res.json({ success: true, active_workspace_id: activeWs?.id });
   } catch (e: any) {
@@ -1326,8 +1556,8 @@ app.delete('/api/workspaces/:id', async (req: Request, res: Response): Promise<v
 
 app.post('/api/workspaces/:id/switch', async (req: Request, res: Response): Promise<void> => {
   const wsId = Number(req.params.id);
-  const statusRes = await forwardToPython('GET', '/status');
-  const tgId = statusRes.data?.user?.id;
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId || req.body.telegram_id;
   if (!tgId) {
     res.status(401).json({ error: 'User not authenticated' });
     return;
@@ -1337,8 +1567,13 @@ app.post('/api/workspaces/:id/switch', async (req: Request, res: Response): Prom
     await setActiveWorkspaceInDb(tgId, wsId);
     const activeWs = await getActiveWorkspaceFromDb(tgId);
     if (activeWs) {
-      // Sync active workspace's storage_chat with Python daemon
-      await forwardToPython('POST', '/storage', { storage_chat: activeWs.storage_chat });
+      if (ctx.webUser) {
+        await updateWebUserStorageChat(ctx.webUser.id, activeWs.storage_chat);
+      }
+      await forwardToPython('POST', '/storage', {
+        storage_chat: activeWs.storage_chat,
+        session_str: ctx.sessionStr,
+      });
     }
     res.json({ success: true, active_workspace: activeWs });
   } catch (e: any) {
@@ -1347,27 +1582,53 @@ app.post('/api/workspaces/:id/switch', async (req: Request, res: Response): Prom
 });
 
 app.post('/api/storage', async (req: Request, res: Response) => {
-  const storageChat = req.body.storage_chat || 'me';
-  const result = await forwardToPython('POST', '/storage', req.body);
-  
-  // Also synchronize storage_chat with user's active workspace in MySQL
-  const statusRes = await forwardToPython('GET', '/status');
-  const tgId = statusRes.data?.user?.id;
+  const storageChat = String(req.body.storage_chat || 'me').trim();
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId;
+
+  if (ctx.webUser) {
+    await updateWebUserStorageChat(ctx.webUser.id, storageChat).catch(() => {});
+  }
+
+  const result = await forwardToPython('POST', '/storage', {
+    ...req.body,
+    storage_chat: storageChat,
+    session_str: ctx.sessionStr,
+  });
+
   if (tgId) {
     const activeWs = await getActiveWorkspaceFromDb(tgId);
     if (activeWs) {
-      await updateWorkspaceInDb(activeWs.id, tgId, { storage_chat: storageChat });
+      await updateWorkspaceInDb(activeWs.id, tgId, { storage_chat: storageChat }).catch(() => {});
     }
   }
-
-  // Persist updated storage destination to MySQL session
-  syncSessionToMysql().catch(() => {});
 
   res.status(result.status).json(result.data);
 });
 
-app.get('/api/storage/chats', async (_req: Request, res: Response) => {
-  const result = await forwardToPython('GET', '/dialogs');
+app.get('/api/storage/chats', async (req: Request, res: Response) => {
+  const ctx = await resolveCurrentUserContext(req);
+  if (!ctx.sessionStr) {
+    res.json({
+      dialogs: [
+        {
+          id: 'me',
+          title: 'Self (Saved Messages)',
+          type: 'self',
+          is_self: true,
+          badge: 'Private & Default',
+          description: 'Your personal Telegram Saved Messages chat',
+        },
+      ],
+      current: ctx.storageChat || 'me',
+    });
+    return;
+  }
+
+  const result = await forwardToPython('POST', '/dialogs', {
+    session_str: ctx.sessionStr,
+    storage_chat: ctx.storageChat || 'me',
+  });
   if (result.status === 200) {
     res.json(result.data);
   } else {
@@ -1382,7 +1643,7 @@ app.get('/api/storage/chats', async (_req: Request, res: Response) => {
           description: 'Your personal Telegram Saved Messages chat',
         },
       ],
-      current: 'me',
+      current: ctx.storageChat || 'me',
     });
   }
 });
@@ -1403,9 +1664,8 @@ app.get(['/api/user/files', '/api/v1/files'], async (req: Request, res: Response
   }
 
   if (!tgId) {
-    // If not supplied, query python status to find current user
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
+    const ctx = await resolveCurrentUserContext(req);
+    tgId = ctx.telegramId || '';
     if (!tgId) {
       res.json({ files: [], total: 0 });
       return;
@@ -1438,12 +1698,31 @@ app.get(['/api/user/analytics', '/api/v1/analytics'], async (req: Request, res: 
     }
 
     if (!tgId) {
-      const statusRes = await forwardToPython('GET', '/status');
-      tgId = statusRes.data?.user?.id;
+      const ctx = await resolveCurrentUserContext(req);
+      tgId = ctx.telegramId || '';
+    }
+
+    if (!tgId) {
+      return res.json({
+        success: true,
+        stats: {
+          total_files: 0,
+          total_bytes: 0,
+          total_serves: 0,
+          never_accessed_count: 0,
+          not_accessed_7d_count: 0,
+          not_accessed_7d_bytes: 0,
+          not_accessed_30d_count: 0,
+          not_accessed_30d_bytes: 0,
+        },
+        filter: (req.query.filter as string) || 'all',
+        files: [],
+        total: 0,
+      });
     }
 
     const filterOption = (req.query.filter as string) || 'all';
-    const data = await getFilesAnalyticsFromDb(tgId || null, workspaceId || null, filterOption);
+    const data = await getFilesAnalyticsFromDb(tgId, workspaceId || null, filterOption);
     const filesWithLinks = data.files.map((f: any) => ({
       ...f,
       direct_link: getShortLink(f.file_slug || f.message_id, req),
@@ -1471,14 +1750,17 @@ app.post(['/api/user/analytics/cleanup', '/api/v1/analytics/cleanup'], async (re
         tgId = auth.user.telegram_id;
       }
     }
+    const ctx = await resolveCurrentUserContext(req);
     if (!tgId) {
-      const statusRes = await forwardToPython('GET', '/status');
-      tgId = statusRes.data?.user?.id;
+      tgId = ctx.telegramId || '';
+    }
+    if (!tgId) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
     }
 
     const { rule, file_ids, delete_from_telegram } = req.body || {};
     const cleanupResult = await deleteUnaccessedFilesFromDb(
-      tgId || null,
+      tgId,
       rule || 'not_accessed_7_days',
       file_ids || []
     );
@@ -1486,7 +1768,10 @@ app.post(['/api/user/analytics/cleanup', '/api/v1/analytics/cleanup'], async (re
     if (delete_from_telegram !== false && cleanupResult.deletedFiles.length > 0) {
       for (const file of cleanupResult.deletedFiles) {
         if (file.message_id) {
-          forwardToPython('DELETE', `/files/${file.message_id}`).catch(() => {});
+          forwardToPython('DELETE', `/files/${file.message_id}`, {
+            session_str: ctx.sessionStr,
+            storage_chat: file.storage_chat || ctx.storageChat || 'me',
+          }).catch(() => {});
         }
       }
     }
@@ -1512,9 +1797,9 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
         tgId = auth.user.telegram_id;
       }
     }
+    const ctx = await resolveCurrentUserContext(req);
     if (!tgId) {
-      const statusRes = await forwardToPython('GET', '/status');
-      tgId = statusRes.data?.user?.id;
+      tgId = ctx.telegramId || '';
     }
     if (!tgId) {
       return res.status(401).json({ success: false, error: 'Telegram authentication required to fetch channel files.' });
@@ -1535,7 +1820,7 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
 
     if (!storageChat) {
       const activeWs = await getActiveWorkspaceFromDb(tgId);
-      storageChat = activeWs?.storage_chat || 'me';
+      storageChat = activeWs?.storage_chat || ctx.storageChat || 'me';
       if (!workspaceId && activeWs) {
         workspaceName = activeWs.name;
       }
@@ -1543,7 +1828,7 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
 
     // Retrieve active Telegram MTProto session for user from MySQL
     const userSessionRecord = await getUserTelegramSessionFromDb(tgId);
-    const sessionStr = userSessionRecord?.session_str || undefined;
+    const sessionStr = ctx.sessionStr || userSessionRecord?.session_str || undefined;
 
     console.log(`[Fetch Telegram] Scanning chat '${storageChat}' for user #${tgId} (workspace: ${workspaceName || 'Default'})...`);
 
@@ -1613,8 +1898,8 @@ app.get('/api/user/stats', async (req: Request, res: Response) => {
   let tgId = req.query.telegram_id as string;
   const workspaceId = req.query.workspace_id as string;
   if (!tgId) {
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
+    const ctx = await resolveCurrentUserContext(req);
+    tgId = ctx.telegramId || '';
   }
   if (!tgId) {
     res.json({
@@ -1702,16 +1987,14 @@ app.post('/api/files/rename', async (req: Request, res: Response): Promise<void>
 
   let tgId = telegram_id;
   if (!tgId) {
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
+    const ctx = await resolveCurrentUserContext(req);
+    tgId = ctx.telegramId || '';
   }
 
   if (!tgId) {
     res.status(401).json({ error: 'User not authenticated' });
     return;
   }
-
-  const directDownloadUrl = getShortLink(req.body.file_slug || message_id, req);
 
   const result = await renameFileInDb(tgId, message_id, new_file_name);
   if (result.success) {
@@ -1738,8 +2021,8 @@ app.post('/api/files/reassign', async (req: Request, res: Response): Promise<voi
   }
   let tgId = telegram_id;
   if (!tgId) {
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
+    const ctx = await resolveCurrentUserContext(req);
+    tgId = ctx.telegramId || '';
   }
   if (!tgId) {
     res.status(401).json({ error: 'User not authenticated' });
@@ -1753,18 +2036,33 @@ app.post('/api/files/reassign', async (req: Request, res: Response): Promise<voi
   }
 });
 
-app.get('/api/files', async (_req: Request, res: Response) => {
-  const result = await forwardToPython('GET', '/files');
-  res.status(result.status).json(result.data);
+app.get('/api/files', async (req: Request, res: Response) => {
+  const ctx = await resolveCurrentUserContext(req);
+  if (!ctx.telegramId) {
+    res.json({ files: [], total: 0 });
+    return;
+  }
+  const dbFiles = await getUserFilesFromDb(ctx.telegramId);
+  const formattedFiles = dbFiles.map(file => ({
+    ...file,
+    direct_link: getShortLink(file.file_slug || file.message_id, req)
+  }));
+  res.json({ files: formattedFiles, total: formattedFiles.length });
 });
 
 app.delete('/api/files/:id', async (req: Request, res: Response) => {
-  const statusRes = await forwardToPython('GET', '/status');
-  const tgId = statusRes.data?.user?.id;
-  if (tgId) {
-    await deleteFileFromDb(tgId, req.params.id);
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId;
+  if (!tgId) {
+    res.status(401).json({ error: 'User not authenticated' });
+    return;
   }
-  const result = await forwardToPython('DELETE', `/files/${req.params.id}`);
+  const existingFile = await getFileByMessageId(req.params.id);
+  await deleteFileFromDb(tgId, req.params.id);
+  const result = await forwardToPython('DELETE', `/files/${req.params.id}`, {
+    session_str: ctx.sessionStr,
+    storage_chat: existingFile?.storage_chat || ctx.storageChat || 'me',
+  });
   res.status(result.status).json(result.data);
 });
 
@@ -1776,21 +2074,26 @@ app.post('/api/files/bulk-delete', async (req: Request, res: Response): Promise<
     return;
   }
 
-  const statusRes = await forwardToPython('GET', '/status');
-  const tgId = statusRes.data?.user?.id;
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId;
+  if (!tgId) {
+    res.status(401).json({ error: 'User not authenticated' });
+    return;
+  }
   const deletedIds: (number | string)[] = [];
   const errors: string[] = [];
 
   for (const id of ids) {
     try {
-      if (tgId) {
-        await deleteFileFromDb(tgId, id).catch(() => {});
-      }
-      const pyResult = await forwardToPython('DELETE', `/files/${id}`);
+      const existingFile = await getFileByMessageId(id);
+      await deleteFileFromDb(tgId, id).catch(() => {});
+      const pyResult = await forwardToPython('DELETE', `/files/${id}`, {
+        session_str: ctx.sessionStr,
+        storage_chat: existingFile?.storage_chat || ctx.storageChat || 'me',
+      });
       if (pyResult.status === 200) {
         deletedIds.push(id);
       } else {
-        // If file deleted from DB, consider it deleted from catalog
         deletedIds.push(id);
       }
     } catch (e: any) {
@@ -1826,17 +2129,17 @@ app.get('/api/manifest', async (req: Request, res: Response): Promise<void> => {
   const domain = process.env.CUSTOM_DOMAIN || 's3.htknetwork.in';
   const appUrl = process.env.APP_URL || `https://${domain}`;
 
-  // Query files from DB or Python
-  const statusRes = await forwardToPython('GET', '/status');
-  const tgId = statusRes.data?.user?.id;
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId || (req.query.telegram_id as string);
   let allFiles: any[] = [];
 
   if (tgId) {
     allFiles = await getUserFilesFromDb(tgId);
-  }
-  if (allFiles.length === 0) {
-    const pyFilesRes = await forwardToPython('GET', '/files');
-    allFiles = pyFilesRes.data?.files || [];
+  } else {
+    for (const id of idSet) {
+      const f = await getFileByMessageId(id);
+      if (f) allFiles.push(f);
+    }
   }
 
   const selectedFiles = allFiles.filter((f) => idSet.has(String(f.message_id)));
@@ -1885,7 +2188,7 @@ app.get('/api/manifest', async (req: Request, res: Response): Promise<void> => {
   res.json(manifestData);
 });
 
-// API Integrity: Authenticate by API Key or active Telegram session
+// API Integrity: Authenticate by API Key or active Web User / Telegram session
 async function authenticateApiRequest(req: Request): Promise<{
   authenticated: boolean;
   user?: {
@@ -1896,6 +2199,7 @@ async function authenticateApiRequest(req: Request): Promise<{
     api_key?: string;
     active_workspace_id?: number | null;
     storage_chat?: string;
+    session_str?: string;
   };
   authMethod?: 'api_key' | 'session';
   error?: string;
@@ -1921,21 +2225,21 @@ async function authenticateApiRequest(req: Request): Promise<{
     return { authenticated: true, user, authMethod: 'api_key' };
   }
 
-  // Session fallback from active MTProto connection
-  const statusRes = await forwardToPython('GET', '/status');
-  if (statusRes.status === 200 && statusRes.data?.user?.id) {
-    const tgUser = statusRes.data.user;
-    const tgId = String(tgUser.id);
+  // Session fallback from authenticated web user context
+  const ctx = await resolveCurrentUserContext(req);
+  if (ctx.telegramId) {
+    const tgId = String(ctx.telegramId);
     const key = await getUserApiKey(tgId);
     return {
       authenticated: true,
       user: {
         telegram_id: tgId,
-        first_name: tgUser.first_name,
-        last_name: tgUser.last_name,
-        username: tgUser.username,
+        first_name: ctx.userProfile?.first_name,
+        last_name: ctx.userProfile?.last_name,
+        username: ctx.userProfile?.username,
         api_key: key,
-        storage_chat: statusRes.data.storage_chat || 'me',
+        storage_chat: ctx.storageChat || 'me',
+        session_str: ctx.sessionStr,
       },
       authMethod: 'session',
     };
@@ -1943,7 +2247,7 @@ async function authenticateApiRequest(req: Request): Promise<{
 
   return {
     authenticated: false,
-    error: 'API key is required. Pass user API key via "x-api-key" header or "api_key" parameter.'
+    error: 'Authentication required. Please sign in to your web account or pass your API key via "x-api-key" header.'
   };
 }
 
@@ -2046,40 +2350,44 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
     }
 
     // Check if a Telegram channel or group is linked to this workspace
-    const linkedChannel = targetWs.storage_chat ? String(targetWs.storage_chat).trim() : '';
+    const linkedChannel = targetWs.storage_chat ? String(targetWs.storage_chat).trim() : (auth.user.storage_chat || 'me');
     if (!linkedChannel || linkedChannel === 'none' || linkedChannel === 'unlinked') {
       fs.unlink(filePath, () => {});
       res.status(400).json({
         success: false,
         error: 'Channel Not Linked',
-        message: `No Telegram channel or group is linked to workspace #${targetWs.id} ("${targetWs.name}"). Please link a Telegram channel or group to this workspace in workspace settings before uploading files.`,
+        message: `No Telegram destination is linked to workspace #${targetWs.id} ("${targetWs.name}"). Please choose Saved Messages or link a Telegram channel in workspace settings before uploading files.`,
         workspace_id: targetWs.id,
         workspace_name: targetWs.name,
       });
       return;
     }
 
-    // Direct MTProto upload destination update to workspace's linked channel
-    await forwardToPython('POST', '/storage', { storage_chat: linkedChannel }).catch(() => {});
-
     const originalName = req.file.originalname;
     const customFileName = req.body.file_name || originalName;
     const caption = req.body.caption || '';
 
-    // Retrieve authenticated user's 30-day session from MySQL
-    const userSession = await getUserTelegramSessionFromDb(auth.user.telegram_id);
-    let sessionStrToUse: string | undefined = undefined;
-    if (userSession && !userSession.is_expired && userSession.session_status === 'active') {
-      sessionStrToUse = userSession.session_str || undefined;
+    // Retrieve authenticated user's session from context or MySQL
+    let sessionStrToUse: string | undefined = auth.user.session_str;
+    if (!sessionStrToUse) {
+      const userSession = await getUserTelegramSessionFromDb(auth.user.telegram_id);
+      if (userSession && !userSession.is_expired && userSession.session_status === 'active') {
+        sessionStrToUse = userSession.session_str || undefined;
+      }
     }
 
-    // Guarantee active Telegram MTProto session (auto-restore from MySQL if server restarted)
-    const statusCheck = await forwardToPython('GET', '/status');
-    if (statusCheck.status !== 200 || !statusCheck.data?.connected) {
-      await restoreSessionFromMysql().catch(() => {});
+    if (!sessionStrToUse) {
+      fs.unlink(filePath, () => {});
+      res.status(401).json({
+        success: false,
+        error: 'telegram_not_connected',
+        message: 'Your Telegram account is not connected or your session expired. Please connect your Telegram account in the dashboard.',
+        reconnect_required: true,
+      });
+      return;
     }
 
-    // 5. Execute MTProto Upload via Telethon Daemon directly to workspace's linked channel
+    // 5. Execute MTProto Upload via Telethon Daemon directly to user's personal session & workspace target
     const pyResult = await forwardToPython('POST', '/upload', {
       file_path: filePath,
       file_name: customFileName,
@@ -2185,8 +2493,8 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
 app.get('/api/user/api-key', async (req: Request, res: Response): Promise<void> => {
   let tgId = req.query.telegram_id as string;
   if (!tgId) {
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
+    const ctx = await resolveCurrentUserContext(req);
+    tgId = ctx.telegramId || '';
   }
   if (!tgId) {
     res.status(401).json({ success: false, error: 'User not authenticated' });
@@ -2206,8 +2514,8 @@ app.get('/api/user/api-key', async (req: Request, res: Response): Promise<void> 
 app.post('/api/user/api-key/regenerate', async (req: Request, res: Response): Promise<void> => {
   let tgId = req.body.telegram_id as string;
   if (!tgId) {
-    const statusRes = await forwardToPython('GET', '/status');
-    tgId = statusRes.data?.user?.id;
+    const ctx = await resolveCurrentUserContext(req);
+    tgId = ctx.telegramId || '';
   }
   if (!tgId) {
     res.status(401).json({ success: false, error: 'User not authenticated' });

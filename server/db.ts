@@ -34,22 +34,26 @@ if (!fs.existsSync(DATA_DIR)) {
 
 interface LocalStoreSchema {
   users: Record<string, any>;
+  web_users: any[];
   workspaces: any[];
   user_files: any[];
   telegram_system_sessions: any[];
   system_settings: Record<string, string>;
   workspace_next_id: number;
   file_next_id: number;
+  web_user_next_id: number;
 }
 
 let localStore: LocalStoreSchema = {
   users: {},
+  web_users: [],
   workspaces: [],
   user_files: [],
   telegram_system_sessions: [],
   system_settings: {},
   workspace_next_id: 1,
   file_next_id: 1,
+  web_user_next_id: 1,
 };
 
 function loadLocalStore(): LocalStoreSchema {
@@ -59,12 +63,14 @@ function loadLocalStore(): LocalStoreSchema {
       const parsed = JSON.parse(content);
       localStore = {
         users: parsed.users || {},
+        web_users: parsed.web_users || [],
         workspaces: parsed.workspaces || [],
         user_files: parsed.user_files || [],
         telegram_system_sessions: parsed.telegram_system_sessions || [],
         system_settings: parsed.system_settings || {},
         workspace_next_id: parsed.workspace_next_id || 1,
         file_next_id: parsed.file_next_id || 1,
+        web_user_next_id: parsed.web_user_next_id || 1,
       };
     }
   } catch (err: any) {
@@ -198,6 +204,23 @@ export async function initDb() {
         setting_key VARCHAR(100) PRIMARY KEY,
         setting_value TEXT,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `);
+
+    // 7. Create Web Users Table (Multi-User Public SaaS Registration & Login with Isolated Telegram Linking)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS web_users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(191) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        display_name VARCHAR(255) DEFAULT NULL,
+        telegram_id BIGINT DEFAULT NULL,
+        storage_chat VARCHAR(255) DEFAULT 'me',
+        auth_token VARCHAR(255) DEFAULT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_web_token (auth_token),
+        INDEX idx_web_tg (telegram_id)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     `);
 
@@ -2113,3 +2136,410 @@ export async function deleteUnaccessedFilesFromDb(
     deletedFiles: filesToDelete,
   };
 }
+
+// ============================================================================
+// MULTI-USER WEB AUTHENTICATION & ISOLATED TELEGRAM ACCOUNT LINKING
+// ============================================================================
+
+export interface WebUserRecord {
+  id: number;
+  username: string;
+  display_name: string | null;
+  telegram_id: string | null;
+  storage_chat: string;
+  auth_token: string;
+  created_at?: string;
+}
+
+function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+function verifyPassword(password: string, storedHash: string): boolean {
+  try {
+    const [salt, key] = String(storedHash || '').split(':');
+    if (!salt || !key) return false;
+    const hashBuffer = crypto.scryptSync(password, salt, 64);
+    const keyBuffer = Buffer.from(key, 'hex');
+    if (hashBuffer.length !== keyBuffer.length) return false;
+    return crypto.timingSafeEqual(hashBuffer, keyBuffer);
+  } catch {
+    return false;
+  }
+}
+
+function generateWebAuthToken(): string {
+  return `tc_usr_${crypto.randomBytes(32).toString('hex')}`;
+}
+
+export async function registerWebUser(
+  username: string,
+  password: string,
+  displayName?: string
+): Promise<{ success: boolean; user?: WebUserRecord; token?: string; error?: string }> {
+  const cleanUsername = String(username || '').trim().toLowerCase();
+  if (!cleanUsername || cleanUsername.length < 3) {
+    return { success: false, error: 'Username must be at least 3 characters long.' };
+  }
+  if (!/^[a-z0-9_.-]+$/.test(cleanUsername)) {
+    return { success: false, error: 'Username can only contain letters, numbers, dots, underscores, and hyphens.' };
+  }
+  if (!password || String(password).length < 6) {
+    return { success: false, error: 'Password must be at least 6 characters long.' };
+  }
+
+  const cleanDisplay = (displayName || username).trim();
+  const passwordHash = hashPassword(password);
+  const authToken = generateWebAuthToken();
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    const exists = localStore.web_users.find((u: any) => String(u.username).toLowerCase() === cleanUsername);
+    if (exists) {
+      return { success: false, error: 'Username is already taken. Please choose another username or sign in.' };
+    }
+    const newUser = {
+      id: localStore.web_user_next_id++,
+      username: cleanUsername,
+      password_hash: passwordHash,
+      display_name: cleanDisplay,
+      telegram_id: null,
+      storage_chat: 'me',
+      auth_token: authToken,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    localStore.web_users.push(newUser);
+    saveLocalStore();
+    return {
+      success: true,
+      token: authToken,
+      user: {
+        id: newUser.id,
+        username: newUser.username,
+        display_name: newUser.display_name,
+        telegram_id: null,
+        storage_chat: 'me',
+        auth_token: authToken,
+        created_at: newUser.created_at,
+      },
+    };
+  }
+
+  try {
+    const [existingRows]: any = await pool.query(
+      `SELECT id FROM web_users WHERE username = ? LIMIT 1`,
+      [cleanUsername]
+    );
+    if (Array.isArray(existingRows) && existingRows.length > 0) {
+      return { success: false, error: 'Username is already taken. Please choose another username or sign in.' };
+    }
+
+    const [insertRes]: any = await pool.query(
+      `INSERT INTO web_users (username, password_hash, display_name, telegram_id, storage_chat, auth_token)
+       VALUES (?, ?, ?, NULL, 'me', ?)`,
+      [cleanUsername, passwordHash, cleanDisplay, authToken]
+    );
+
+    const newId = Number(insertRes.insertId);
+    return {
+      success: true,
+      token: authToken,
+      user: {
+        id: newId,
+        username: cleanUsername,
+        display_name: cleanDisplay,
+        telegram_id: null,
+        storage_chat: 'me',
+        auth_token: authToken,
+        created_at: new Date().toISOString(),
+      },
+    };
+  } catch (err: any) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return { success: false, error: 'Username is already registered.' };
+    }
+    isDbConnected = false;
+    return registerWebUser(username, password, displayName);
+  }
+}
+
+export async function loginWebUser(
+  username: string,
+  password: string
+): Promise<{ success: boolean; user?: WebUserRecord; token?: string; error?: string }> {
+  const cleanUsername = String(username || '').trim().toLowerCase();
+  if (!cleanUsername || !password) {
+    return { success: false, error: 'Username and password are required.' };
+  }
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    const found = localStore.web_users.find((u: any) => String(u.username).toLowerCase() === cleanUsername);
+    if (!found || !verifyPassword(password, found.password_hash)) {
+      return { success: false, error: 'Invalid username or password.' };
+    }
+    const newToken = generateWebAuthToken();
+    found.auth_token = newToken;
+    found.updated_at = new Date().toISOString();
+    saveLocalStore();
+    return {
+      success: true,
+      token: newToken,
+      user: {
+        id: found.id,
+        username: found.username,
+        display_name: found.display_name || found.username,
+        telegram_id: found.telegram_id ? String(found.telegram_id) : null,
+        storage_chat: found.storage_chat || 'me',
+        auth_token: newToken,
+        created_at: found.created_at,
+      },
+    };
+  }
+
+  try {
+    const [rows]: any = await pool.query(
+      `SELECT id, username, password_hash, display_name, telegram_id, storage_chat, auth_token, created_at
+       FROM web_users
+       WHERE username = ?
+       LIMIT 1`,
+      [cleanUsername]
+    );
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { success: false, error: 'Invalid username or password.' };
+    }
+    const u = rows[0];
+    if (!verifyPassword(password, u.password_hash)) {
+      return { success: false, error: 'Invalid username or password.' };
+    }
+
+    const newToken = generateWebAuthToken();
+    await pool.query(`UPDATE web_users SET auth_token = ?, updated_at = NOW() WHERE id = ?`, [newToken, u.id]);
+
+    return {
+      success: true,
+      token: newToken,
+      user: {
+        id: Number(u.id),
+        username: u.username,
+        display_name: u.display_name || u.username,
+        telegram_id: u.telegram_id ? String(u.telegram_id) : null,
+        storage_chat: u.storage_chat || 'me',
+        auth_token: newToken,
+        created_at: u.created_at ? new Date(u.created_at).toISOString() : undefined,
+      },
+    };
+  } catch (err: any) {
+    isDbConnected = false;
+    return loginWebUser(username, password);
+  }
+}
+
+export async function getWebUserByToken(token: string): Promise<WebUserRecord | null> {
+  const cleanToken = String(token || '').trim();
+  if (!cleanToken) return null;
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    const found = localStore.web_users.find((u: any) => u.auth_token === cleanToken);
+    if (!found) return null;
+    return {
+      id: Number(found.id),
+      username: found.username,
+      display_name: found.display_name || found.username,
+      telegram_id: found.telegram_id ? String(found.telegram_id) : null,
+      storage_chat: found.storage_chat || 'me',
+      auth_token: found.auth_token,
+      created_at: found.created_at,
+    };
+  }
+
+  try {
+    const [rows]: any = await pool.query(
+      `SELECT id, username, display_name, telegram_id, storage_chat, auth_token, created_at
+       FROM web_users
+       WHERE auth_token = ?
+       LIMIT 1`,
+      [cleanToken]
+    );
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const u = rows[0];
+    return {
+      id: Number(u.id),
+      username: u.username,
+      display_name: u.display_name || u.username,
+      telegram_id: u.telegram_id ? String(u.telegram_id) : null,
+      storage_chat: u.storage_chat || 'me',
+      auth_token: u.auth_token,
+      created_at: u.created_at ? new Date(u.created_at).toISOString() : undefined,
+    };
+  } catch (err: any) {
+    isDbConnected = false;
+    return getWebUserByToken(token);
+  }
+}
+
+export async function linkTelegramToWebUser(
+  webUserId: number,
+  telegramId: number | string,
+  storageChat: string = 'me'
+): Promise<boolean> {
+  const tgId = String(telegramId);
+  const cleanChat = String(storageChat || 'me').trim() || 'me';
+
+  loadLocalStore();
+  const localUser = localStore.web_users.find((u: any) => Number(u.id) === Number(webUserId));
+  if (localUser) {
+    localUser.telegram_id = tgId;
+    localUser.storage_chat = cleanChat;
+    localUser.updated_at = new Date().toISOString();
+    saveLocalStore();
+  }
+
+  if (!pool || !isDbConnected) return true;
+
+  try {
+    await pool.query(
+      `UPDATE web_users SET telegram_id = ?, storage_chat = ?, updated_at = NOW() WHERE id = ?`,
+      [tgId, cleanChat, webUserId]
+    );
+    return true;
+  } catch (err: any) {
+    isDbConnected = false;
+    return true;
+  }
+}
+
+export async function unlinkTelegramFromWebUser(webUserId: number): Promise<boolean> {
+  loadLocalStore();
+  const localUser = localStore.web_users.find((u: any) => Number(u.id) === Number(webUserId));
+  if (localUser) {
+    localUser.telegram_id = null;
+    localUser.updated_at = new Date().toISOString();
+    saveLocalStore();
+  }
+
+  if (!pool || !isDbConnected) return true;
+
+  try {
+    await pool.query(`UPDATE web_users SET telegram_id = NULL, updated_at = NOW() WHERE id = ?`, [webUserId]);
+    return true;
+  } catch (err: any) {
+    isDbConnected = false;
+    return true;
+  }
+}
+
+export async function updateWebUserStorageChat(webUserId: number, storageChat: string): Promise<boolean> {
+  const cleanChat = String(storageChat || 'me').trim() || 'me';
+  loadLocalStore();
+  const localUser = localStore.web_users.find((u: any) => Number(u.id) === Number(webUserId));
+  if (localUser) {
+    localUser.storage_chat = cleanChat;
+    localUser.updated_at = new Date().toISOString();
+    saveLocalStore();
+  }
+
+  if (!pool || !isDbConnected) return true;
+
+  try {
+    await pool.query(
+      `UPDATE web_users SET storage_chat = ?, updated_at = NOW() WHERE id = ?`,
+      [cleanChat, webUserId]
+    );
+    return true;
+  } catch (err: any) {
+    isDbConnected = false;
+    return true;
+  }
+}
+
+export async function logoutWebUser(token: string): Promise<boolean> {
+  const cleanToken = String(token || '').trim();
+  if (!cleanToken) return true;
+
+  loadLocalStore();
+  const localUser = localStore.web_users.find((u: any) => u.auth_token === cleanToken);
+  if (localUser) {
+    localUser.auth_token = null;
+    saveLocalStore();
+  }
+
+  if (!pool || !isDbConnected) return true;
+
+  try {
+    await pool.query(`UPDATE web_users SET auth_token = NULL WHERE auth_token = ?`, [cleanToken]);
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+export async function getUserByTelegramIdFromDb(telegramId: number | string): Promise<{
+  id: number | string;
+  telegram_id: string;
+  first_name: string;
+  last_name?: string;
+  username?: string;
+  phone?: string;
+  storage_chat: string;
+  session_str?: string | null;
+  session_status?: string;
+  is_expired?: boolean;
+  expires_at?: string | null;
+} | null> {
+  const tgId = String(telegramId);
+  if (!tgId) return null;
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    const u = localStore.users[tgId];
+    if (!u) return null;
+    const isExpired = u.session_expires_at ? new Date(u.session_expires_at).getTime() < Date.now() : false;
+    return {
+      id: Number(u.telegram_id) || tgId,
+      telegram_id: String(u.telegram_id),
+      first_name: u.first_name || 'Telegram User',
+      last_name: u.last_name || '',
+      username: u.username || '',
+      phone: u.phone || '',
+      storage_chat: u.storage_chat || 'me',
+      session_str: u.session_str || null,
+      session_status: u.session_status || 'active',
+      is_expired: isExpired,
+      expires_at: u.session_expires_at || null,
+    };
+  }
+
+  try {
+    const [rows]: any = await pool.query(
+      `SELECT telegram_id, first_name, last_name, username, phone, storage_chat, session_str, session_status, session_expires_at,
+              (session_expires_at IS NOT NULL AND session_expires_at < NOW()) AS is_expired
+       FROM users WHERE telegram_id = ? LIMIT 1`,
+      [tgId]
+    );
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const u = rows[0];
+    return {
+      id: Number(u.telegram_id) || tgId,
+      telegram_id: String(u.telegram_id),
+      first_name: u.first_name || 'Telegram User',
+      last_name: u.last_name || '',
+      username: u.username || '',
+      phone: u.phone || '',
+      storage_chat: u.storage_chat || 'me',
+      session_str: u.session_str || null,
+      session_status: u.session_status || 'active',
+      is_expired: Boolean(u.is_expired),
+      expires_at: u.session_expires_at ? new Date(u.session_expires_at).toISOString() : null,
+    };
+  } catch (err: any) {
+    isDbConnected = false;
+    return getUserByTelegramIdFromDb(telegramId);
+  }
+}
+
+
