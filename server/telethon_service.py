@@ -1858,14 +1858,20 @@ async def handle_stream_file(request: web.Request):
 
         # Build list of target chats to try in priority order
         chats_to_try = []
+        has_explicit_chat = False
         if workspace_chat and str(workspace_chat).strip():
             chats_to_try.append(str(workspace_chat).strip())
+            has_explicit_chat = True
         if chat_param and str(chat_param).strip() and str(chat_param).strip() not in chats_to_try:
             chats_to_try.append(str(chat_param).strip())
-        if manager.storage_chat and manager.storage_chat not in chats_to_try:
-            chats_to_try.append(manager.storage_chat)
-        if "me" not in chats_to_try:
-            chats_to_try.append("me")
+            has_explicit_chat = True
+
+        # Only add default storage_chat or "me" if no target chat was specified at all
+        if not chats_to_try:
+            if manager.storage_chat and manager.storage_chat not in chats_to_try:
+                chats_to_try.append(manager.storage_chat)
+            if "me" not in chats_to_try:
+                chats_to_try.append("me")
 
         logger.warning(f"[STREAM REQUEST] msg_id={msg_id}, chats_to_try={chats_to_try}")
         # 1. Try with user's Telegram session if provided
@@ -1914,8 +1920,8 @@ async def handle_stream_file(request: web.Request):
                     except Exception as ae:
                         logger.warning(f"Admin session entity notice for #{msg_id} in '{target_chat}': {ae}", exc_info=True)
 
-        # 3. Deep search across Telegram channel/group dialogs if message not found in specified targets
-        if not msg or not msg.media:
+        # 3. Only perform broad dialog search if NO explicit chat was designated, to prevent wrong file collisions
+        if (not msg or not msg.media) and not has_explicit_chat:
             search_clients = []
             if user_client and await user_client.is_user_authorized():
                 search_clients.append(user_client)

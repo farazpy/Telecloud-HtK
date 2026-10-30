@@ -245,6 +245,10 @@ export async function initDb() {
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN access_count INT DEFAULT 0;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD COLUMN last_accessed_at DATETIME DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE user_files ADD INDEX idx_file_slug (file_slug);`); } catch {}
+    // Safe index update: Drop legacy (telegram_id, message_id) constraint which wrongly collided different channels sharing message IDs
+    try { await pool.query(`ALTER TABLE user_files DROP INDEX uq_user_msg;`); } catch {}
+    try { await pool.query(`ALTER TABLE user_files ADD UNIQUE KEY uq_file_slug (file_slug);`); } catch {}
+    try { await pool.query(`ALTER TABLE user_files ADD INDEX idx_tg_chat_msg (telegram_id, storage_chat, message_id);`); } catch {}
 
     // Backfill unique file_slug for any legacy files missing a slug
     try {
@@ -617,7 +621,7 @@ export async function setActiveWorkspaceInDb(
 
 export async function getActiveWorkspaceFromDb(telegramId: number | string): Promise<WorkspaceRecord | null> {
   const { workspaces, active_workspace_id } = await getWorkspacesFromDb(telegramId);
-  return workspaces.find((w) => w.id === active_workspace_id) || workspaces[0] || null;
+  return workspaces.find((w) => Number(w.id) === Number(active_workspace_id)) || workspaces[0] || null;
 }
 
 export async function getWorkspaceById(workspaceId: number): Promise<WorkspaceRecord | null> {
@@ -777,7 +781,7 @@ export async function verifyWorkspaceBelongsToUser(
   const wsId = Number(workspaceId);
 
   const { workspaces } = await getWorkspacesFromDb(tgId);
-  return workspaces.find((w) => w.id === wsId) || null;
+  return workspaces.find((w) => Number(w.id) === wsId) || null;
 }
 
 export async function saveUserToDb(user: {
@@ -878,11 +882,12 @@ export async function saveFileToDb(fileData: {
   const wsId = fileData.workspace_id ? Number(fileData.workspace_id) : null;
   const wsName = fileData.workspace_name || null;
   const fileSlug = fileData.file_slug || generateUniqueFileSlug(8);
+  const storageChat = fileData.storage_chat ? String(fileData.storage_chat).trim() : 'me';
 
   if (!pool || !isDbConnected) {
     loadLocalStore();
     const existingIdx = localStore.user_files.findIndex(
-      (f) => String(f.telegram_id) === tgId && String(f.storage_chat || 'me') === String(fileData.storage_chat || 'me') && String(f.message_id) === msgId
+      (f) => f.file_slug === fileSlug || (String(f.telegram_id) === tgId && String(f.storage_chat || 'me') === storageChat && String(f.message_id) === msgId)
     );
 
     const record = {
@@ -891,13 +896,13 @@ export async function saveFileToDb(fileData: {
       message_id: Number(msgId),
       workspace_id: wsId,
       workspace_name: wsName,
-      file_slug: existingIdx >= 0 && localStore.user_files[existingIdx].file_slug ? localStore.user_files[existingIdx].file_slug : fileSlug,
+      file_slug: fileSlug,
       file_name: fileData.file_name,
       original_name: fileData.original_name,
       file_size: fileData.file_size,
       mime_type: fileData.mime_type || 'application/octet-stream',
       caption: fileData.caption || '',
-      storage_chat: fileData.storage_chat || 'me',
+      storage_chat: storageChat,
       direct_link: fileData.direct_link || '',
       download_password: fileData.download_password || null,
       is_restricted: existingIdx >= 0 ? Boolean(localStore.user_files[existingIdx].is_restricted) : false,
@@ -911,56 +916,73 @@ export async function saveFileToDb(fileData: {
       localStore.user_files.unshift(record);
     }
     saveLocalStore();
-    return { success: true, file_slug: record.file_slug };
+    return { success: true, file_slug: fileSlug };
   }
 
   try {
-    await pool.query(
-      `INSERT INTO user_files 
-        (telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
-       ON DUPLICATE KEY UPDATE
-        workspace_id = COALESCE(VALUES(workspace_id), workspace_id),
-        workspace_name = COALESCE(VALUES(workspace_name), workspace_name),
-        file_slug = COALESCE(file_slug, VALUES(file_slug)),
-        file_name = VALUES(file_name),
-        original_name = VALUES(original_name),
-        file_size = VALUES(file_size),
-        mime_type = VALUES(mime_type),
-        storage_chat = VALUES(storage_chat),
-        caption = VALUES(caption),
-        direct_link = VALUES(direct_link),
-        download_password = VALUES(download_password),
-        updated_at = NOW()`,
-      [
-        tgId,
-        msgId,
-        wsId,
-        wsName,
-        fileSlug,
-        fileData.file_name,
-        fileData.original_name,
-        fileData.file_size,
-        fileData.mime_type || 'application/octet-stream',
-        fileData.caption || '',
-        fileData.storage_chat || 'me',
-        fileData.direct_link || '',
-        fileData.download_password || null,
-      ]
+    // Check if record exists with this unique file_slug
+    const [existingSlugRows]: any = await pool.query(
+      `SELECT id FROM user_files WHERE file_slug = ? LIMIT 1`,
+      [fileSlug]
     );
 
-    let finalSlug = fileSlug;
-    try {
-      const [row]: any = await pool.query(
-        `SELECT file_slug FROM user_files WHERE telegram_id = ? AND message_id = ? LIMIT 1`,
-        [tgId, msgId]
+    if (existingSlugRows && existingSlugRows.length > 0) {
+      await pool.query(
+        `UPDATE user_files SET 
+          telegram_id = ?,
+          message_id = ?,
+          workspace_id = ?,
+          workspace_name = ?,
+          file_name = ?,
+          original_name = ?,
+          file_size = ?,
+          mime_type = ?,
+          caption = ?,
+          storage_chat = ?,
+          direct_link = ?,
+          download_password = ?,
+          updated_at = NOW()
+        WHERE file_slug = ?`,
+        [
+          tgId,
+          msgId,
+          wsId,
+          wsName,
+          fileData.file_name,
+          fileData.original_name,
+          fileData.file_size,
+          fileData.mime_type || 'application/octet-stream',
+          fileData.caption || '',
+          storageChat,
+          fileData.direct_link || '',
+          fileData.download_password || null,
+          fileSlug,
+        ]
       );
-      if (row && row[0]?.file_slug) {
-        finalSlug = row[0].file_slug;
-      }
-    } catch {}
+    } else {
+      await pool.query(
+        `INSERT INTO user_files 
+          (telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [
+          tgId,
+          msgId,
+          wsId,
+          wsName,
+          fileSlug,
+          fileData.file_name,
+          fileData.original_name,
+          fileData.file_size,
+          fileData.mime_type || 'application/octet-stream',
+          fileData.caption || '',
+          storageChat,
+          fileData.direct_link || '',
+          fileData.download_password || null,
+        ]
+      );
+    }
 
-    return { success: true, file_slug: finalSlug };
+    return { success: true, file_slug: fileSlug };
   } catch (err: any) {
     isDbConnected = false;
     return saveFileToDb(fileData);
@@ -985,18 +1007,25 @@ export async function getUserFilesFromDb(
 
   try {
     let query = `
-      SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, storage_chat, direct_link, download_password, is_restricted, access_count, last_accessed_at, created_at, updated_at
-      FROM user_files
-      WHERE telegram_id = ?
+      SELECT 
+        f.id, f.telegram_id, f.message_id, f.workspace_id, 
+        COALESCE(w.name, f.workspace_name, 'Default Workspace') AS workspace_name, 
+        COALESCE(w.storage_chat, f.storage_chat, 'me') AS storage_chat,
+        f.file_slug, f.file_name, f.original_name, f.file_size, f.mime_type, f.caption, 
+        f.direct_link, f.download_password, f.is_restricted, f.access_count, f.last_accessed_at, 
+        f.created_at, f.updated_at
+      FROM user_files f
+      LEFT JOIN workspaces w ON f.workspace_id = w.id
+      WHERE f.telegram_id = ?
     `;
     const params: any[] = [tgId];
 
     if (shouldFilterWs) {
-      query += ` AND workspace_id = ?`;
+      query += ` AND f.workspace_id = ?`;
       params.push(Number(workspaceId));
     }
 
-    query += ` ORDER BY created_at DESC`;
+    query += ` ORDER BY f.created_at DESC`;
 
     const [rows] = await pool.query(query, params);
     return rows as any[];
@@ -1016,21 +1045,10 @@ export async function getFileBySlug(slug: string) {
     const bySlug = localStore.user_files.find((f) => f.file_slug === cleanSlug);
     if (bySlug) return bySlug;
 
-    // 2. Base36 decoding
-    if (!/^\d+$/.test(cleanSlug)) {
-      const decodedNum = parseInt(cleanSlug, 36);
-      if (!isNaN(decodedNum) && decodedNum > 0) {
-        const byBase36 = localStore.user_files.find((f) => Number(f.message_id) === decodedNum);
-        if (byBase36) return byBase36;
-      }
-    }
-
-    // 3. Fallback message_id
+    // 2. Numeric record id fallback only
     if (/^\d+$/.test(cleanSlug)) {
-      const byMsgId = localStore.user_files.find(
-        (f) => String(f.message_id) === cleanSlug || String(f.id) === cleanSlug
-      );
-      if (byMsgId) return byMsgId;
+      const byId = localStore.user_files.find((f) => String(f.id) === cleanSlug);
+      if (byId) return byId;
     }
     return null;
   }
@@ -1038,36 +1056,34 @@ export async function getFileBySlug(slug: string) {
   try {
     // 1. Exact match on unique file_slug
     const [rows]: any = await pool.query(
-      `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, is_restricted, created_at 
-       FROM user_files 
-       WHERE file_slug = ? LIMIT 1`,
+      `SELECT 
+        f.id, f.telegram_id, f.message_id, f.workspace_id, 
+        COALESCE(w.name, f.workspace_name, 'Default Workspace') AS workspace_name,
+        COALESCE(f.storage_chat, w.storage_chat, 'me') AS storage_chat,
+        f.file_slug, f.file_name, f.original_name, f.file_size, f.mime_type, f.caption, 
+        f.download_password, f.direct_link, f.is_restricted, f.created_at 
+       FROM user_files f
+       LEFT JOIN workspaces w ON f.workspace_id = w.id
+       WHERE f.file_slug = ? LIMIT 1`,
       [cleanSlug]
     );
     if (rows && rows.length > 0) return rows[0];
 
-    // 2. Base36 decoding fallback for legacy short links (e.g. /f/4A)
-    if (!/^\d+$/.test(cleanSlug)) {
-      const decodedNum = parseInt(cleanSlug, 36);
-      if (!isNaN(decodedNum) && decodedNum > 0) {
-        const [base36Rows]: any = await pool.query(
-          `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, is_restricted, created_at 
-           FROM user_files 
-           WHERE message_id = ? LIMIT 1`,
-          [decodedNum]
-        );
-        if (base36Rows && base36Rows.length > 0) return base36Rows[0];
-      }
-    }
-
-    // 3. Fallback by numeric message_id or record id
+    // 2. Match by exact record primary key id (if numeric)
     if (/^\d+$/.test(cleanSlug)) {
-      const [msgRows]: any = await pool.query(
-        `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, original_name, file_size, mime_type, caption, download_password, storage_chat, direct_link, is_restricted, created_at 
-         FROM user_files 
-         WHERE message_id = ? OR id = ? LIMIT 1`,
-        [cleanSlug, cleanSlug]
+      const [idRows]: any = await pool.query(
+        `SELECT 
+          f.id, f.telegram_id, f.message_id, f.workspace_id, 
+          COALESCE(w.name, f.workspace_name, 'Default Workspace') AS workspace_name,
+          COALESCE(f.storage_chat, w.storage_chat, 'me') AS storage_chat,
+          f.file_slug, f.file_name, f.original_name, f.file_size, f.mime_type, f.caption, 
+          f.download_password, f.direct_link, f.is_restricted, f.created_at 
+         FROM user_files f
+         LEFT JOIN workspaces w ON f.workspace_id = w.id
+         WHERE f.id = ? LIMIT 1`,
+        [Number(cleanSlug)]
       );
-      if (msgRows && msgRows.length > 0) return msgRows[0];
+      if (idRows && idRows.length > 0) return idRows[0];
     }
   } catch (e) {
     isDbConnected = false;
@@ -1083,19 +1099,28 @@ export async function getFileByMessageId(messageId: number | string, storageChat
     return localStore.user_files.find((f) => {
       const matchMsg = String(f.message_id) === msgId;
       if (!matchMsg) return false;
-      if (storageChat) return f.storage_chat === storageChat;
+      if (storageChat) return String(f.storage_chat || 'me') === String(storageChat);
       return true;
     }) || null;
   }
 
   try {
     const params: any[] = [msgId];
-    let query = `SELECT id, telegram_id, message_id, workspace_id, workspace_name, file_slug, file_name, file_size, mime_type, download_password, storage_chat, direct_link, is_restricted, created_at FROM user_files WHERE message_id = ?`;
+    let query = `
+      SELECT 
+        f.id, f.telegram_id, f.message_id, f.workspace_id, 
+        COALESCE(w.name, f.workspace_name, 'Default Workspace') AS workspace_name,
+        COALESCE(f.storage_chat, w.storage_chat, 'me') AS storage_chat,
+        f.file_slug, f.file_name, f.file_size, f.mime_type, f.download_password, f.direct_link, f.is_restricted, f.created_at 
+      FROM user_files f
+      LEFT JOIN workspaces w ON f.workspace_id = w.id
+      WHERE f.message_id = ?
+    `;
     if (storageChat) {
-      query += ` AND storage_chat = ?`;
-      params.push(storageChat);
+      query += ` AND (f.storage_chat = ? OR w.storage_chat = ?)`;
+      params.push(storageChat, storageChat);
     }
-    query += ` LIMIT 1`;
+    query += ` ORDER BY f.id DESC LIMIT 1`;
     const [rows]: any = await pool.query(query, params);
     if (rows && rows.length > 0) return rows[0];
   } catch (e) {

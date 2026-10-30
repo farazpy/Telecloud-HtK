@@ -275,8 +275,8 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v2.0.2
-  const APP_VERSION = "v2.0.2";
+  // App Version in Header - Incremented to v2.0.3
+  const APP_VERSION = "v2.0.3";
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -1223,6 +1223,7 @@ export default function App() {
           setTargetChatInput(targetWs.storage_chat);
         }
         setUploadWorkspaceId(workspaceId);
+        setVaultWorkspaceFilter(String(workspaceId));
         setWorkspaceDropdownOpen(false);
         await fetchWorkspaces();
         await fetchFiles();
@@ -1351,16 +1352,21 @@ export default function App() {
       const url = user?.id ? `/api/user/files?telegram_id=${user.id}` : '/api/user/files';
       const data = await safeJsonFetch(url);
       if (data?.files && data.files.length > 0) {
-        const enriched = data.files.map((f: any) => ({
-          ...f,
-          workspace_id: f.workspace_id,
-          workspace_name: f.workspace_name || activeWorkspace?.name || 'Default Workspace',
-          storage_chat: f.storage_chat || 'me',
-          direct_link: f.direct_link || (f.file_slug ? `${window.location.origin}/f/${f.file_slug}` : `${window.location.origin}/api/download/${f.message_id}/${encodeURIComponent(f.file_name)}`),
-          telegram_link: (f.storage_chat || storageChat).startsWith('-100')
-            ? `https://t.me/c/${(f.storage_chat || storageChat).replace('-100', '')}/${f.message_id}`
-            : `https://t.me/me`
-        }));
+        const enriched = data.files.map((f: any) => {
+          const wsRecord = workspaces.find((w) => Number(w.id) === Number(f.workspace_id));
+          const resolvedWsName = f.workspace_name || wsRecord?.name || 'Default Workspace';
+          const resolvedStorageChat = f.storage_chat || wsRecord?.storage_chat || 'me';
+          return {
+            ...f,
+            workspace_id: f.workspace_id,
+            workspace_name: resolvedWsName,
+            storage_chat: resolvedStorageChat,
+            direct_link: f.direct_link || (f.file_slug ? `${window.location.origin}/f/${f.file_slug}` : `${window.location.origin}/api/download/${f.message_id}/${encodeURIComponent(f.file_name)}`),
+            telegram_link: resolvedStorageChat.startsWith('-100')
+              ? `https://t.me/c/${resolvedStorageChat.replace('-100', '')}/${f.message_id}`
+              : `https://t.me/me`
+          };
+        });
         setFiles(enriched);
       } else {
         const tgData = await safeJsonFetch('/api/files');
@@ -1479,12 +1485,13 @@ export default function App() {
     }
   }, [dashboardTab, analyticsFilter, activeWorkspaceId, connected]);
 
-  const selectStorageDestination = async (chatId: string, title?: string) => {
+  const selectStorageDestination = async (chatId: string, title?: string, wsId?: number) => {
+    const targetWsId = wsId || activeWorkspace?.id;
     try {
       const data = await safeJsonFetch('/api/storage', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storage_chat: chatId }),
+        body: JSON.stringify({ storage_chat: chatId, workspace_id: targetWsId }),
       });
       if (data.success) {
         setStorageChat(data.storage_chat);
@@ -2694,16 +2701,14 @@ export default function App() {
   };
 
   const filteredFiles = files.filter((file) => {
-    // Multi-Workspace Filter: If user is inside a workspace, filter automatically to active workspace
-    if (activeWorkspace) {
-      const belongsToActive =
-        String(file.workspace_id) === String(activeWorkspace.id) ||
-        (!file.workspace_id && activeWorkspace.is_default);
-      if (!belongsToActive) {
-        return false;
-      }
-    } else if (vaultWorkspaceFilter !== 'all') {
-      if (String(file.workspace_id) !== String(vaultWorkspaceFilter)) {
+    // Multi-Workspace Filter:
+    // If vaultWorkspaceFilter is set to a specific workspace ID, filter strictly by that workspace.
+    // If vaultWorkspaceFilter is 'all', display all files across all user workspaces.
+    if (vaultWorkspaceFilter && vaultWorkspaceFilter !== 'all') {
+      const matchesWs =
+        String(file.workspace_id) === String(vaultWorkspaceFilter) ||
+        (!file.workspace_id && workspaces.find((w) => String(w.id) === String(vaultWorkspaceFilter))?.is_default);
+      if (!matchesWs) {
         return false;
       }
     }

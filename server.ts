@@ -1597,9 +1597,13 @@ app.post('/api/storage', async (req: Request, res: Response) => {
   });
 
   if (tgId) {
-    const activeWs = await getActiveWorkspaceFromDb(tgId);
-    if (activeWs) {
-      await updateWorkspaceInDb(activeWs.id, tgId, { storage_chat: storageChat }).catch(() => {});
+    const targetWsId = req.body.workspace_id ? Number(req.body.workspace_id) : null;
+    const wsToUpdate = targetWsId 
+      ? await getWorkspaceById(targetWsId).catch(() => null)
+      : await getActiveWorkspaceFromDb(tgId).catch(() => null);
+
+    if (wsToUpdate && wsToUpdate.id) {
+      await updateWorkspaceInDb(wsToUpdate.id, tgId, { storage_chat: storageChat }).catch(() => {});
     }
   }
 
@@ -2234,9 +2238,9 @@ async function authenticateApiRequest(req: Request): Promise<{
       authenticated: true,
       user: {
         telegram_id: tgId,
-        first_name: ctx.userProfile?.first_name,
-        last_name: ctx.userProfile?.last_name,
-        username: ctx.userProfile?.username,
+        first_name: ctx.webUser?.display_name || undefined,
+        last_name: undefined,
+        username: ctx.webUser?.username || undefined,
         api_key: key,
         storage_chat: ctx.storageChat || 'me',
         session_str: ctx.sessionStr,
@@ -2422,27 +2426,9 @@ async function handleSecureUpload(req: Request, res: Response): Promise<void> {
 
     // 6. Record File in MySQL Database Catalog with Globally Unique Slug
     const downloadPassword = req.body.password || req.body.download_password || null;
-    const generatedSlug = generateUniqueFileSlug(8);
-
-    const saveResult = await saveFileToDb({
-      telegram_id: auth.user.telegram_id,
-      message_id: messageId,
-      workspace_id: targetWs?.id || null,
-      workspace_name: targetWs?.name || 'Default Workspace',
-      file_slug: generatedSlug,
-      file_name: customFileName,
-      original_name: originalName,
-      file_size: pyResult.data.file_size || req.file.size,
-      mime_type: pyResult.data.mime_type || req.file.mimetype,
-      caption,
-      storage_chat: telegramChat,
-      download_password: downloadPassword,
-    });
-
-    const finalSlug = saveResult.file_slug || generatedSlug;
+    const finalSlug = generateUniqueFileSlug(8);
     const directDownloadUrl = getShortLink(finalSlug, req);
 
-    // Update stored direct_link with authoritative unique slug link
     await saveFileToDb({
       telegram_id: auth.user.telegram_id,
       message_id: messageId,
@@ -2888,11 +2874,31 @@ app.options(['/api/download/:messageId/:filename?', '/f/:file_id/:filename?', '/
 });
 
 app.head(['/api/download/:messageId/:filename?', '/api/download/:messageId'], async (req: Request, res: Response): Promise<void> => {
-  await streamCdnFile(req.params.messageId, req, res, { customFileName: req.params.filename });
+  await streamCdnFile(req.params.messageId, req, res, { 
+    customFileName: req.params.filename,
+    storageChat: (req.query.storage_chat as string) || (req.query.chat_id as string),
+  });
 });
 
 app.get(['/api/download/:messageId/:filename?', '/api/download/:messageId'], async (req: Request, res: Response): Promise<void> => {
-  await streamCdnFile(req.params.messageId, req, res, { customFileName: req.params.filename });
+  await streamCdnFile(req.params.messageId, req, res, { 
+    customFileName: req.params.filename,
+    storageChat: (req.query.storage_chat as string) || (req.query.chat_id as string),
+  });
+});
+
+app.head(['/stream/:message_id/:filename?', '/stream/:message_id'], async (req: Request, res: Response): Promise<void> => {
+  await streamCdnFile(req.params.message_id, req, res, { 
+    customFileName: req.params.filename,
+    storageChat: (req.query.storage_chat as string) || (req.query.chat_id as string),
+  });
+});
+
+app.get(['/stream/:message_id/:filename?', '/stream/:message_id'], async (req: Request, res: Response): Promise<void> => {
+  await streamCdnFile(req.params.message_id, req, res, { 
+    customFileName: req.params.filename,
+    storageChat: (req.query.storage_chat as string) || (req.query.chat_id as string),
+  });
 });
 
 // Direct Shortlink Slug Service (s3.htknetwork.in/f/{file_slug}) - Fully Public CDN
