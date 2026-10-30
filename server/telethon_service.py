@@ -101,9 +101,51 @@ class ChannelLegacy142:
             participants_count=_participants_count
         )
 
+_orig_mmd_init = MessageMediaDocument.__init__
+def _safe_mmd_init(self, document=None, nopremium=None, ttl_seconds=None, spoiler=None, **kwargs):
+    self.document = document
+    self.nopremium = nopremium
+    self.spoiler = spoiler
+    self.ttl_seconds = ttl_seconds
+    try:
+        _orig_mmd_init(self, document=document, nopremium=nopremium, ttl_seconds=ttl_seconds)
+    except TypeError:
+        try:
+            _orig_mmd_init(self, document=document)
+        except TypeError:
+            pass
+MessageMediaDocument.__init__ = _safe_mmd_init
+
+_orig_mmp_init = MessageMediaPhoto.__init__
+def _safe_mmp_init(self, photo=None, ttl_seconds=None, spoiler=None, **kwargs):
+    self.photo = photo
+    self.ttl_seconds = ttl_seconds
+    self.spoiler = spoiler
+    try:
+        _orig_mmp_init(self, photo=photo, ttl_seconds=ttl_seconds)
+    except TypeError:
+        try:
+            _orig_mmp_init(self, photo=photo)
+        except TypeError:
+            pass
+MessageMediaPhoto.__init__ = _safe_mmp_init
+
 class MessageMediaDocumentLegacy9cb070d7(MessageMediaDocument):
     CONSTRUCTOR_ID = 0x9cb070d7
     SUBCLASS_OF_ID = 0xfe31a949
+
+    def __init__(self, document=None, nopremium=None, spoiler=None, ttl_seconds=None, **kwargs):
+        self.document = document
+        self.nopremium = nopremium
+        self.spoiler = spoiler
+        self.ttl_seconds = ttl_seconds
+        try:
+            super().__init__(document=document, nopremium=nopremium, ttl_seconds=ttl_seconds, spoiler=spoiler)
+        except TypeError:
+            try:
+                super().__init__(document=document)
+            except TypeError:
+                pass
 
     @classmethod
     def from_reader(cls, reader):
@@ -118,7 +160,8 @@ class MessageMediaDocumentLegacy9cb070d7(MessageMediaDocument):
             _ttl_seconds = reader.read_int()
         else:
             _ttl_seconds = None
-        return cls(nopremium=_nopremium, spoiler=_spoiler, document=_document, ttl_seconds=_ttl_seconds)
+        return cls(document=_document, nopremium=_nopremium, spoiler=_spoiler, ttl_seconds=_ttl_seconds)
+
 
 class MessageLegacy38116ee0(Message):
     CONSTRUCTOR_ID = 0x38116ee0
