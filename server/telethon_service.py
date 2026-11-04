@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import asyncio
+import datetime
 import mimetypes
 import logging
 import urllib.parse
@@ -49,6 +50,30 @@ from telethon.errors import (
     AuthKeyDuplicatedError,
     RPCError,
 )
+
+from telethon.network.mtprotosender import MTProtoSender
+from telethon.network.mtprotoplainsender import MTProtoPlainSender
+
+# Defensive patch: Prevent unhandled AttributeError ('NoneType' object has no attribute 'send')
+# when connection disconnects or drops during sending or authentication.
+_orig_plain_send = MTProtoPlainSender.send
+async def _patched_plain_send(self, request):
+    if not getattr(self, '_connection', None):
+        raise ConnectionError('Plain connection not established')
+    return await _orig_plain_send(self, request)
+MTProtoPlainSender.send = _patched_plain_send
+
+_orig_sender_send_loop = MTProtoSender._send_loop
+async def _patched_sender_send_loop(self):
+    try:
+        await _orig_sender_send_loop(self)
+    except AttributeError as e:
+        if 'send' in str(e) or 'NoneType' in str(e):
+            self._log.info('Handled disconnected socket in MTProto _send_loop: %s', e)
+            self._start_reconnect(IOError(str(e)))
+        else:
+            raise
+MTProtoSender._send_loop = _patched_sender_send_loop
 
 from telethon.tl.alltlobjects import tlobjects
 from telethon.tl.types import User, Dialog, Chat, Channel, PeerChat, NotificationSoundLocal, Message, MessageMediaDocument
@@ -447,6 +472,7 @@ class TelethonManager:
         self.qr_client: Optional[TelegramClient] = None
         self.qr_login_obj = None
         self.qr_task: Optional[asyncio.Task] = None
+        self.qr_lock: Optional[asyncio.Lock] = None
         self.qr_status: str = "idle"
         self.qr_user: Optional[Dict[str, Any]] = None
         self.qr_error: Optional[str] = None
@@ -1073,53 +1099,105 @@ class TelethonManager:
     # QR CODE LOGIN (Continuous Listener + Direct Authorization Detection)
     # =========================================================================
     async def start_qr_login(self, api_id: int, api_hash: str, storage_chat: str = "me"):
-        try:
-            if hasattr(self, "qr_task") and self.qr_task and not self.qr_task.done():
-                self.qr_task.cancel()
-                try:
-                    await self.qr_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-                self.qr_task = None
+        if self.qr_lock is None:
+            self.qr_lock = asyncio.Lock()
 
-            if self.qr_client:
-                try:
-                    await self.qr_client.disconnect()
-                except Exception:
-                    pass
-                self.qr_client = None
-
+        async with self.qr_lock:
             try:
-                current_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                current_loop = None
+                # 1. If we already have an active, connected QR client and a valid unexpired token, return it
+                if (
+                    self.qr_client
+                    and hasattr(self.qr_client, "is_connected")
+                    and self.qr_client.is_connected()
+                    and self.qr_login_obj
+                    and getattr(self.qr_login_obj, "url", None)
+                    and self.api_id == api_id
+                    and self.api_hash == api_hash
+                ):
+                    expires_val = getattr(self.qr_login_obj, "expires", None)
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    if expires_val and (isinstance(expires_val, datetime.datetime) and expires_val > now_utc + datetime.timedelta(seconds=20)):
+                        expires_str = expires_val.isoformat()
+                        return {
+                            "success": True,
+                            "token_url": self.qr_login_obj.url,
+                            "expires": expires_str
+                        }
 
-            session = StringSession()
-            self.qr_client = self.create_telegram_client(session, api_id=api_id, api_hash=api_hash, loop=current_loop)
-            await self.qr_client.connect()
-            self.qr_login_obj = await self.qr_client.qr_login()
-            self.api_id = api_id
-            self.api_hash = api_hash
-            self.storage_chat = storage_chat
+                # 2. Cleanly teardown any existing background QR task
+                if hasattr(self, "qr_task") and self.qr_task and not self.qr_task.done():
+                    self.qr_task.cancel()
+                    try:
+                        await self.qr_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    self.qr_task = None
 
-            self.qr_status = "waiting"
-            self.qr_user = None
-            self.qr_error = None
+                # 3. Cleanly disconnect prior QR client
+                if self.qr_client:
+                    await safe_disconnect(self.qr_client)
+                    self.qr_client = None
 
-            # Launch continuous background task to keep event listener alive!
-            self.qr_task = asyncio.create_task(self._run_qr_wait())
+                self.qr_login_obj = None
+                self.qr_status = "waiting"
+                self.qr_user = None
+                self.qr_error = None
 
-            expires_val = getattr(self.qr_login_obj, "expires", None)
-            expires_str = expires_val.isoformat() if hasattr(expires_val, "isoformat") else str(expires_val or 300)
+                try:
+                    current_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    current_loop = None
 
-            return {
-                "success": True,
-                "token_url": self.qr_login_obj.url,
-                "expires": expires_str
-            }
-        except Exception as e:
-            logger.error(f"Error starting QR login: {e}")
-            raise ValueError(f"Failed to generate QR code: {str(e)}")
+                # 4. Attempt to initialize and connect new QR client (with retry for resilience)
+                last_err = None
+                for attempt in range(2):
+                    try:
+                        session = StringSession()
+                        client = self.create_telegram_client(
+                            session,
+                            api_id=api_id,
+                            api_hash=api_hash,
+                            loop=current_loop,
+                            connection_retries=5,
+                            retry_delay=1,
+                            timeout=15
+                        )
+                        await client.connect()
+
+                        if not client.is_connected():
+                            await client.connect()
+
+                        qr_obj = await client.qr_login()
+                        self.qr_client = client
+                        self.qr_login_obj = qr_obj
+                        self.api_id = api_id
+                        self.api_hash = api_hash
+                        self.storage_chat = storage_chat
+                        break
+                    except Exception as err:
+                        last_err = err
+                        logger.warning(f"Attempt {attempt + 1} at QR login initialization failed: {err}")
+                        if 'client' in locals() and client:
+                            await safe_disconnect(client)
+                        await asyncio.sleep(0.5)
+
+                if not self.qr_login_obj:
+                    raise last_err or RuntimeError("Unable to initialize Telegram QR authentication session.")
+
+                # Launch continuous background task to keep event listener alive!
+                self.qr_task = asyncio.create_task(self._run_qr_wait())
+
+                expires_val = getattr(self.qr_login_obj, "expires", None)
+                expires_str = expires_val.isoformat() if hasattr(expires_val, "isoformat") else str(expires_val or 300)
+
+                return {
+                    "success": True,
+                    "token_url": self.qr_login_obj.url,
+                    "expires": expires_str
+                }
+            except Exception as e:
+                logger.error(f"Error starting QR login: {e}")
+                raise ValueError(f"Failed to generate QR code: {str(e)}")
 
     async def _run_qr_wait(self):
         try:
