@@ -270,7 +270,7 @@ function ensurePythonDepsAndStart() {
   const check = spawn('python3', ['-c', 'import telethon, aiohttp']);
   check.on('close', (code) => {
     if (code !== 0) {
-      console.log('[Node] Installing Python dependencies (telethon, aiohttp, cryptg)...');
+      console.log('[Node] Installing Python dependencies (telethon, aiohttp)...');
       const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages'], {
         stdio: 'inherit',
       });
