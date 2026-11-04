@@ -275,8 +275,8 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v2.1.8
-  const APP_VERSION = "v2.1.8";
+  // App Version in Header - Incremented to v2.1.9
+  const APP_VERSION = "v2.1.9";
 
   // Helper for guaranteed unique React component keys across multi-workspace files
   const getFileItemKey = (

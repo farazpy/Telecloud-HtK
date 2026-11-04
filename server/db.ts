@@ -851,7 +851,7 @@ export async function saveUserToDb(user: {
          session_str = COALESCE(VALUES(session_str), session_str),
          bot_token = COALESCE(VALUES(bot_token), bot_token),
          session_status = 'active',
-         session_expires_at = COALESCE(session_expires_at, DATE_ADD(NOW(), INTERVAL 30 DAY)),
+         session_expires_at = DATE_ADD(NOW(), INTERVAL 30 DAY),
          last_login = NOW()`,
       [tgId, firstName, lastName, username, phone, storageChat, apiKey, effectiveSessionStr, effectiveBotToken]
     );
