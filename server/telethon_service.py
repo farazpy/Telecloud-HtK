@@ -402,12 +402,16 @@ def parse_proxy(proxy_url: Optional[str]):
 async def safe_disconnect(cl: Optional[TelegramClient]):
     if not cl:
         return
+    
+    # 1. Attempt graceful high-level disconnect
     try:
         if hasattr(cl, "disconnect"):
-            await cl.disconnect()
+            # Set a strict timeout for graceful disconnect
+            await asyncio.wait_for(cl.disconnect(), timeout=2.0)
     except Exception:
         pass
 
+    # 2. Force-cancel internal network loops if they are still hanging
     try:
         sender = getattr(cl, "_sender", None)
         if sender:
@@ -415,10 +419,9 @@ async def safe_disconnect(cl: Optional[TelegramClient]):
                 t = getattr(sender, task_attr, None)
                 if t and not t.done():
                     t.cancel()
-                    try:
-                        await t
-                    except (asyncio.CancelledError, Exception):
-                        pass
+            
+            # Briefly allow tasks to acknowledge cancellation without blocking shutdown
+            await asyncio.sleep(0.1)
 
             conn = getattr(sender, "_connection", None)
             if conn:
@@ -426,10 +429,6 @@ async def safe_disconnect(cl: Optional[TelegramClient]):
                     t = getattr(conn, task_attr, None)
                     if t and not t.done():
                         t.cancel()
-                        try:
-                            await t
-                        except (asyncio.CancelledError, Exception):
-                            pass
     except Exception:
         pass
 
@@ -447,6 +446,7 @@ class TelethonManager:
         self.is_connected = False
         self.user_clients: Dict[str, TelegramClient] = {}
         self.pending_auths: Dict[str, Dict[str, Any]] = {}
+        self._session_locks: Dict[str, asyncio.Lock] = {}
         # In-memory fast channel peer cache (channel_id -> InputPeerChannel) to prevent slow entity resolution
         self.channel_peer_map: Dict[str, InputPeerChannel] = {
             "4375482614": InputPeerChannel(4375482614, 5710112122720099569),
@@ -778,34 +778,46 @@ class TelethonManager:
                     pass
                 self.user_clients.pop(clean_session, None)
 
-        # Connect user session string
-        try:
-            try:
-                current_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                current_loop = None
+        # Connect user session string with a lock to prevent concurrent multi-IP AuthKeyDuplicatedError
+        if clean_session not in self._session_locks:
+            self._session_locks[clean_session] = asyncio.Lock()
+        
+        async with self._session_locks[clean_session]:
+            # Check cache again inside lock
+            if clean_session in self.user_clients:
+                return self.user_clients[clean_session]
 
-            user_client = self.create_telegram_client(
-                StringSession(clean_session),
-                loop=current_loop,
-                connection_retries=3,
-                retry_delay=1,
-                timeout=15
-            )
-            await user_client.connect()
-            if await user_client.is_user_authorized():
-                self.user_clients[clean_session] = user_client
-                return user_client
-            else:
-                logger.warning("User session is unauthorized or revoked by Telegram.")
+            try:
                 try:
-                    await user_client.disconnect()
-                except Exception:
-                    pass
+                    current_loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    current_loop = None
+
+                user_client = self.create_telegram_client(
+                    StringSession(clean_session),
+                    loop=current_loop,
+                    connection_retries=3,
+                    retry_delay=1,
+                    timeout=15
+                )
+                await user_client.connect()
+                if await user_client.is_user_authorized():
+                    self.user_clients[clean_session] = user_client
+                    return user_client
+                else:
+                    logger.warning("User session is unauthorized or revoked by Telegram.")
+                    try:
+                        await user_client.disconnect()
+                    except Exception:
+                        pass
+                    return None
+            except Exception as e:
+                err_str = str(e).lower()
+                if "authorization key" in err_str or "two different ip" in err_str:
+                    logger.error(f"CRITICAL: Telegram session invalidated for key starting with '{clean_session[:10]}...': {e}")
+                else:
+                    logger.warning(f"Error connecting user session client: {e}")
                 return None
-        except Exception as e:
-            logger.warning(f"Error connecting user session client: {e}")
-            return None
 
     def cache_channel_entity(self, channel_id: int, access_hash: int, username: Optional[str] = None):
         ch_id_str = str(channel_id)
@@ -1535,7 +1547,8 @@ class TelethonManager:
                 await self.ensure_connected()
                 if self.client and self.is_connected:
                     active_client = self.client
-                    entity = await self.resolve_entity_for_client(active_client, self.storage_chat)
+                    # FIX: Maintain the intended target_chat during fallback instead of blindly using manager's default
+                    entity = await self.resolve_entity_for_client(active_client, target_chat)
                     msg = await active_client.send_file(
                         entity,
                         file_path,
@@ -1556,7 +1569,7 @@ class TelethonManager:
             "file_name": file_name,
             "file_size": file_size,
             "mime_type": mime_type,
-            "storage_chat": str(self.storage_chat),
+            "storage_chat": str(target_chat),
             "session_type": session_type
         }
 

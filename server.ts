@@ -271,13 +271,13 @@ function ensurePythonDepsAndStart() {
   check.on('close', (code) => {
     if (code !== 0) {
       console.log('[Node] Installing Python dependencies (telethon, aiohttp, cryptg)...');
-      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', 'cryptg', '--break-system-packages'], {
+      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages'], {
         stdio: 'inherit',
       });
       install.on('close', (pipCode) => {
         if (pipCode !== 0) {
-          // Try user pip or get-pip.py fallback
-          const userPip = spawn('sh', ['-c', 'curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && python3 /tmp/get-pip.py --user && ~/.local/bin/pip install aiohttp telethon cryptg'], {
+          // Try user pip or get-pip.py fallback with --break-system-packages flag for modern python envs
+          const userPip = spawn('sh', ['-c', 'curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && python3 /tmp/get-pip.py --user && ~/.local/bin/pip install aiohttp telethon --break-system-packages'], {
             stdio: 'inherit',
           });
           userPip.on('close', (userPipCode) => {
@@ -2972,7 +2972,10 @@ async function startServer() {
 
   if (!isProd) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        allowedHosts: ['s3.htknetwork.in', '.htknetwork.in', '.run.app'],
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
