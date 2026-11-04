@@ -359,17 +359,18 @@ tlobjects[0x38116ee0] = MessageLegacy38116ee0
 tlobjects[0x9cb070d7] = MessageMediaDocumentLegacy9cb070d7
 tlobjects[0x8c718e87] = MessagesLegacy8c718e87
 
+DATA_DIR = Path("./data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+CONFIG_FILE = DATA_DIR / "config.json"
+LOG_FILE = DATA_DIR / "telethon.log"
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", handlers=[
     logging.StreamHandler(sys.stderr),
-    logging.FileHandler("/tmp/telethon.log", mode="a")
+    logging.FileHandler(str(LOG_FILE), mode="a")
 ])
 logging.getLogger("telethon").setLevel(logging.ERROR)
 logging.getLogger("telethon.network").setLevel(logging.ERROR)
 logger = logging.getLogger("telethon_storage")
-
-DATA_DIR = Path("./data")
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-CONFIG_FILE = DATA_DIR / "config.json"
 
 def parse_proxy(proxy_url: Optional[str]):
     if not proxy_url or not str(proxy_url).strip() or not socks:

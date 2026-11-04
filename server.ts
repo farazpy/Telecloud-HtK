@@ -266,32 +266,36 @@ let pyProcess: ChildProcess | null = null;
 function ensurePythonDepsAndStart() {
   const pyScript = path.resolve(process.cwd(), 'server', 'telethon_service.py');
   
-  // Quick check if python dependencies are present
+  console.log('[Node] Checking Python dependencies (telethon, aiohttp)...');
   const check = spawn('python3', ['-c', 'import telethon, aiohttp']);
+  
   check.on('close', (code) => {
     if (code !== 0) {
-      console.log('[Node] Installing Python dependencies (telethon, aiohttp)...');
-      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages'], {
+      console.log('[Node] Python dependencies missing or outdated. Attempting installation...');
+      
+      // Try pip install with common flags for modern linux distros
+      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages', '--user'], {
         stdio: 'inherit',
       });
+      
       install.on('close', (pipCode) => {
         if (pipCode !== 0) {
-          // Try user pip or get-pip.py fallback with --break-system-packages flag for modern python envs
-          const userPip = spawn('sh', ['-c', 'curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && python3 /tmp/get-pip.py --user && ~/.local/bin/pip install aiohttp telethon --break-system-packages'], {
+          console.warn('[Node] Standard pip install failed. Attempting fallback via get-pip.py...');
+          
+          const fallback = spawn('sh', ['-c', 'curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && python3 /tmp/get-pip.py --user && ~/.local/bin/pip install aiohttp telethon --break-system-packages'], {
             stdio: 'inherit',
           });
-          userPip.on('close', (userPipCode) => {
-            if (userPipCode === 0) {
-              startPythonService();
-            } else {
-              console.warn('[Node] Warning: Python telethon dependencies could not be automatically installed. Telethon features will be disabled until pip dependencies are installed.');
-            }
+          
+          fallback.on('close', () => {
+            // Last ditch effort: Always try to start the service, maybe it will work with what's available
+            startPythonService();
           });
         } else {
           startPythonService();
         }
       });
     } else {
+      console.log('[Node] Python dependencies verified. Launching MTProto service...');
       startPythonService();
     }
   });
@@ -357,7 +361,7 @@ async function forwardToPython(
   method: string,
   endpoint: string,
   body?: any,
-  retries = 8
+  retries = 15
 ): Promise<{ status: number; data: any }> {
   // Retry loop in case Python service is initializing
   for (let attempt = 0; attempt < retries; attempt++) {
@@ -377,7 +381,7 @@ async function forwardToPython(
       }
     } catch (err: any) {
       if (attempt < retries - 1) {
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 1000));
         continue;
       }
       return {
