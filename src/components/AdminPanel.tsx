@@ -1486,12 +1486,12 @@ export default function AdminPanel({ onClose, onNavigateHome }: AdminPanelProps)
                           </tr>
                         )}
 
-                        {adminFiles.map((f) => {
+                        {adminFiles.map((f, idx) => {
                           const isSelected = selectedFileIds.has(f.id);
                           const isRestricted = Boolean(f.is_restricted);
                           return (
                             <tr
-                              key={f.id}
+                              key={`admin-table-${f.id || f.message_id || ''}-${idx}`}
                               className={`transition-colors hover:bg-slate-50 dark:hover:bg-slate-800/40 ${
                                 isSelected ? 'bg-sky-50/40 dark:bg-sky-950/20' : ''
                               }`}
@@ -1666,12 +1666,12 @@ export default function AdminPanel({ onClose, onNavigateHome }: AdminPanelProps)
               {/* GRID VIEW */}
               {fileViewMode === 'grid' && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                  {adminFiles.map((f) => {
+                  {adminFiles.map((f, idx) => {
                     const isRestricted = Boolean(f.is_restricted);
                     const isSelected = selectedFileIds.has(f.id);
                     return (
                       <div
-                        key={f.id}
+                        key={`admin-grid-${f.id || f.message_id || ''}-${idx}`}
                         className={`bg-white dark:bg-slate-900 border rounded-xl p-4 shadow-xs flex flex-col justify-between transition relative ${
                           isRestricted
                             ? 'border-rose-300 dark:border-rose-900/50 bg-rose-50/20 dark:bg-rose-950/10'
@@ -2540,8 +2540,8 @@ export default function AdminPanel({ onClose, onNavigateHome }: AdminPanelProps)
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-medium">
-                      {(overview?.users || []).map((u: any) => (
-                        <tr key={u.telegram_id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                      {(overview?.users || []).map((u: any, idx: number) => (
+                        <tr key={`admin-user-${u.telegram_id || u.id || idx}-${idx}`} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
                           <td className="px-4 py-3">
                             <div className="font-bold text-slate-900 dark:text-white">{u.name}</div>
                             <div className="text-[11px] text-slate-400 font-mono">ID: {u.telegram_id} {u.username}</div>

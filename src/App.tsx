@@ -275,8 +275,19 @@ const GridImagePreview: React.FC<GridImagePreviewProps> = ({ file, darkMode, get
 };
 
 export default function App() {
-  // App Version in Header - Incremented to v2.0.3
-  const APP_VERSION = "v2.0.3";
+  // App Version in Header - Incremented to v2.0.8
+  const APP_VERSION = "v2.0.8";
+
+  // Helper for guaranteed unique React component keys across multi-workspace files
+  const getFileItemKey = (
+    file: { id?: number | string; file_slug?: string; message_id: number; workspace_id?: number | string | null },
+    prefix: string,
+    index: number
+  ): string => {
+    const ws = file.workspace_id ? `ws${file.workspace_id}-` : '';
+    const core = file.id ? `id${file.id}` : file.file_slug ? `slug${file.file_slug}` : `msg${file.message_id}`;
+    return `${prefix}-${ws}${core}-${index}`;
+  };
 
   // Dynamic Public Branding from MySQL with LocalStorage Cache (Instant loading & zero redundant requests)
   const [publicBranding, setPublicBranding] = useState<{
@@ -4252,7 +4263,7 @@ export default function App() {
                         <div className="space-y-1.5 max-h-56 overflow-y-auto pr-1 scrollbar-thin">
                           {overviewFiles.map((item, idx) => (
                             <div
-                              key={item.id}
+                              key={`ov-${item.id || ''}-${idx}`}
                               className={`p-2.5 rounded-xl border transition-all duration-300 flex items-center justify-between gap-2.5 ${
                                 item.status === 'uploading'
                                   ? 'bg-sky-500/10 border-sky-500/40 shadow-sm'
@@ -4559,8 +4570,8 @@ export default function App() {
                     </div>
                   ) : (
                     <div className={`divide-y ${darkMode ? 'divide-slate-800' : 'divide-slate-100'}`}>
-                      {files.slice(0, 5).map((f) => (
-                        <div key={f.message_id} className="py-3 flex items-center justify-between">
+                      {files.slice(0, 5).map((f, idx) => (
+                        <div key={getFileItemKey(f, 'recent', idx)} className="py-3 flex items-center justify-between">
                           <div className="flex items-center space-x-3 min-w-0 max-w-xs sm:max-w-md">
                             <div className={`w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0 ${
                               darkMode ? 'bg-slate-950 border border-slate-800 text-sky-400' : 'bg-white shadow-xs border border-slate-200'
@@ -5073,7 +5084,7 @@ export default function App() {
                         <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1 scrollbar-thin">
                           {uploadQueue.map((item, idx) => (
                             <div
-                              key={item.id}
+                              key={`queue-${item.id || ''}-${idx}`}
                               className={`p-3.5 rounded-2xl border transition-all duration-300 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-in fade-in slide-in-from-bottom-2 duration-300 ${
                                 item.status === 'uploading'
                                   ? 'bg-sky-500/10 border-sky-500/50 shadow-md'
@@ -5846,11 +5857,11 @@ export default function App() {
               ) : viewMode === 'grid' ? (
                 /* Card Grid View with Checkboxes */
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                  {sortedFiles.map((file) => {
+                  {sortedFiles.map((file, idx) => {
                     const isSelected = selectedFileIds.includes(file.message_id);
                     return (
                       <div
-                        key={file.message_id}
+                        key={getFileItemKey(file, 'grid', idx)}
                         className={`p-4 rounded-3xl transition flex flex-col justify-between space-y-3 group relative ${
                           isSelected
                             ? (darkMode ? 'bg-sky-950/80 border-2 border-sky-500 ring-2 ring-sky-500/30' : 'bg-sky-50/70 border-2 border-sky-500 ring-2 ring-sky-500/20 shadow-md')
@@ -6054,11 +6065,11 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className={`divide-y ${darkMode ? 'divide-slate-800' : 'divide-slate-100'}`}>
-                        {sortedFiles.map((file) => {
+                        {sortedFiles.map((file, idx) => {
                           const isSelected = selectedFileIds.includes(file.message_id);
                           return (
                             <tr
-                              key={file.message_id}
+                              key={getFileItemKey(file, 'table', idx)}
                               className={`transition ${
                                 isSelected
                                   ? (darkMode ? 'bg-sky-950/70 font-medium' : 'bg-sky-50/80 font-medium')
@@ -6478,11 +6489,11 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800/40">
-                        {analyticsFiles.map((file) => {
+                        {analyticsFiles.map((file, idx) => {
                           const isSelected = selectedAnalyticsFileIds.includes(String(file.id));
                           return (
                             <tr
-                              key={file.id || file.message_id}
+                              key={`analytics-${file.id || ''}-${file.file_slug || ''}-${file.message_id || ''}-${idx}`}
                               className={`transition ${
                                 isSelected
                                   ? (darkMode ? 'bg-rose-950/20' : 'bg-rose-50/50')
@@ -6670,9 +6681,9 @@ export default function App() {
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {files
                   .filter((f) => f.mime_type?.startsWith('video/') || f.mime_type?.startsWith('audio/'))
-                  .map((media) => (
+                  .map((media, idx) => (
                     <div
-                      key={media.message_id}
+                      key={getFileItemKey(media, 'media', idx)}
                       className={`p-4 rounded-3xl space-y-3 flex flex-col justify-between transition-colors duration-200 ${cardBg}`}
                     >
                       <div className="flex items-center space-x-3">
@@ -8252,8 +8263,8 @@ curl -X POST "${window.location.origin}/api/v1/upload" \\
             <div className={`flex-1 overflow-y-auto min-h-[140px] max-h-[300px] border rounded-2xl divide-y ${
               darkMode ? 'border-slate-800 divide-slate-800 bg-slate-950/60' : 'border-slate-100 divide-slate-100 bg-slate-50/50'
             }`}>
-              {selectedFiles.map((file) => (
-                <div key={file.message_id} className="p-3 flex items-center justify-between gap-3 text-xs">
+              {selectedFiles.map((file, idx) => (
+                <div key={getFileItemKey(file, 'manifest', idx)} className="p-3 flex items-center justify-between gap-3 text-xs">
                   <div className="flex items-center space-x-2.5 min-w-0">
                     <div className={`w-8 h-8 rounded-xl border flex items-center justify-center flex-shrink-0 ${
                       darkMode ? 'bg-slate-900 border-slate-800 text-sky-400' : 'bg-white border-slate-200'

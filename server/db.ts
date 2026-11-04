@@ -2177,22 +2177,29 @@ export interface WebUserRecord {
 }
 
 function hashPassword(password: string): string {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${hash}`;
+  // Plain text password storage per user request
+  return String(password || '');
 }
 
-function verifyPassword(password: string, storedHash: string): boolean {
+function verifyPassword(password: string, storedValue: string): boolean {
+  if (!storedValue) return false;
+  // Direct plain-text comparison
+  if (storedValue === password) return true;
+
+  // Legacy fallback for previously hashed passwords
   try {
-    const [salt, key] = String(storedHash || '').split(':');
-    if (!salt || !key) return false;
-    const hashBuffer = crypto.scryptSync(password, salt, 64);
-    const keyBuffer = Buffer.from(key, 'hex');
-    if (hashBuffer.length !== keyBuffer.length) return false;
-    return crypto.timingSafeEqual(hashBuffer, keyBuffer);
-  } catch {
-    return false;
-  }
+    const parts = String(storedValue).split(':');
+    if (parts.length === 2) {
+      const [salt, key] = parts;
+      const hashBuffer = crypto.scryptSync(password, salt, 64);
+      const keyBuffer = Buffer.from(key, 'hex');
+      if (hashBuffer.length === keyBuffer.length && crypto.timingSafeEqual(hashBuffer, keyBuffer)) {
+        return true;
+      }
+    }
+  } catch {}
+
+  return false;
 }
 
 function generateWebAuthToken(): string {

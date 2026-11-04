@@ -60,7 +60,30 @@ import {
 } from './server/db.ts';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+// Dev server must run on port 3000 in AI Studio/Cloud container environment.
+// In container environments, process.env.PORT is frequently preset to 8080 (where Nginx reverse-proxies to port 3000).
+function resolveServerPort(): number {
+  const cliPortIndex = process.argv.findIndex((arg) => arg === '--port' || arg === '-p');
+  if (cliPortIndex !== -1 && process.argv[cliPortIndex + 1]) {
+    const parsed = parseInt(process.argv[cliPortIndex + 1], 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  if (process.env.APP_PORT) {
+    const parsed = parseInt(process.env.APP_PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  if (process.env.DEFAULT_APP_PORT) {
+    const parsed = parseInt(process.env.DEFAULT_APP_PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  // Ignore 8080 if passed via process.env.PORT because NGINX is already bound to 8080
+  if (process.env.PORT && process.env.PORT !== '8080') {
+    const parsed = parseInt(process.env.PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 3000;
+}
+const PORT = resolveServerPort();
 const PY_PORT = 5050;
 const PY_BASE = `http://127.0.0.1:${PY_PORT}/api/py`;
 
@@ -333,10 +356,11 @@ app.post('/api/contact', (req: Request, res: Response) => {
 async function forwardToPython(
   method: string,
   endpoint: string,
-  body?: any
+  body?: any,
+  retries = 8
 ): Promise<{ status: number; data: any }> {
   // Retry loop in case Python service is initializing
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < retries; attempt++) {
     try {
       const res = await fetch(`${PY_BASE}${endpoint}`, {
         method,
@@ -352,8 +376,8 @@ async function forwardToPython(
         return { status: res.status, data: { message: text } };
       }
     } catch (err: any) {
-      if (attempt < 2) {
-        await new Promise((r) => setTimeout(r, (attempt + 1) * 600));
+      if (attempt < retries - 1) {
+        await new Promise((r) => setTimeout(r, 600));
         continue;
       }
       return {
@@ -795,6 +819,16 @@ app.get('/api/db/status', (_req: Request, res: Response) => {
 app.get('/api/device-config', async (_req: Request, res: Response) => {
   res.setHeader('Cache-Control', 'public, max-age=180, stale-while-revalidate=3600');
   const result = await forwardToPython('GET', '/device_config');
+  if (result.status !== 200) {
+    // Graceful fallback defaults if Python is momentarily initializing
+    return res.json({
+      device_model: 'Samsung Galaxy S24 Ultra',
+      system_version: 'Android 15 (One UI 7)',
+      app_version: 'Telegram Android 11.3',
+      proxy_url: '',
+      location: { city: 'Datacenter', country: 'Telegram DC', country_code: 'GLOBAL' }
+    });
+  }
   res.status(result.status).json(result.data);
 });
 
@@ -2963,8 +2997,16 @@ async function startServer() {
     });
   }
 
-  app.listen(Number(PORT), '0.0.0.0', () => {
+  const server = app.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`[TeleCloud] Server running on http://0.0.0.0:${PORT}`);
+  });
+
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[TeleCloud] Warning: Port ${PORT} already bound. Node server is likely already running.`);
+    } else {
+      console.error('[TeleCloud] Server listen error:', err);
+    }
   });
 }
 
