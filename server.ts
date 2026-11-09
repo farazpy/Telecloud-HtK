@@ -261,41 +261,73 @@ app.use((req: Request, res: Response, next) => {
 // Spawn Python Telethon daemon
 let pyProcess: ChildProcess | null = null;
 
-function ensurePythonDepsAndStart() {
-  const pyScript = path.resolve(process.cwd(), 'server', 'telethon_service.py');
+function getPythonEnv() {
+  const venvPkgs = path.resolve(process.cwd(), '.venv_pkgs');
+  const venvPy = path.resolve(process.cwd(), '.venv', 'bin', 'python3');
+  const venvPyWin = path.resolve(process.cwd(), '.venv', 'Scripts', 'python.exe');
   
-  console.log('[Node] Checking Python dependencies (telethon, aiohttp)...');
-  const check = spawn('python3', ['-c', 'import telethon, aiohttp']);
+  let pythonExec = 'python3';
+  if (fs.existsSync(venvPy)) {
+    pythonExec = venvPy;
+  } else if (fs.existsSync(venvPyWin)) {
+    pythonExec = venvPyWin;
+  }
+
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    PY_PORT: String(PY_PORT),
+  };
+
+  if (fs.existsSync(venvPkgs)) {
+    const existingPyPath = process.env.PYTHONPATH || '';
+    env.PYTHONPATH = existingPyPath ? `${venvPkgs}:${existingPyPath}` : venvPkgs;
+  }
+
+  return { pythonExec, env };
+}
+
+function ensurePythonDepsAndStart() {
+  const { pythonExec, env } = getPythonEnv();
+  console.log(`[Node] Checking Python dependencies (telethon, aiohttp) using ${pythonExec}...`);
+  
+  const check = spawn(pythonExec, ['-c', 'import telethon, aiohttp'], { env });
   
   check.on('close', (code) => {
-    if (code !== 0) {
-      console.log('[Node] Python dependencies missing or outdated. Attempting installation...');
-      
-      // Try pip install with common flags for modern linux distros
-      const install = spawn('python3', ['-m', 'pip', 'install', 'telethon', 'aiohttp', '--break-system-packages', '--user'], {
-        stdio: 'inherit',
-      });
-      
-      install.on('close', (pipCode) => {
-        if (pipCode !== 0) {
-          console.warn('[Node] Standard pip install failed. Attempting fallback via get-pip.py...');
-          
-          const fallback = spawn('sh', ['-c', 'curl -sSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py && python3 /tmp/get-pip.py --user && ~/.local/bin/pip install aiohttp telethon --break-system-packages'], {
-            stdio: 'inherit',
-          });
-          
-          fallback.on('close', () => {
-            // Last ditch effort: Always try to start the service, maybe it will work with what's available
-            startPythonService();
-          });
-        } else {
-          startPythonService();
-        }
-      });
-    } else {
+    if (code === 0) {
       console.log('[Node] Python dependencies verified. Launching MTProto service...');
       startPythonService();
+      return;
     }
+
+    console.log('[Node] Python dependencies missing. Installing telethon, aiohttp, and cryptg...');
+    
+    // Automatically fix permission issues on ~/.local if running on root or restricted VPS
+    try {
+      execSync('mkdir -p ~/.local && chmod -R 777 ~/.local 2>/dev/null || true', { stdio: 'ignore' });
+    } catch {}
+
+    const venvPkgs = path.resolve(process.cwd(), '.venv_pkgs');
+    
+    // Target-based local installation chain: installs directly into .venv_pkgs inside app folder
+    const installCmd = `
+      python3 -m pip install --target "${venvPkgs}" --break-system-packages --no-cache-dir telethon aiohttp cryptg || \
+      python3 -m pip install --break-system-packages --no-cache-dir telethon aiohttp cryptg || \
+      python3 -m pip install --break-system-packages --user --no-cache-dir telethon aiohttp cryptg || \
+      pip3 install --target "${venvPkgs}" --break-system-packages --no-cache-dir telethon aiohttp cryptg || \
+      pip3 install --break-system-packages --no-cache-dir telethon aiohttp cryptg || \
+      python3 -m venv .venv 2>/dev/null && .venv/bin/pip install --no-cache-dir telethon aiohttp cryptg
+    `.replace(/\n\s*/g, ' ').trim();
+
+    const install = spawn('sh', ['-c', installCmd], { stdio: 'inherit', env });
+
+    install.on('close', (installCode) => {
+      if (installCode === 0) {
+        console.log('[Node] Python dependencies installed successfully.');
+      } else {
+        console.warn('[Node] Notice during Python dependency installation. Attempting startup...');
+      }
+      startPythonService();
+    });
   });
 }
 
@@ -324,11 +356,12 @@ async function startPythonService() {
     execSync(`fuser -k ${PY_PORT}/tcp || true`, { stdio: 'ignore' });
   } catch {}
 
+  const { pythonExec, env } = getPythonEnv();
   const pyScript = path.resolve(process.cwd(), 'server', 'telethon_service.py');
-  console.log(`[Node] Launching Telethon MTProto Engine: ${pyScript} on port ${PY_PORT}`);
+  console.log(`[Node] Launching Telethon MTProto Engine: ${pythonExec} ${pyScript} on port ${PY_PORT}`);
   
-  pyProcess = spawn('python3', [pyScript], {
-    env: { PY_PORT: String(PY_PORT) },
+  pyProcess = spawn(pythonExec, [pyScript], {
+    env,
     stdio: 'inherit',
   });
 
@@ -3363,15 +3396,22 @@ async function streamCdnFile(
       if (attempt < 2) {
         await new Promise((r) => setTimeout(r, 600));
       }
-    } catch (fetchErr) {
-      if (attempt === 2) throw fetchErr;
-      await new Promise((r) => setTimeout(r, 600));
+    } catch (fetchErr: any) {
+      console.warn(`[streamCdnFile] Connection attempt ${attempt} warning: ${fetchErr.message}`);
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 600));
+      }
     }
   }
 
   if (!pyRes || (!pyRes.ok && pyRes.status !== 206)) {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    const errText = pyRes ? await pyRes.text() : 'Service Unavailable';
+    let errText = 'Telegram MTProto streaming service is currently offline or initializing. Please retry in a few seconds.';
+    if (pyRes) {
+      try {
+        errText = await pyRes.text();
+      } catch {}
+    }
     res.status(pyRes ? pyRes.status : 503).send(errText);
     return;
   }

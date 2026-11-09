@@ -1479,7 +1479,7 @@ if ((connected || webUser) && dbConnected) {
  fetchUserApiKey();
  fetchDeviceConfig();
  }
- }, [connected, user, webUser, dbConnected]);
+ }, [connected, user?.id, webUser?.id, dbConnected]);
 
   /* Mandatory Onboarding Disabled - Using Dash Banner instead */
 
@@ -1549,17 +1549,17 @@ const isConnLost = Boolean(data?.connectivity_lost || data?.reconnect_required);
  setConnectivityLost(isConnLost);
 
 if (data?.web_user) {
- setWebUser(data.web_user);
- } else {
- setWebUser(null);
- }
+  setWebUser((prev: any) => (prev && prev.id === data.web_user.id && prev.username === data.web_user.username ? prev : data.web_user));
+  } else {
+  setWebUser(null);
+  }
 
 if (data?.user_session?.expires_at) {
  setSessionExpiresAt(data.user_session.expires_at);
  }
 
 if (data?.user && isConn) {
- setUser(data.user);
+  setUser((prev: any) => (prev && prev.id === data.user.id && prev.first_name === data.user.first_name && prev.username === data.user.username ? prev : data.user));
  localStorage.setItem('telecloud_user_tg_id', String(data.user.id));
  } else {
  setUser(null);
@@ -2000,7 +2000,7 @@ const fetchAnalytics = async () => {
  try {
 
     const targetWsId = activeWorkspaceId ? String(activeWorkspaceId) : '';
-    const url = `/api/user/analytics?filter=${analyticsFilter}${targetWsId ? `&workspace_id=${targetWsId}` : '}${user?.id ? `&telegram_id=${user.id}` : '}`;
+    const url = `/api/user/analytics?filter=${analyticsFilter}${targetWsId ? `&workspace_id=${targetWsId}` : ''}${user?.id ? `&telegram_id=${user.id}` : ''}`;
 
 const data = await safeJsonFetch(url);
 
@@ -2374,8 +2374,9 @@ if (data.token_url) {
 
 
 if (!isSecret) {
- // Start polling for scan verification (Paused when tab is hidden to save Cloud Run requests)
- qrPollTimerRef.current = setInterval(async () => {
+  stopQrPolling();
+  // Start polling for scan verification (Paused when tab is hidden to save Cloud Run requests)
+  qrPollTimerRef.current = setInterval(async () => {
 
 if (document.hidden) return;
  try {
@@ -2389,6 +2390,7 @@ const checkRes = await safeJsonFetch('/api/qr/check', {
 
 if (checkRes.status === 'authorized') {
  stopQrPolling();
+ stopQrRefresh();
  await checkStatus();
  setShowAuthModal(false);
  setDashboardTab('overview');
