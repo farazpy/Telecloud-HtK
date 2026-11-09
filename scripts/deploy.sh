@@ -40,14 +40,12 @@ cd "${APP_DIR}" || {
   exit 1
 }
 
-# 2. Preserve & Guard Production .env
-ENV_BACKUP=""
-if [ -f ".env" ]; then
-  log_info "Guarding existing production .env file (preservation lock)..."
-  ENV_BACKUP="$(mktemp /tmp/telecloud_env_backup.XXXXXX)"
-  cp -p ".env" "${ENV_BACKUP}"
-else
-  log_warn "No existing .env file detected in ${APP_DIR}."
+# 2. Preserve & Guard Production appConfig
+CONFIG_TS_BACKUP=""
+if [ -f "appConfig.ts" ]; then
+  log_info "Guarding existing production appConfig.ts file..."
+  CONFIG_TS_BACKUP="$(mktemp /tmp/telecloud_config_ts.XXXXXX)"
+  cp -p "appConfig.ts" "${CONFIG_TS_BACKUP}"
 fi
 
 # 3. Fetch latest main branch from GitHub
@@ -55,26 +53,25 @@ log_info "Fetching latest updates from origin/main..."
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git fetch origin main || {
     log_err "git fetch failed. Please check network connectivity and repository access."
-    if [ -n "${ENV_BACKUP}" ] && [ -f "${ENV_BACKUP}" ]; then rm -f "${ENV_BACKUP}"; fi
+    [ -n "${CONFIG_TS_BACKUP}" ] && [ -f "${CONFIG_TS_BACKUP}" ] && rm -f "${CONFIG_TS_BACKUP}"
     exit 1
   }
 
   log_info "Syncing working tree to origin/main..."
   git reset --hard origin/main || {
     log_err "git reset --hard origin/main failed."
-    if [ -n "${ENV_BACKUP}" ] && [ -f "${ENV_BACKUP}" ]; then rm -f "${ENV_BACKUP}"; fi
+    [ -n "${CONFIG_TS_BACKUP}" ] && [ -f "${CONFIG_TS_BACKUP}" ] && rm -f "${CONFIG_TS_BACKUP}"
     exit 1
   }
 else
   log_warn "Current directory is not a git repository clone; skipping git sync."
 fi
 
-# 4. Restore preserved production .env
-if [ -n "${ENV_BACKUP}" ] && [ -f "${ENV_BACKUP}" ]; then
-  cp -p "${ENV_BACKUP}" ".env"
-  chmod 600 ".env"
-  rm -f "${ENV_BACKUP}"
-  log_ok "Production .env verified and securely preserved."
+# 4. Restore preserved production appConfig
+if [ -n "${CONFIG_TS_BACKUP}" ] && [ -f "${CONFIG_TS_BACKUP}" ]; then
+  cp -p "${CONFIG_TS_BACKUP}" "appConfig.ts"
+  rm -f "${CONFIG_TS_BACKUP}"
+  log_ok "Production appConfig.ts verified and securely preserved."
 fi
 
 # 5. Install Dependencies

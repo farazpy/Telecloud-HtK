@@ -1,19 +1,17 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
 import mysql from 'mysql2/promise';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import appConfig from '../appConfig.ts';
 
 type Pool = mysql.Pool;
 
-// AI Studio & Standard MySQL Environment Variables with strict precedence
-const DB_HOST = process.env.DB_HOST || process.env.DBHOST || '127.0.0.1';
-const DB_PORT = Number(process.env.DB_PORT || process.env.DBPORT || 3306);
-const DB_USER = process.env.DB_USER || process.env.DBUSER || process.env.DB_USERNAME || process.env.USERNAME || 'root';
-const DB_PASSWORD = process.env.DB_PASSWORD || process.env.DBPASSWORD || process.env.PASSWORD || '';
-const DB_NAME = process.env.DB_NAME || process.env.DBNAME || 'telecloud';
+// Centralized AppConfig MySQL Credentials
+const DB_HOST = appConfig.database.host;
+const DB_PORT = appConfig.database.port;
+const DB_USER = appConfig.database.user;
+const DB_PASSWORD = appConfig.database.password;
+const DB_NAME = appConfig.database.name;
 
 let pool: Pool | null = null;
 let isDbConnected = false;

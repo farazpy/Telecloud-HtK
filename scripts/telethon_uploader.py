@@ -20,13 +20,13 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.types import DocumentAttributeFilename
 
-# Telegram MTProto Credentials (Obtain from https://my.telegram.org)
-API_ID = int(os.environ.get("TELEGRAM_API_ID", "0"))
-API_HASH = os.environ.get("TELEGRAM_API_HASH", "")
+# Telegram MTProto Credentials
+API_ID = int(os.environ.get("TELEGRAM_API_ID", "27254692"))
+API_HASH = os.environ.get("TELEGRAM_API_HASH", "9f6f826a62b78378292fd224e943cb65")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 SESSION_STRING = os.environ.get("TELEGRAM_SESSION_STRING", "")
 CHAT_STORAGE = os.environ.get("TELEGRAM_CHAT_STORAGE", "me") # "me" for Saved Messages, or channel ID e.g. -1001234567890
-APP_URL = os.environ.get("APP_URL", "")
+APP_URL = os.environ.get("APP_URL", "https://s3.htknetwork.in")
 
 async def progress_callback(current, total):
     percent = (current / total) * 100

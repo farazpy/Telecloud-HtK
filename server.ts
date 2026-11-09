@@ -1,6 +1,3 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
 import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
@@ -8,6 +5,7 @@ import fs from 'fs';
 import { spawn, execSync, ChildProcess } from 'child_process';
 import multer from 'multer';
 import crypto from 'crypto';
+import appConfig from './appConfig.ts';
 import {
   initDb,
   saveUserToDb,
@@ -62,28 +60,14 @@ import {
 } from './server/db.ts';
 
 const app = express();
-// Dev server must run on port 3000 in AI Studio/Cloud container environment.
-// In container environments, process.env.PORT is frequently preset to 8080 (where Nginx reverse-proxies to port 3000).
+// Server port resolution using appConfig
 function resolveServerPort(): number {
   const cliPortIndex = process.argv.findIndex((arg) => arg === '--port' || arg === '-p');
   if (cliPortIndex !== -1 && process.argv[cliPortIndex + 1]) {
     const parsed = parseInt(process.argv[cliPortIndex + 1], 10);
     if (!isNaN(parsed) && parsed > 0) return parsed;
   }
-  if (process.env.APP_PORT) {
-    const parsed = parseInt(process.env.APP_PORT, 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
-  }
-  if (process.env.DEFAULT_APP_PORT) {
-    const parsed = parseInt(process.env.DEFAULT_APP_PORT, 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
-  }
-  // Ignore 8080 if passed via process.env.PORT because NGINX is already bound to 8080
-  if (process.env.PORT && process.env.PORT !== '8080') {
-    const parsed = parseInt(process.env.PORT, 10);
-    if (!isNaN(parsed) && parsed > 0) return parsed;
-  }
-  return 3000;
+  return appConfig.server.port || 3000;
 }
 const PORT = resolveServerPort();
 const PY_PORT = 5050;
@@ -344,7 +328,7 @@ async function startPythonService() {
   console.log(`[Node] Launching Telethon MTProto Engine: ${pyScript} on port ${PY_PORT}`);
   
   pyProcess = spawn('python3', [pyScript], {
-    env: { ...process.env, PY_PORT: String(PY_PORT) },
+    env: { PY_PORT: String(PY_PORT) },
     stdio: 'inherit',
   });
 
@@ -446,7 +430,7 @@ async function forwardToPython(
 }
 
 function getShortLink(slugOrId: number | string, req?: Request): string {
-  const customDomain = process.env.CUSTOM_DOMAIN;
+  const customDomain = appConfig.server.customDomain;
   if (customDomain) {
     const cleanDomain = customDomain.replace(/^https?:\/\//, '').replace(/\/$/, '');
     return `https://${cleanDomain}/f/${slugOrId}`;
@@ -609,8 +593,8 @@ const getFileEnvPins = (): string[] => {
 const getAllValidDashboardPins = (): string[] => {
   const filePins = getFileEnvPins();
   const envPins = [
-    process.env.DASHBOARD_PIN,
-    process.env.APP_LOCK_PIN,
+    appConfig.security.adminPin,
+    appConfig.security.appLockPin,
   ]
     .filter(Boolean)
     .map((p) => String(p).trim().replace(/^["']|["']$/g, ''));
@@ -807,8 +791,8 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
 
 app.get('/api/status', async (req: Request, res: Response) => {
   const ctx = await resolveCurrentUserContext(req);
-  const defaultApiId = Number(process.env.TELEGRAM_API_ID || 27254692);
-  const defaultApiHash = String(process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim();
+  const defaultApiId = Number(appConfig.telegram.apiId);
+  const defaultApiHash = String(appConfig.telegram.apiHash).trim();
 
   // Strictly isolate each user's space: never expose the global admin session to unauthenticated visitors or other users
   if (!ctx.telegramId) {
@@ -922,8 +906,8 @@ app.post('/api/connect', async (req: Request, res: Response) => {
   const targetStorageChat = req.body.storage_chat || ctx.webUser?.storage_chat || 'me';
   const payload = {
     ...req.body,
-    api_id: req.body.api_id || process.env.TELEGRAM_API_ID || 27254692,
-    api_hash: req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65',
+    api_id: req.body.api_id || appConfig.telegram.apiId,
+    api_hash: req.body.api_hash || appConfig.telegram.apiHash,
     storage_chat: targetStorageChat,
   };
   const result = await forwardToPython('POST', '/connect', payload);
@@ -971,8 +955,8 @@ app.post('/api/send_code', async (req: Request, res: Response) => {
   const payload = {
     ...req.body,
     phone,
-    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
-    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+    api_id: Number(req.body.api_id || appConfig.telegram.apiId),
+    api_hash: String(req.body.api_hash || appConfig.telegram.apiHash).trim(),
     storage_chat: req.body.storage_chat || 'me',
   };
   const result = await forwardToPython('POST', '/send_code', payload);
@@ -989,8 +973,8 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
   const payload = {
     ...req.body,
     phone,
-    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
-    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+    api_id: Number(req.body.api_id || appConfig.telegram.apiId),
+    api_hash: String(req.body.api_hash || appConfig.telegram.apiHash).trim(),
   };
   const result = await forwardToPython('POST', '/sign_in', payload);
   if (result.status === 200 && result.data?.user) {
@@ -1033,8 +1017,8 @@ app.post('/api/connect_bot', async (req: Request, res: Response) => {
   const ctx = await resolveCurrentUserContext(req);
   const payload = {
     ...req.body,
-    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
-    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+    api_id: Number(req.body.api_id || appConfig.telegram.apiId),
+    api_hash: String(req.body.api_hash || appConfig.telegram.apiHash).trim(),
     storage_chat: req.body.storage_chat || ctx.webUser?.storage_chat || 'me',
   };
   const result = await forwardToPython('POST', '/connect', payload);
@@ -1079,8 +1063,8 @@ app.post('/api/connect_session', async (req: Request, res: Response) => {
   const ctx = await resolveCurrentUserContext(req);
   const payload = {
     ...req.body,
-    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
-    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+    api_id: Number(req.body.api_id || appConfig.telegram.apiId),
+    api_hash: String(req.body.api_hash || appConfig.telegram.apiHash).trim(),
     storage_chat: req.body.storage_chat || ctx.webUser?.storage_chat || 'me',
   };
   const result = await forwardToPython('POST', '/connect', payload);
@@ -1124,8 +1108,8 @@ app.post('/api/connect_session', async (req: Request, res: Response) => {
 app.post(['/api/qr/start', '/api/telegram/qr/start'], async (req: Request, res: Response) => {
   const payload = {
     ...req.body,
-    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
-    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+    api_id: Number(req.body.api_id || appConfig.telegram.apiId),
+    api_hash: String(req.body.api_hash || appConfig.telegram.apiHash).trim(),
     storage_chat: req.body.storage_chat || 'me',
   };
   const result = await forwardToPython('POST', '/qr/start', payload);
@@ -1151,8 +1135,8 @@ app.post(['/api/qr/check', '/api/telegram/qr/check'], async (req: Request, res: 
     if (sessionStr) {
       await saveUserTelegramSessionInDb(result.data.user.id, {
         session_str: sessionStr,
-        api_id: Number(process.env.TELEGRAM_API_ID || 27254692),
-        api_hash: String(process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+        api_id: Number(appConfig.telegram.apiId),
+        api_hash: String(appConfig.telegram.apiHash).trim(),
       }).catch(() => {});
     }
 
@@ -1310,7 +1294,7 @@ app.get(['/api/public-settings', '/api/settings/public'], async (req: Request, r
       github_url: settings.github_url || 'https://github.com',
       twitter_url: settings.twitter_url || 'https://x.com',
       copyright_text: settings.copyright_text || '© 2026 TeleCloud MTProto Engine. All rights reserved.',
-      custom_domain: settings.custom_domain || process.env.CUSTOM_DOMAIN || 's3.htknetwork.in',
+      custom_domain: settings.custom_domain || appConfig.server.customDomain || 's3.htknetwork.in',
       primary_color: settings.primary_color || '#0284c7',
       enable_public_pricing: settings.enable_public_pricing !== 'false',
       enable_contact_form: settings.enable_contact_form !== 'false',
@@ -2449,8 +2433,8 @@ app.get('/api/manifest', async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
-  const domain = process.env.CUSTOM_DOMAIN || 's3.htknetwork.in';
-  const appUrl = process.env.APP_URL || `https://${domain}`;
+  const domain = appConfig.server.customDomain || 's3.htknetwork.in';
+  const appUrl = appConfig.server.appUrl || `https://${domain}`;
 
   const ctx = await resolveCurrentUserContext(req);
   const tgId = ctx.telegramId || (req.query.telegram_id as string);
@@ -3514,7 +3498,7 @@ app.get('/api/script/raw', (_req: Request, res: Response) => {
 
 // Setup Vite or Static delivery
 async function startServer() {
-  const isProd = process.env.NODE_ENV === 'production';
+  const isProd = appConfig.server.nodeEnv === 'production';
 
   if (!isProd) {
     const vite = await createViteServer({
