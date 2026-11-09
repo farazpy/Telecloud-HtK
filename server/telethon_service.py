@@ -67,13 +67,85 @@ _orig_sender_send_loop = MTProtoSender._send_loop
 async def _patched_sender_send_loop(self):
     try:
         await _orig_sender_send_loop(self)
+    except (asyncio.CancelledError, GeneratorExit):
+        return
     except AttributeError as e:
         if 'send' in str(e) or 'NoneType' in str(e):
             self._log.info('Handled disconnected socket in MTProto _send_loop: %s', e)
             self._start_reconnect(IOError(str(e)))
         else:
             raise
+    except Exception as e:
+        if 'NoneType' in str(e) or 'socket' in str(e).lower() or 'closed' in str(e).lower():
+            pass
+        else:
+            raise
 MTProtoSender._send_loop = _patched_sender_send_loop
+
+_orig_sender_recv_loop = MTProtoSender._recv_loop
+async def _patched_sender_recv_loop(self):
+    try:
+        await _orig_sender_recv_loop(self)
+    except (asyncio.CancelledError, GeneratorExit):
+        return
+    except AttributeError as e:
+        if 'NoneType' in str(e) or 'recv' in str(e):
+            self._log.info('Handled disconnected socket in MTProto _recv_loop: %s', e)
+        else:
+            raise
+    except Exception as e:
+        if 'NoneType' in str(e) or 'socket' in str(e).lower() or 'closed' in str(e).lower():
+            pass
+        else:
+            raise
+MTProtoSender._recv_loop = _patched_sender_recv_loop
+
+try:
+    from telethon.network.connection.connection import Connection
+    _orig_conn_recv_loop = Connection._recv_loop
+    async def _patched_conn_recv_loop(self):
+        try:
+            await _orig_conn_recv_loop(self)
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        except Exception as e:
+            if 'NoneType' in str(e) or 'socket' in str(e).lower() or 'closed' in str(e).lower():
+                pass
+            else:
+                raise
+        finally:
+            return
+
+    Connection._recv_loop = _patched_conn_recv_loop
+
+    if hasattr(Connection, '_send_loop'):
+        _orig_conn_send_loop = Connection._send_loop
+        async def _patched_conn_send_loop(self):
+            try:
+                await _orig_conn_send_loop(self)
+            except (asyncio.CancelledError, GeneratorExit):
+                pass
+            except Exception as e:
+                if 'NoneType' in str(e) or 'socket' in str(e).lower() or 'closed' in str(e).lower():
+                    pass
+                else:
+                    raise
+            finally:
+                return
+        Connection._send_loop = _patched_conn_send_loop
+except Exception:
+    pass
+
+def _loop_exception_handler(loop, context):
+    msg = context.get("message")
+    if msg and ("Task was destroyed but it is pending" in msg or "coroutine ignored GeneratorExit" in msg):
+        return
+    loop.default_exception_handler(context)
+
+try:
+    asyncio.get_event_loop().set_exception_handler(_loop_exception_handler)
+except Exception:
+    pass
 
 from telethon.tl.alltlobjects import tlobjects
 from telethon.tl.types import User, Dialog, Chat, Channel, PeerChat, NotificationSoundLocal, Message, MessageMediaDocument
@@ -414,15 +486,14 @@ async def safe_disconnect(cl: Optional[TelegramClient]):
 
     # 2. Force-cancel internal network loops if they are still hanging
     try:
+        tasks_to_cancel = []
         sender = getattr(cl, "_sender", None)
         if sender:
             for task_attr in ["_recv_loop", "_send_loop"]:
                 t = getattr(sender, task_attr, None)
                 if t and not t.done():
                     t.cancel()
-            
-            # Briefly allow tasks to acknowledge cancellation without blocking shutdown
-            await asyncio.sleep(0.1)
+                    tasks_to_cancel.append(t)
 
             conn = getattr(sender, "_connection", None)
             if conn:
@@ -430,6 +501,10 @@ async def safe_disconnect(cl: Optional[TelegramClient]):
                     t = getattr(conn, task_attr, None)
                     if t and not t.done():
                         t.cancel()
+                        tasks_to_cancel.append(t)
+
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
     except Exception:
         pass
 
@@ -642,6 +717,9 @@ class TelethonManager:
                 else:
                     self.is_connected = False
                     logger.warning("Saved session is not authorized.")
+            except (asyncio.CancelledError, GeneratorExit):
+                self.is_connected = False
+                return
             except Exception as e:
                 err_str = str(e).lower()
                 logger.error(f"Failed to auto-connect with saved session: {e}")
@@ -816,6 +894,11 @@ class TelethonManager:
                 err_str = str(e).lower()
                 if "authorization key" in err_str or "two different ip" in err_str:
                     logger.error(f"CRITICAL: Telegram session invalidated for key starting with '{clean_session[:10]}...': {e}")
+                    # If this was the primary session, clear it
+                    if self.session_str and clean_session == self.session_str.strip():
+                        self.session_str = None
+                        self.active_user = None
+                        self.save_config()
                 else:
                     logger.warning(f"Error connecting user session client: {e}")
                 return None
@@ -1197,6 +1280,14 @@ class TelethonManager:
                 if not self.qr_login_obj:
                     raise last_err or RuntimeError("Unable to initialize Telegram QR authentication session.")
 
+                if hasattr(self, "qr_task") and self.qr_task and not self.qr_task.done():
+                    self.qr_task.cancel()
+                    try:
+                        await self.qr_task
+                    except (asyncio.CancelledError, GeneratorExit, Exception):
+                        pass
+                    self.qr_task = None
+
                 # Launch continuous background task to keep event listener alive!
                 self.qr_task = asyncio.create_task(self._run_qr_wait())
 
@@ -1234,8 +1325,8 @@ class TelethonManager:
         except SessionPasswordNeededError:
             logger.info("QR Login requires 2FA cloud password")
             self.qr_status = "requires_password"
-        except asyncio.CancelledError:
-            pass
+        except (asyncio.CancelledError, GeneratorExit):
+            return
         except Exception as e:
             err_msg = str(e).lower()
             if "expired" in err_msg or "timeout" in err_msg:
@@ -1574,7 +1665,7 @@ class TelethonManager:
             "session_type": session_type
         }
 
-    async def list_files(self, limit: int = 100, storage_chat: Optional[str] = None, session_str: Optional[str] = None):
+    async def list_files(self, limit: Optional[int] = None, storage_chat: Optional[str] = None, session_str: Optional[str] = None):
         target_chat = (storage_chat or self.storage_chat or "me").strip()
         active_client = None
 
@@ -1599,7 +1690,8 @@ class TelethonManager:
         files = []
         try:
             entity = await self.resolve_entity_for_client(active_client, target_chat)
-            async for msg in active_client.iter_messages(entity, limit=limit):
+            iter_limit = limit if (limit is not None and limit > 0) else None
+            async for msg in active_client.iter_messages(entity, limit=iter_limit):
                 if msg.media:
                     file_name = f"file_{msg.id}.bin"
                     file_size = 0
@@ -1613,6 +1705,10 @@ class TelethonManager:
                             if isinstance(attr, DocumentAttributeFilename):
                                 file_name = attr.file_name
                                 break
+                        if file_name.endswith(".bin") and mime_type != "application/octet-stream":
+                            guessed = mimetypes.guess_extension(mime_type)
+                            if guessed:
+                                file_name = f"file_{msg.id}{guessed}"
                     elif isinstance(msg.media, MessageMediaPhoto):
                         file_name = f"photo_{msg.id}.jpg"
                         mime_type = "image/jpeg"
@@ -1646,6 +1742,80 @@ class TelethonManager:
         entity = await self.resolve_entity_for_client(target_client, target_chat)
         await target_client.delete_messages(entity, [message_id])
         return {"success": True}
+
+    async def migrate_files(self, files: list, from_chat: str, to_chat: str, session_str: Optional[str] = None):
+        target_client = None
+        if session_str and str(session_str).strip():
+            target_client = await self.get_client_for_session(session_str)
+        if not target_client:
+            await self.ensure_connected()
+            target_client = self.client if self.is_connected else None
+        if not target_client:
+            raise ValueError("Telegram client not connected")
+
+        from_entity = await self.resolve_entity_for_client(target_client, from_chat or "me")
+        to_entity = await self.resolve_entity_for_client(target_client, to_chat or "me")
+
+        results = []
+        for f in files:
+            file_id = f.get("id")
+            old_msg_id = f.get("message_id")
+            caption = f.get("caption") or f.get("file_name") or ""
+            if not old_msg_id:
+                results.append({"id": file_id, "old_message_id": None, "new_message_id": None, "success": False, "error": "Missing message_id"})
+                continue
+            try:
+                msg = await target_client.get_messages(from_entity, ids=int(old_msg_id))
+                if not msg:
+                    results.append({"id": file_id, "old_message_id": old_msg_id, "new_message_id": None, "success": False, "error": "Message not found in source chat"})
+                    continue
+
+                new_msg = None
+                if msg.media:
+                    try:
+                        new_msg = await target_client.send_file(
+                            to_entity,
+                            msg.media,
+                            caption=msg.message or caption
+                        )
+                    except Exception as send_err:
+                        logger.warning(f"send_file copy failed for msg #{old_msg_id}, trying forward: {send_err}")
+                        forwarded = await target_client.forward_messages(to_entity, [int(old_msg_id)], from_peer=from_entity)
+                        if forwarded and len(forwarded) > 0:
+                            new_msg = forwarded[0]
+                        else:
+                            raise send_err
+                else:
+                    forwarded = await target_client.forward_messages(to_entity, [int(old_msg_id)], from_peer=from_entity)
+                    if forwarded and len(forwarded) > 0:
+                        new_msg = forwarded[0]
+
+                if new_msg:
+                    results.append({
+                        "id": file_id,
+                        "old_message_id": old_msg_id,
+                        "new_message_id": new_msg.id,
+                        "success": True
+                    })
+                else:
+                    results.append({
+                        "id": file_id,
+                        "old_message_id": old_msg_id,
+                        "new_message_id": None,
+                        "success": False,
+                        "error": "Failed to create message in destination channel"
+                    })
+                await asyncio.sleep(0.1)
+            except FloodWaitError as fe:
+                logger.warning(f"FloodWait during file migration: {fe.seconds}s")
+                await asyncio.sleep(min(fe.seconds, 5))
+                results.append({"id": file_id, "old_message_id": old_msg_id, "new_message_id": None, "success": False, "error": f"Flood wait: {fe.seconds}s"})
+            except Exception as e:
+                logger.warning(f"Error migrating file #{file_id} (msg #{old_msg_id}): {e}")
+                results.append({"id": file_id, "old_message_id": old_msg_id, "new_message_id": None, "success": False, "error": str(e)})
+
+        migrated_count = sum(1 for r in results if r.get("success"))
+        return {"success": True, "migrated_count": migrated_count, "results": results}
 
 manager = TelethonManager()
 
@@ -1879,6 +2049,44 @@ async def handle_update_storage(request: web.Request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=400)
 
+async def handle_test_storage(request: web.Request):
+    try:
+        data = await request.json() if request.can_read_body else {}
+        storage_chat = data.get("storage_chat") or "me"
+        session_str = data.get("session_str")
+        if session_str and str(session_str).strip():
+            user_client = await manager.get_client_for_session(session_str)
+            if user_client:
+                entity = await manager.resolve_entity_for_client(user_client, storage_chat)
+                entity_name = "Saved Messages (me)" if storage_chat == "me" else getattr(entity, "title", getattr(entity, "first_name", storage_chat))
+                return web.json_response({"success": True, "storage_chat": storage_chat, "entity_name": str(entity_name)})
+        await manager.ensure_connected()
+        if manager.client and manager.is_connected:
+            entity = await manager.resolve_entity_for_client(manager.client, storage_chat)
+            entity_name = getattr(entity, "title", getattr(entity, "first_name", storage_chat))
+            return web.json_response({"success": True, "storage_chat": storage_chat, "entity_name": str(entity_name)})
+        return web.json_response({"error": "Telegram client not connected"}, status=400)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=400)
+
+async def handle_migrate_files(request: web.Request):
+    try:
+        data = await request.json() if request.can_read_body else {}
+        files = data.get("files", [])
+        from_chat = data.get("from_chat")
+        to_chat = data.get("to_chat")
+        session_str = data.get("session_str") or request.headers.get("x-telegram-session")
+        if not to_chat:
+            return web.json_response({"error": "Missing to_chat parameter"}, status=400)
+        if not files:
+            return web.json_response({"success": True, "migrated_count": 0, "results": []})
+
+        res = await manager.migrate_files(files, from_chat, to_chat, session_str=session_str)
+        return web.json_response(res)
+    except Exception as e:
+        logger.exception("Error in handle_migrate_files")
+        return web.json_response({"error": str(e)}, status=500)
+
 async def handle_upload(request: web.Request):
     try:
         data = await request.json()
@@ -1911,7 +2119,12 @@ async def handle_list_files(request: web.Request):
 async def handle_fetch_history(request: web.Request):
     try:
         data = await request.json() if request.can_read_body else {}
-        limit = int(data.get("limit", 300))
+        limit_val = data.get("limit")
+        limit = None
+        if limit_val is not None and str(limit_val).strip() != "" and str(limit_val).isdigit():
+            v = int(limit_val)
+            if v > 0:
+                limit = v
         storage_chat = data.get("storage_chat")
         session_str = data.get("session_str")
         files = await manager.list_files(limit=limit, storage_chat=storage_chat, session_str=session_str)
@@ -2156,30 +2369,56 @@ async def handle_verify_session(request: web.Request):
 
 async def on_startup(app: web.Application):
     logger.info("Aiohttp server startup: HTTP server listening immediately. Initializing saved Telegram client in background task...")
-    asyncio.create_task(manager.init_saved_client())
+    manager.init_task = asyncio.create_task(manager.init_saved_client())
 
 async def on_cleanup(app: web.Application):
     logger.info("Aiohttp server cleanup: closing all active Telegram MTProto client sessions...")
-    if hasattr(manager, "qr_task") and manager.qr_task and not manager.qr_task.done():
-        manager.qr_task.cancel()
-        try:
-            await manager.qr_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        manager.qr_task = None
-
+    
+    cleanup_tasks = []
+    
+    # 1. Gather all background tasks from manager
+    for task_attr in ["init_task", "qr_task"]:
+        t = getattr(manager, task_attr, None)
+        if t and not t.done():
+            t.cancel()
+            cleanup_tasks.append(t)
+            
+    # 2. Gather all clients to disconnect
+    clients_to_disconnect = []
     if manager.client:
-        await safe_disconnect(manager.client)
-        manager.client = None
-
+        clients_to_disconnect.append(manager.client)
     if manager.qr_client:
-        await safe_disconnect(manager.qr_client)
-        manager.qr_client = None
-
-    for sess_key, u_cl in list(manager.user_clients.items()):
-        await safe_disconnect(u_cl)
+        clients_to_disconnect.append(manager.qr_client)
+    for u_cl in list(manager.user_clients.values()):
+        clients_to_disconnect.append(u_cl)
+        
+    for cl in clients_to_disconnect:
+        cleanup_tasks.append(safe_disconnect(cl))
+        
+    # 3. Run all cleanup in parallel with a hard timeout
+    if cleanup_tasks:
+        try:
+            await asyncio.wait_for(asyncio.gather(*cleanup_tasks, return_exceptions=True), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("Cleanup timed out, forcing exit...")
+        except Exception as e:
+            logger.error(f"Error during cleanup: {e}")
+            
     manager.user_clients.clear()
+    manager.client = None
+    manager.qr_client = None
     manager.is_connected = False
+    
+    # Final safety: cancel any other remaining tasks in the loop
+    try:
+        current = asyncio.current_task()
+        remaining = [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+        if remaining:
+            for t in remaining:
+                t.cancel()
+            await asyncio.wait(remaining, timeout=1.0)
+    except Exception:
+        pass
 
 def init_app():
     app = web.Application(client_max_size=2000 * 1024 * 1024)
@@ -2198,6 +2437,8 @@ def init_app():
     app.router.add_post("/api/py/qr/check", handle_qr_check)
     app.router.add_post("/api/py/disconnect", handle_disconnect)
     app.router.add_post("/api/py/storage", handle_update_storage)
+    app.router.add_post("/api/py/storage/test", handle_test_storage)
+    app.router.add_post("/api/py/migrate_files", handle_migrate_files)
     app.router.add_get("/api/py/dialogs", handle_list_dialogs)
     app.router.add_post("/api/py/dialogs", handle_list_dialogs)
     app.router.add_post("/api/py/upload", handle_upload)

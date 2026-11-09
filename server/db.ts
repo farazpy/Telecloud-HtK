@@ -225,6 +225,10 @@ export async function initDb() {
     `);
 
     // Ensure columns exist safely
+    try { await pool.query(`ALTER TABLE web_users ADD COLUMN email VARCHAR(191) DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE web_users ADD COLUMN firebase_uid VARCHAR(128) DEFAULT NULL;`); } catch {}
+    try { await pool.query(`ALTER TABLE web_users ADD INDEX idx_web_firebase (firebase_uid);`); } catch {}
+    try { await pool.query(`ALTER TABLE web_users ADD INDEX idx_web_email (email);`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN active_workspace_id INT DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN api_key VARCHAR(128) UNIQUE DEFAULT NULL;`); } catch {}
     try { await pool.query(`ALTER TABLE users ADD COLUMN session_str TEXT DEFAULT NULL;`); } catch {}
@@ -876,26 +880,31 @@ export async function saveFileToDb(fileData: {
   storage_chat?: string;
   direct_link?: string;
   download_password?: string | null;
-}): Promise<{ success: boolean; file_slug: string }> {
+}): Promise<{ success: boolean; file_slug: string; is_new?: boolean }> {
   const tgId = String(fileData.telegram_id);
   const msgId = String(fileData.message_id);
   const wsId = fileData.workspace_id ? Number(fileData.workspace_id) : null;
   const wsName = fileData.workspace_name || null;
-  const fileSlug = fileData.file_slug || generateUniqueFileSlug(8);
   const storageChat = fileData.storage_chat ? String(fileData.storage_chat).trim() : 'me';
 
   if (!pool || !isDbConnected) {
     loadLocalStore();
     const existingIdx = localStore.user_files.findIndex(
-      (f) => f.file_slug === fileSlug || (String(f.telegram_id) === tgId && String(f.storage_chat || 'me') === storageChat && String(f.message_id) === msgId)
+      (f) =>
+        (fileData.file_slug && f.file_slug === fileData.file_slug) ||
+        (String(f.telegram_id) === tgId && String(f.message_id) === msgId)
     );
+
+    const isNew = existingIdx < 0;
+    const fileSlug =
+      fileData.file_slug || (existingIdx >= 0 ? localStore.user_files[existingIdx].file_slug : generateUniqueFileSlug(8));
 
     const record = {
       id: existingIdx >= 0 ? localStore.user_files[existingIdx].id : localStore.file_next_id++,
       telegram_id: tgId,
       message_id: Number(msgId),
-      workspace_id: wsId,
-      workspace_name: wsName,
+      workspace_id: wsId !== null ? wsId : (existingIdx >= 0 ? localStore.user_files[existingIdx].workspace_id : null),
+      workspace_name: wsName || (existingIdx >= 0 ? localStore.user_files[existingIdx].workspace_name : null),
       file_slug: fileSlug,
       file_name: fileData.file_name,
       original_name: fileData.original_name,
@@ -903,8 +912,8 @@ export async function saveFileToDb(fileData: {
       mime_type: fileData.mime_type || 'application/octet-stream',
       caption: fileData.caption || '',
       storage_chat: storageChat,
-      direct_link: fileData.direct_link || '',
-      download_password: fileData.download_password || null,
+      direct_link: fileData.direct_link || (existingIdx >= 0 ? localStore.user_files[existingIdx].direct_link : ''),
+      download_password: fileData.download_password || (existingIdx >= 0 ? localStore.user_files[existingIdx].download_password : null),
       is_restricted: existingIdx >= 0 ? Boolean(localStore.user_files[existingIdx].is_restricted) : false,
       created_at: existingIdx >= 0 ? localStore.user_files[existingIdx].created_at : new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -916,33 +925,47 @@ export async function saveFileToDb(fileData: {
       localStore.user_files.unshift(record);
     }
     saveLocalStore();
-    return { success: true, file_slug: fileSlug };
+    return { success: true, file_slug: fileSlug, is_new: isNew };
   }
 
   try {
-    // Check if record exists with this unique file_slug
-    const [existingSlugRows]: any = await pool.query(
-      `SELECT id FROM user_files WHERE file_slug = ? LIMIT 1`,
-      [fileSlug]
-    );
+    let existingRow: any = null;
+    if (fileData.file_slug) {
+      const [slugRows]: any = await pool.query(
+        `SELECT id, file_slug FROM user_files WHERE file_slug = ? LIMIT 1`,
+        [fileData.file_slug]
+      );
+      if (slugRows && slugRows.length > 0) existingRow = slugRows[0];
+    }
 
-    if (existingSlugRows && existingSlugRows.length > 0) {
+    if (!existingRow) {
+      const [msgRows]: any = await pool.query(
+        `SELECT id, file_slug FROM user_files WHERE telegram_id = ? AND message_id = ? LIMIT 1`,
+        [tgId, msgId]
+      );
+      if (msgRows && msgRows.length > 0) existingRow = msgRows[0];
+    }
+
+    const isNew = !existingRow;
+    const fileSlug = existingRow ? existingRow.file_slug : (fileData.file_slug || generateUniqueFileSlug(8));
+
+    if (existingRow) {
       await pool.query(
         `UPDATE user_files SET 
           telegram_id = ?,
           message_id = ?,
-          workspace_id = ?,
-          workspace_name = ?,
+          workspace_id = COALESCE(?, workspace_id),
+          workspace_name = COALESCE(?, workspace_name),
           file_name = ?,
           original_name = ?,
           file_size = ?,
           mime_type = ?,
           caption = ?,
           storage_chat = ?,
-          direct_link = ?,
-          download_password = ?,
+          direct_link = COALESCE(NULLIF(?, ''), direct_link),
+          download_password = COALESCE(?, download_password),
           updated_at = NOW()
-        WHERE file_slug = ?`,
+        WHERE id = ?`,
         [
           tgId,
           msgId,
@@ -956,7 +979,7 @@ export async function saveFileToDb(fileData: {
           storageChat,
           fileData.direct_link || '',
           fileData.download_password || null,
-          fileSlug,
+          existingRow.id,
         ]
       );
     } else {
@@ -982,7 +1005,7 @@ export async function saveFileToDb(fileData: {
       );
     }
 
-    return { success: true, file_slug: fileSlug };
+    return { success: true, file_slug: fileSlug, is_new: isNew };
   } catch (err: any) {
     isDbConnected = false;
     return saveFileToDb(fileData);
@@ -1230,6 +1253,48 @@ export async function reassignFileWorkspaceInDb(
   } catch (err: any) {
     isDbConnected = false;
     return reassignFileWorkspaceInDb(telegramId, messageId, workspaceId);
+  }
+}
+
+export async function updateMigratedFilesStorageInDb(
+  updates: Array<{ id: number; new_message_id: number; new_storage_chat: string }>
+): Promise<{ success: boolean; updatedCount: number }> {
+  if (!updates || updates.length === 0) {
+    return { success: true, updatedCount: 0 };
+  }
+
+  let updatedCount = 0;
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    for (const u of updates) {
+      const idx = localStore.user_files.findIndex((f) => Number(f.id) === Number(u.id));
+      if (idx >= 0) {
+        localStore.user_files[idx].message_id = Number(u.new_message_id);
+        localStore.user_files[idx].storage_chat = u.new_storage_chat;
+        localStore.user_files[idx].updated_at = new Date().toISOString();
+        updatedCount++;
+      }
+    }
+    saveLocalStore();
+    return { success: true, updatedCount };
+  }
+
+  try {
+    for (const u of updates) {
+      await pool.query(
+        `UPDATE user_files 
+         SET message_id = ?, storage_chat = ?, updated_at = NOW() 
+         WHERE id = ?`,
+        [Number(u.new_message_id), u.new_storage_chat, Number(u.id)]
+      );
+      updatedCount++;
+    }
+    return { success: true, updatedCount };
+  } catch (err: any) {
+    console.error('Error updating migrated files in MySQL:', err);
+    isDbConnected = false;
+    return updateMigratedFilesStorageInDb(updates);
   }
 }
 
@@ -2169,6 +2234,8 @@ export async function deleteUnaccessedFilesFromDb(
 export interface WebUserRecord {
   id: number;
   username: string;
+  email?: string | null;
+  firebase_uid?: string | null;
   display_name: string | null;
   telegram_id: string | null;
   storage_chat: string;
@@ -2213,28 +2280,33 @@ export async function registerWebUser(
 ): Promise<{ success: boolean; user?: WebUserRecord; token?: string; error?: string }> {
   const cleanUsername = String(username || '').trim().toLowerCase();
   if (!cleanUsername || cleanUsername.length < 3) {
-    return { success: false, error: 'Username must be at least 3 characters long.' };
+    return { success: false, error: 'Email or username must be at least 3 characters long.' };
   }
-  if (!/^[a-z0-9_.-]+$/.test(cleanUsername)) {
-    return { success: false, error: 'Username can only contain letters, numbers, dots, underscores, and hyphens.' };
+  if (!/^[a-z0-9_.@+-]+$/.test(cleanUsername)) {
+    return { success: false, error: 'Email or username can only contain letters, numbers, dots, underscores, @, and hyphens.' };
   }
   if (!password || String(password).length < 6) {
     return { success: false, error: 'Password must be at least 6 characters long.' };
   }
 
-  const cleanDisplay = (displayName || username).trim();
+  const cleanDisplay = (displayName || (cleanUsername.includes('@') ? cleanUsername.split('@')[0] : username)).trim();
   const passwordHash = hashPassword(password);
   const authToken = generateWebAuthToken();
+  const userEmail = cleanUsername.includes('@') ? cleanUsername : null;
 
   if (!pool || !isDbConnected) {
     loadLocalStore();
-    const exists = localStore.web_users.find((u: any) => String(u.username).toLowerCase() === cleanUsername);
+    const exists = localStore.web_users.find(
+      (u: any) => String(u.username).toLowerCase() === cleanUsername || (userEmail && String(u.email || '').toLowerCase() === userEmail)
+    );
     if (exists) {
-      return { success: false, error: 'Username is already taken. Please choose another username or sign in.' };
+      return { success: false, error: 'Email or username is already taken. Please sign in or use another.' };
     }
     const newUser = {
       id: localStore.web_user_next_id++,
       username: cleanUsername,
+      email: userEmail,
+      firebase_uid: null,
       password_hash: passwordHash,
       display_name: cleanDisplay,
       telegram_id: null,
@@ -2251,6 +2323,8 @@ export async function registerWebUser(
       user: {
         id: newUser.id,
         username: newUser.username,
+        email: newUser.email,
+        firebase_uid: null,
         display_name: newUser.display_name,
         telegram_id: null,
         storage_chat: 'me',
@@ -2262,17 +2336,17 @@ export async function registerWebUser(
 
   try {
     const [existingRows]: any = await pool.query(
-      `SELECT id FROM web_users WHERE username = ? LIMIT 1`,
-      [cleanUsername]
+      `SELECT id FROM web_users WHERE username = ? OR (email IS NOT NULL AND email = ?) LIMIT 1`,
+      [cleanUsername, userEmail || cleanUsername]
     );
     if (Array.isArray(existingRows) && existingRows.length > 0) {
-      return { success: false, error: 'Username is already taken. Please choose another username or sign in.' };
+      return { success: false, error: 'Email or username is already taken. Please choose another or sign in.' };
     }
 
     const [insertRes]: any = await pool.query(
-      `INSERT INTO web_users (username, password_hash, display_name, telegram_id, storage_chat, auth_token)
-       VALUES (?, ?, ?, NULL, 'me', ?)`,
-      [cleanUsername, passwordHash, cleanDisplay, authToken]
+      `INSERT INTO web_users (username, email, password_hash, display_name, telegram_id, storage_chat, auth_token)
+       VALUES (?, ?, ?, ?, NULL, 'me', ?)`,
+      [cleanUsername, userEmail, passwordHash, cleanDisplay, authToken]
     );
 
     const newId = Number(insertRes.insertId);
@@ -2282,6 +2356,8 @@ export async function registerWebUser(
       user: {
         id: newId,
         username: cleanUsername,
+        email: userEmail,
+        firebase_uid: null,
         display_name: cleanDisplay,
         telegram_id: null,
         storage_chat: 'me',
@@ -2291,7 +2367,7 @@ export async function registerWebUser(
     };
   } catch (err: any) {
     if (err.code === 'ER_DUP_ENTRY') {
-      return { success: false, error: 'Username is already registered.' };
+      return { success: false, error: 'Email or username is already registered.' };
     }
     isDbConnected = false;
     return registerWebUser(username, password, displayName);
@@ -2304,14 +2380,16 @@ export async function loginWebUser(
 ): Promise<{ success: boolean; user?: WebUserRecord; token?: string; error?: string }> {
   const cleanUsername = String(username || '').trim().toLowerCase();
   if (!cleanUsername || !password) {
-    return { success: false, error: 'Username and password are required.' };
+    return { success: false, error: 'Email/username and password are required.' };
   }
 
   if (!pool || !isDbConnected) {
     loadLocalStore();
-    const found = localStore.web_users.find((u: any) => String(u.username).toLowerCase() === cleanUsername);
+    const found = localStore.web_users.find(
+      (u: any) => String(u.username).toLowerCase() === cleanUsername || (u.email && String(u.email).toLowerCase() === cleanUsername)
+    );
     if (!found || !verifyPassword(password, found.password_hash)) {
-      return { success: false, error: 'Invalid username or password.' };
+      return { success: false, error: 'Invalid email/username or password.' };
     }
     const newToken = generateWebAuthToken();
     found.auth_token = newToken;
@@ -2323,6 +2401,8 @@ export async function loginWebUser(
       user: {
         id: found.id,
         username: found.username,
+        email: found.email || null,
+        firebase_uid: found.firebase_uid || null,
         display_name: found.display_name || found.username,
         telegram_id: found.telegram_id ? String(found.telegram_id) : null,
         storage_chat: found.storage_chat || 'me',
@@ -2334,18 +2414,18 @@ export async function loginWebUser(
 
   try {
     const [rows]: any = await pool.query(
-      `SELECT id, username, password_hash, display_name, telegram_id, storage_chat, auth_token, created_at
+      `SELECT id, username, email, firebase_uid, password_hash, display_name, telegram_id, storage_chat, auth_token, created_at
        FROM web_users
-       WHERE username = ?
+       WHERE username = ? OR (email IS NOT NULL AND email = ?)
        LIMIT 1`,
-      [cleanUsername]
+      [cleanUsername, cleanUsername]
     );
     if (!Array.isArray(rows) || rows.length === 0) {
-      return { success: false, error: 'Invalid username or password.' };
+      return { success: false, error: 'Invalid email/username or password.' };
     }
     const u = rows[0];
     if (!verifyPassword(password, u.password_hash)) {
-      return { success: false, error: 'Invalid username or password.' };
+      return { success: false, error: 'Invalid email/username or password.' };
     }
 
     const newToken = generateWebAuthToken();
@@ -2357,6 +2437,8 @@ export async function loginWebUser(
       user: {
         id: Number(u.id),
         username: u.username,
+        email: u.email || null,
+        firebase_uid: u.firebase_uid || null,
         display_name: u.display_name || u.username,
         telegram_id: u.telegram_id ? String(u.telegram_id) : null,
         storage_chat: u.storage_chat || 'me',
@@ -2367,6 +2449,193 @@ export async function loginWebUser(
   } catch (err: any) {
     isDbConnected = false;
     return loginWebUser(username, password);
+  }
+}
+
+export async function firebaseLoginWebUser(
+  firebaseUid: string,
+  email?: string | null,
+  displayName?: string | null
+): Promise<{ success: boolean; user?: WebUserRecord; token?: string; error?: string }> {
+  const cleanUid = String(firebaseUid || '').trim();
+  const cleanEmail = email ? String(email).trim().toLowerCase() : '';
+  if (!cleanUid) {
+    return { success: false, error: 'Firebase UID is required.' };
+  }
+
+  const cleanDisplay = (displayName || (cleanEmail ? cleanEmail.split('@')[0] : 'Google User')).trim();
+  const newToken = generateWebAuthToken();
+
+  if (!pool || !isDbConnected) {
+    loadLocalStore();
+    let found = localStore.web_users.find(
+      (u: any) => u.firebase_uid === cleanUid || (cleanEmail && (u.username === cleanEmail || u.email === cleanEmail))
+    );
+    if (found) {
+      found.firebase_uid = cleanUid;
+      if (cleanEmail && !found.email) found.email = cleanEmail;
+      found.auth_token = newToken;
+      found.updated_at = new Date().toISOString();
+      saveLocalStore();
+      return {
+        success: true,
+        token: newToken,
+        user: {
+          id: found.id,
+          username: found.username,
+          email: found.email || cleanEmail || null,
+          firebase_uid: cleanUid,
+          display_name: found.display_name || cleanDisplay,
+          telegram_id: found.telegram_id ? String(found.telegram_id) : null,
+          storage_chat: found.storage_chat || 'me',
+          auth_token: newToken,
+          created_at: found.created_at,
+        },
+      };
+    }
+
+    const baseUsername = cleanEmail ? cleanEmail.split('@')[0].replace(/[^a-z0-9_.-]/g, '_') : `user_${cleanUid.slice(0, 6)}`;
+    let finalUsername = baseUsername;
+    let counter = 1;
+    while (localStore.web_users.some((u: any) => u.username === finalUsername)) {
+      finalUsername = `${baseUsername}_${counter++}`;
+    }
+
+    const newUser = {
+      id: localStore.web_user_next_id++,
+      username: finalUsername,
+      email: cleanEmail || null,
+      firebase_uid: cleanUid,
+      password_hash: hashPassword(crypto.randomUUID()),
+      display_name: cleanDisplay,
+      telegram_id: null,
+      storage_chat: 'me',
+      auth_token: newToken,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    localStore.web_users.push(newUser);
+    saveLocalStore();
+    return {
+      success: true,
+      token: newToken,
+      user: {
+        id: newUser.id,
+        username: newUser.username,
+        email: newUser.email,
+        firebase_uid: newUser.firebase_uid,
+        display_name: newUser.display_name,
+        telegram_id: null,
+        storage_chat: 'me',
+        auth_token: newToken,
+        created_at: newUser.created_at,
+      },
+    };
+  }
+
+  try {
+    // 1. Try to find by firebase_uid
+    const [uidRows]: any = await pool.query(
+      `SELECT id, username, email, firebase_uid, display_name, telegram_id, storage_chat, auth_token, created_at
+       FROM web_users
+       WHERE firebase_uid = ?
+       LIMIT 1`,
+      [cleanUid]
+    );
+
+    if (Array.isArray(uidRows) && uidRows.length > 0) {
+      const u = uidRows[0];
+      await pool.query(`UPDATE web_users SET auth_token = ?, updated_at = NOW() WHERE id = ?`, [newToken, u.id]);
+      return {
+        success: true,
+        token: newToken,
+        user: {
+          id: Number(u.id),
+          username: u.username,
+          email: u.email || cleanEmail || null,
+          firebase_uid: cleanUid,
+          display_name: u.display_name || cleanDisplay,
+          telegram_id: u.telegram_id ? String(u.telegram_id) : null,
+          storage_chat: u.storage_chat || 'me',
+          auth_token: newToken,
+          created_at: u.created_at ? new Date(u.created_at).toISOString() : undefined,
+        },
+      };
+    }
+
+    // 2. Try to find by email or username
+    if (cleanEmail) {
+      const [emailRows]: any = await pool.query(
+        `SELECT id, username, email, firebase_uid, display_name, telegram_id, storage_chat, auth_token, created_at
+         FROM web_users
+         WHERE email = ? OR username = ?
+         LIMIT 1`,
+        [cleanEmail, cleanEmail]
+      );
+
+      if (Array.isArray(emailRows) && emailRows.length > 0) {
+        const u = emailRows[0];
+        await pool.query(
+          `UPDATE web_users SET firebase_uid = ?, email = ?, auth_token = ?, updated_at = NOW() WHERE id = ?`,
+          [cleanUid, cleanEmail, newToken, u.id]
+        );
+        return {
+          success: true,
+          token: newToken,
+          user: {
+            id: Number(u.id),
+            username: u.username,
+            email: cleanEmail,
+            firebase_uid: cleanUid,
+            display_name: u.display_name || cleanDisplay,
+            telegram_id: u.telegram_id ? String(u.telegram_id) : null,
+            storage_chat: u.storage_chat || 'me',
+            auth_token: newToken,
+            created_at: u.created_at ? new Date(u.created_at).toISOString() : undefined,
+          },
+        };
+      }
+    }
+
+    // 3. Register brand-new user with Google credentials
+    const baseUsername = cleanEmail
+      ? cleanEmail.split('@')[0].replace(/[^a-z0-9_.-]/g, '_')
+      : `user_${cleanUid.slice(0, 6)}`;
+    let finalUsername = baseUsername || 'user';
+    let counter = 1;
+    while (true) {
+      const [chk]: any = await pool.query(`SELECT id FROM web_users WHERE username = ? LIMIT 1`, [finalUsername]);
+      if (!Array.isArray(chk) || chk.length === 0) break;
+      finalUsername = `${baseUsername}_${counter++}`;
+    }
+
+    const dummyPasswordHash = hashPassword(crypto.randomUUID());
+    const [insertRes]: any = await pool.query(
+      `INSERT INTO web_users (username, email, firebase_uid, password_hash, display_name, telegram_id, storage_chat, auth_token)
+       VALUES (?, ?, ?, ?, ?, NULL, 'me', ?)`,
+      [finalUsername, cleanEmail || null, cleanUid, dummyPasswordHash, cleanDisplay, newToken]
+    );
+
+    const newId = Number(insertRes.insertId);
+    return {
+      success: true,
+      token: newToken,
+      user: {
+        id: newId,
+        username: finalUsername,
+        email: cleanEmail || null,
+        firebase_uid: cleanUid,
+        display_name: cleanDisplay,
+        telegram_id: null,
+        storage_chat: 'me',
+        auth_token: newToken,
+        created_at: new Date().toISOString(),
+      },
+    };
+  } catch (err: any) {
+    console.error('[Firebase Login DB Error]:', err);
+    isDbConnected = false;
+    return firebaseLoginWebUser(firebaseUid, email, displayName);
   }
 }
 

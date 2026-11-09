@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
 
 html, body, #root {
   min-height: 100vh;
@@ -6,22 +7,32 @@ html, body, #root {
 
 html.dark {
   color-scheme: dark;
-  background-color: #020617;
+  background-color: #000000;
 }
 
 html.dark body {
-  background-color: #020617;
-  color: #f8fafc;
+  background: #000000;
+  color: #f1f5f9;
 }
 
 html:not(.dark) {
   color-scheme: light;
-  background-color: #f8fafc;
+  background-color: #f0f6ff;
 }
 
 html:not(.dark) body {
-  background-color: #f8fafc;
-  color: #1e293b;
+  background: radial-gradient(ellipse 90% 70% at 50% 0%, #ffffff 0%, #eef5ff 45%, #e1edfc 100%);
+  color: #0f172a;
+}
+
+::selection {
+  background-color: #0088cc;
+  color: #ffffff;
+}
+
+.dark ::selection {
+  background-color: #38bdf8;
+  color: #030712;
 }
 
 @keyframes scan {
@@ -113,6 +124,53 @@ html:not(.dark) body {
 .animate-dropzone-float {
   animation: dropzoneFloat 3s ease-in-out infinite;
 }
+/* Global Cursor Pointer for interactive elements */
+button, 
+a, 
+[role="button"], 
+select, 
+input[type="checkbox"], 
+input[type="radio"],
+.cursor-pointer-all * {
+  cursor: pointer;
+}
 
+button:disabled,
+a:disabled,
+.cursor-not-allowed {
+  cursor: not-allowed !important;
+}
 
+/* Smooth Entrance Animations */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUpFade {
+  from { 
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to { 
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+.animate-slide-up {
+  animation: slideUpFade 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+/* Reduced motion support */
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-slide-up {
+    animation: none;
+  }
+}
 

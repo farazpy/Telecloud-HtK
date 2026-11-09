@@ -5,7 +5,7 @@ import express, { Request, Response } from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, execSync, ChildProcess } from 'child_process';
 import multer from 'multer';
 import crypto from 'crypto';
 import {
@@ -20,6 +20,7 @@ import {
   getWorkspacesFromDb,
   createWorkspaceInDb,
   updateWorkspaceInDb,
+  updateMigratedFilesStorageInDb,
   deleteWorkspaceInDb,
   setActiveWorkspaceInDb,
   getActiveWorkspaceFromDb,
@@ -50,6 +51,7 @@ import {
   deleteUnaccessedFilesFromDb,
   registerWebUser,
   loginWebUser,
+  firebaseLoginWebUser,
   getWebUserByToken,
   linkTelegramToWebUser,
   unlinkTelegramFromWebUser,
@@ -104,6 +106,16 @@ function getCookie(req: Request, name: string): string | null {
 }
 
 function getWebAuthToken(req: Request): string | null {
+  const authHeader = req.headers['authorization'] as string;
+  if (authHeader && authHeader.trim()) {
+    const parts = authHeader.trim().split(' ');
+    if (parts.length === 2 && parts[0].toLowerCase() === 'bearer') {
+      return parts[1].trim();
+    }
+    if (parts.length === 1 && parts[0].length > 10) {
+      return parts[0].trim();
+    }
+  }
   const headerToken = (req.headers['x-auth-token'] as string) || (req.headers['x-web-token'] as string);
   if (headerToken && headerToken.trim()) return headerToken.trim();
   const cookieToken = getCookie(req, 'telecloud_web_token');
@@ -185,6 +197,8 @@ initDb()
   .then(async () => {
     const isReady = await waitForPythonReady(15000);
     if (isReady) {
+      // Small delay to allow any previous zombie processes to fully clear their MTProto sockets on Telegram side
+      await new Promise((r) => setTimeout(r, 3000));
       await restoreSessionFromMysql().catch((e) => console.warn('[MySQL] Auto-restore notice:', e.message));
       await syncMysqlSettingsToPython().catch((e) => console.warn('[MySQL] Settings sync notice:', e.message));
     } else {
@@ -301,7 +315,31 @@ function ensurePythonDepsAndStart() {
   });
 }
 
-function startPythonService() {
+async function isTelethonServiceRunning(): Promise<boolean> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1200);
+    const res = await fetch(`http://127.0.0.1:${PY_PORT}/api/py/status`, { signal: controller.signal });
+    clearTimeout(timer);
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function startPythonService() {
+  // If telethon service is already running and responsive, do not spawn a duplicate
+  const alreadyRunning = await isTelethonServiceRunning();
+  if (alreadyRunning) {
+    console.log(`[Node] Telethon MTProto Engine is already running and responsive on port ${PY_PORT}. Duplicate spawn skipped.`);
+    return;
+  }
+
+  // If port 5050 is held by an unresponsive or stale process, clear it first
+  try {
+    execSync(`fuser -k ${PY_PORT}/tcp || true`, { stdio: 'ignore' });
+  } catch {}
+
   const pyScript = path.resolve(process.cwd(), 'server', 'telethon_service.py');
   console.log(`[Node] Launching Telethon MTProto Engine: ${pyScript} on port ${PY_PORT}`);
   
@@ -314,17 +352,31 @@ function startPythonService() {
     console.error('[Node] Failed to start Telethon Python Engine:', err);
   });
 
-  pyProcess.on('exit', (code, signal) => {
-    console.warn(`[Node] Telethon Python Engine exited with code ${code}, signal ${signal}. Restarting in 3s...`);
-    setTimeout(startPythonService, 3000);
+  pyProcess.on('exit', async (code, signal) => {
+    // Only attempt restart if the service is not currently healthy on that port
+    await new Promise((r) => setTimeout(r, 1000));
+    const healthy = await isTelethonServiceRunning();
+    if (!healthy) {
+      console.warn(`[Node] Telethon Python Engine exited with code ${code}, signal ${signal}. Restarting in 5s...`);
+      setTimeout(startPythonService, 5000);
+    } else {
+      console.log(`[Node] Telethon MTProto Engine active on port ${PY_PORT}. No redundant restart needed.`);
+    }
   });
 }
 
 ensurePythonDepsAndStart();
 
-process.on('exit', () => {
-  if (pyProcess) pyProcess.kill();
-});
+const cleanUpChildProcess = () => {
+  if (pyProcess) {
+    try {
+      pyProcess.kill('SIGTERM');
+    } catch {}
+  }
+};
+process.on('exit', cleanUpChildProcess);
+process.on('SIGINT', () => { cleanUpChildProcess(); process.exit(0); });
+process.on('SIGTERM', () => { cleanUpChildProcess(); process.exit(0); });
 
 // Contact & Support Form Submission Handler
 app.post('/api/contact', (req: Request, res: Response) => {
@@ -579,47 +631,71 @@ const getAllValidTokens = (): string[] => {
 };
 
 app.get('/api/app-lock/status', (_req: Request, res: Response) => {
-  const validPins = getAllValidDashboardPins();
   return res.json({
-    enabled: true,
-    has_custom_pin: validPins.length > 0,
-    message: 'Dashboard requires App Lock PIN configured in environment (.env)',
+    enabled: false,
+    has_custom_pin: false,
+    message: 'Platform lock feature is disabled. Platform authentication is managed via Email, Password and Google Login.',
   });
 });
 
-app.post('/api/app-lock/verify', (req: Request, res: Response) => {
-  const submittedPin = String(req.body?.pin || '').trim().replace(/^["']|["']$/g, '');
-  const validPins = getAllValidDashboardPins();
+app.post('/api/app-lock/verify', (_req: Request, res: Response) => {
+  return res.json({
+    success: true,
+    token: 'unlocked',
+    message: 'Platform lock is disabled.',
+  });
+});
 
-  if (!submittedPin) {
-    return res.status(400).json({ success: false, error: 'PIN is required to unlock the dashboard.' });
-  }
+app.post('/api/app-lock/verify-token', (_req: Request, res: Response) => {
+  return res.json({ success: true, valid: true });
+});
 
-  if (validPins.includes(submittedPin)) {
-    const token = getDashboardLockSecretForPin(submittedPin);
+// ============================================================================
+// FIREBASE GOOGLE AUTHENTICATION ENDPOINT
+// ============================================================================
+app.post('/api/auth/google-firebase', async (req: Request, res: Response) => {
+  try {
+    const { uid, email, displayName } = req.body || {};
+    if (!uid) {
+      return res.status(400).json({ success: false, error: 'Firebase UID is required.' });
+    }
+
+    const result = await firebaseLoginWebUser(uid, email || '', displayName || '');
+    if (!result.success || !result.user || !result.token) {
+      return res.status(400).json({ success: false, error: result.error || 'Google login failed.' });
+    }
+
+    res.cookie('telecloud_web_token', result.token, {
+      httpOnly: true,
+      secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+      sameSite: 'lax',
+      path: '/',
+    });
+
+    if (result.user.telegram_id) {
+      res.cookie('telecloud_tg_id', String(result.user.telegram_id), {
+        httpOnly: true,
+        secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        sameSite: 'lax',
+        path: '/',
+      });
+    } else {
+      res.clearCookie('telecloud_tg_id', { path: '/' });
+    }
+
     return res.json({
       success: true,
-      token,
-      message: 'Dashboard unlocked successfully.',
+      token: result.token,
+      web_user: result.user,
+      message: 'Signed in successfully with Google!',
     });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err.message || 'Server error during Google login.' });
   }
-
-  return res.status(401).json({
-    success: false,
-    error: 'Incorrect PIN. Please enter the valid Dashboard PIN set in .env.',
-  });
 });
 
-app.post('/api/app-lock/verify-token', (req: Request, res: Response) => {
-  const submittedToken = String(req.body?.token || '').trim();
-  const validTokens = getAllValidTokens();
-
-  if (submittedToken && validTokens.includes(submittedToken)) {
-    return res.json({ success: true, valid: true });
-  }
-
-  return res.status(401).json({ success: false, valid: false, error: 'Dashboard lock session expired or invalid.' });
-});
 
 // ============================================================================
 // MULTI-USER WEB AUTHENTICATION ENDPOINTS (Username & Password + Isolated Space)
@@ -946,6 +1022,98 @@ app.post('/api/sign_in', async (req: Request, res: Response) => {
       httpOnly: true,
       secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
       maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+      sameSite: 'lax',
+      path: '/',
+    });
+  }
+  res.status(result.status).json(result.data);
+});
+
+app.post('/api/connect_bot', async (req: Request, res: Response) => {
+  const ctx = await resolveCurrentUserContext(req);
+  const payload = {
+    ...req.body,
+    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
+    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+    storage_chat: req.body.storage_chat || ctx.webUser?.storage_chat || 'me',
+  };
+  const result = await forwardToPython('POST', '/connect', payload);
+  
+  if (result.status === 200 && result.data?.user) {
+    const targetStorageChat = payload.storage_chat;
+    const sessionStr = result.data.session_str || undefined;
+    await saveUserToDb({
+      telegram_id: result.data.user.id,
+      first_name: result.data.user.first_name,
+      last_name: result.data.user.last_name,
+      username: result.data.user.username,
+      phone: result.data.user.phone || '',
+      storage_chat: targetStorageChat,
+      session_str: sessionStr,
+    }).catch((e) => console.error('[MySQL] bot user save error:', e));
+
+    if (sessionStr) {
+      await saveUserTelegramSessionInDb(result.data.user.id, {
+        session_str: sessionStr,
+        api_id: payload.api_id,
+        api_hash: payload.api_hash,
+      }).catch(() => {});
+    }
+
+    if (ctx.webUser) {
+      await linkTelegramToWebUser(ctx.webUser.id, result.data.user.id, targetStorageChat);
+    }
+
+    res.cookie('telecloud_tg_id', String(result.data.user.id), {
+      httpOnly: true,
+      secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
+      sameSite: 'lax',
+      path: '/',
+    });
+  }
+  res.status(result.status).json(result.data);
+});
+
+app.post('/api/connect_session', async (req: Request, res: Response) => {
+  const ctx = await resolveCurrentUserContext(req);
+  const payload = {
+    ...req.body,
+    api_id: Number(req.body.api_id || process.env.TELEGRAM_API_ID || 27254692),
+    api_hash: String(req.body.api_hash || process.env.TELEGRAM_API_HASH || '9f6f826a62b78378292fd224e943cb65').trim(),
+    storage_chat: req.body.storage_chat || ctx.webUser?.storage_chat || 'me',
+  };
+  const result = await forwardToPython('POST', '/connect', payload);
+  
+  if (result.status === 200 && result.data?.user) {
+    const targetStorageChat = payload.storage_chat;
+    const sessionStr = result.data.session_str || req.body.string_session;
+    await saveUserToDb({
+      telegram_id: result.data.user.id,
+      first_name: result.data.user.first_name,
+      last_name: result.data.user.last_name,
+      username: result.data.user.username,
+      phone: result.data.user.phone || '',
+      storage_chat: targetStorageChat,
+      session_str: sessionStr,
+    }).catch((e) => console.error('[MySQL] session user save error:', e));
+
+    if (sessionStr) {
+      await saveUserTelegramSessionInDb(result.data.user.id, {
+        session_str: sessionStr,
+        api_id: payload.api_id,
+        api_hash: payload.api_hash,
+      }).catch(() => {});
+    }
+
+    if (ctx.webUser) {
+      await linkTelegramToWebUser(ctx.webUser.id, result.data.user.id, targetStorageChat);
+    }
+
+    res.cookie('telecloud_tg_id', String(result.data.user.id), {
+      httpOnly: true,
+      secure: req.secure || req.headers['x-forwarded-proto'] === 'https',
+      maxAge: 30 * 24 * 60 * 60 * 1000,
       sameSite: 'lax',
       path: '/',
     });
@@ -1619,6 +1787,114 @@ app.post('/api/workspaces/:id/switch', async (req: Request, res: Response): Prom
   }
 });
 
+app.post('/api/storage/test', async (req: Request, res: Response) => {
+  const storageChat = String(req.body.storage_chat || 'me').trim();
+  const ctx = await resolveCurrentUserContext(req);
+  const result = await forwardToPython('POST', '/storage/test', {
+    storage_chat: storageChat,
+    session_str: ctx.sessionStr,
+  });
+  res.status(result.status).json(result.data);
+});
+
+app.post('/api/workspaces/:id/migrate-channel', async (req: Request, res: Response): Promise<void> => {
+  const wsId = Number(req.params.id);
+  const ctx = await resolveCurrentUserContext(req);
+  const tgId = ctx.telegramId || (req.body.telegram_id as string);
+  if (!tgId) {
+    res.status(401).json({ error: 'User not authenticated' });
+    return;
+  }
+
+  const newStorageChat = String(req.body.new_storage_chat || req.body.storage_chat || 'me').trim();
+  const shouldMigrateFiles = Boolean(req.body.migrate_files);
+
+  try {
+    const ws = await getWorkspaceById(wsId);
+    if (!ws || String(ws.telegram_id) !== String(tgId)) {
+      res.status(404).json({ error: 'Workspace not found or unauthorized' });
+      return;
+    }
+
+    const currentChat = ws.storage_chat || 'me';
+    let migratedCount = 0;
+    let failedCount = 0;
+    let totalFiles = 0;
+
+    // Get current files belonging to this workspace
+    const files = await getUserFilesFromDb(tgId, wsId);
+    totalFiles = files.length;
+
+    if (shouldMigrateFiles && totalFiles > 0) {
+      // Forward migration request to Python MTProto engine
+      const pyResp = await forwardToPython('POST', '/migrate_files', {
+        files: files.map((f: any) => ({
+          id: f.id,
+          message_id: f.message_id,
+          file_name: f.file_name,
+          caption: f.caption,
+        })),
+        from_chat: currentChat,
+        to_chat: newStorageChat,
+        session_str: ctx.sessionStr,
+      });
+
+      if (pyResp.status >= 400 || !pyResp.data || !pyResp.data.success) {
+        res.status(pyResp.status || 500).json({
+          error: pyResp.data?.error || 'Failed to migrate files to destination channel via MTProto',
+        });
+        return;
+      }
+
+      const results = pyResp.data.results || [];
+      const successfulUpdates = results
+        .filter((r: any) => r.success && r.new_message_id)
+        .map((r: any) => ({
+          id: r.id,
+          new_message_id: r.new_message_id,
+          new_storage_chat: newStorageChat,
+        }));
+
+      migratedCount = successfulUpdates.length;
+      failedCount = results.length - migratedCount;
+
+      if (successfulUpdates.length > 0) {
+        await updateMigratedFilesStorageInDb(successfulUpdates);
+      }
+    }
+
+    // Update workspace storage_chat in DB
+    await updateWorkspaceInDb(wsId, tgId, { storage_chat: newStorageChat });
+
+    // Sync Python and web_user if this workspace is currently active
+    const activeWs = await getActiveWorkspaceFromDb(tgId);
+    if (activeWs && activeWs.id === wsId) {
+      if (ctx.webUser) {
+        await updateWebUserStorageChat(ctx.webUser.id, newStorageChat);
+      }
+      await forwardToPython('POST', '/storage', {
+        storage_chat: newStorageChat,
+        session_str: ctx.sessionStr,
+      });
+    }
+
+    const updatedWs = await getWorkspaceById(wsId);
+
+    res.json({
+      success: true,
+      migrated_files: shouldMigrateFiles,
+      migrated_count: migratedCount,
+      failed_count: failedCount,
+      total_files: totalFiles,
+      previous_storage_chat: currentChat,
+      storage_chat: newStorageChat,
+      workspace: updatedWs,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Error executing channel migration' });
+  }
+});
+
 app.post('/api/storage', async (req: Request, res: Response) => {
   const storageChat = String(req.body.storage_chat || 'me').trim();
   const ctx = await resolveCurrentUserContext(req);
@@ -1634,13 +1910,12 @@ app.post('/api/storage', async (req: Request, res: Response) => {
     session_str: ctx.sessionStr,
   });
 
-  if (tgId) {
-    const targetWsId = req.body.workspace_id ? Number(req.body.workspace_id) : null;
-    const wsToUpdate = targetWsId 
-      ? await getWorkspaceById(targetWsId).catch(() => null)
-      : await getActiveWorkspaceFromDb(tgId).catch(() => null);
-
-    if (wsToUpdate && wsToUpdate.id) {
+  // DO NOT automatically mutate workspace storage_chat!
+  // Only explicitly if update_workspace flag is passed with target workspace_id
+  if (tgId && req.body.update_workspace && req.body.workspace_id) {
+    const targetWsId = Number(req.body.workspace_id);
+    const wsToUpdate = await getWorkspaceById(targetWsId).catch(() => null);
+    if (wsToUpdate && wsToUpdate.id && String(wsToUpdate.telegram_id) === String(tgId)) {
       await updateWorkspaceInDb(wsToUpdate.id, tgId, { storage_chat: storageChat }).catch(() => {});
     }
   }
@@ -1872,13 +2147,13 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
     const userSessionRecord = await getUserTelegramSessionFromDb(tgId);
     const sessionStr = ctx.sessionStr || userSessionRecord?.session_str || undefined;
 
-    console.log(`[Fetch Telegram] Scanning chat '${storageChat}' for user #${tgId} (workspace: ${workspaceName || 'Default'})...`);
+    console.log(`[Fetch Telegram] Scanning all media history from chat '${storageChat}' for user #${tgId} (workspace: ${workspaceName || 'Default'})...`);
 
-    // Call Python Telethon service to scan MTProto history
+    // Call Python Telethon service to scan MTProto history with no limit (limit: 0 = fetch EVERY file in channel)
     const pyRes = await forwardToPython('POST', '/fetch_history', {
       storage_chat: storageChat,
       session_str: sessionStr,
-      limit: 300,
+      limit: 0,
     });
 
     if (!pyRes.data || !Array.isArray(pyRes.data.files)) {
@@ -1890,11 +2165,12 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
 
     const fetchedFiles = pyRes.data.files;
     let importedCount = 0;
+    let updatedCount = 0;
 
     for (const f of fetchedFiles) {
       if (!f.message_id) continue;
       try {
-        await saveFileToDb({
+        const saveRes = await saveFileToDb({
           telegram_id: tgId,
           message_id: f.message_id,
           workspace_id: workspaceId,
@@ -1907,7 +2183,11 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
           storage_chat: storageChat,
           direct_link: '',
         });
-        importedCount++;
+        if (saveRes.is_new) {
+          importedCount++;
+        } else {
+          updatedCount++;
+        }
       } catch (saveErr: any) {
         console.warn(`[Fetch Telegram] Notice saving file #${f.message_id}:`, saveErr.message);
       }
@@ -1923,15 +2203,16 @@ app.post(['/api/files/fetch-telegram', '/api/files/sync-telegram'], async (req: 
     return res.json({
       success: true,
       imported_count: importedCount,
+      updated_count: updatedCount,
       total_found: fetchedFiles.length,
       storage_chat: storageChat,
       workspace_id: workspaceId,
       files: formatted,
-      message: `Successfully scanned and imported ${importedCount} old files from Telegram into MySQL!`,
+      message: `Scanned all ${fetchedFiles.length} files from Telegram channel (${importedCount} new imported, ${updatedCount} synced)!`,
     });
   } catch (err: any) {
     console.error('[Fetch Telegram Error]:', err);
-    return res.status(500).json({ success: false, error: err.message });
+    return res.status(500).json({ success: false, error: err.message || 'Failed to fetch Telegram files.' });
   }
 });
 
@@ -2550,6 +2831,267 @@ app.post('/api/user/api-key/regenerate', async (req: Request, res: Response): Pr
     success: true,
     api_key: newApiKey,
     message: 'New API key generated successfully.',
+  });
+});
+
+// Public OpenAPI v3.0 Specification Endpoint
+app.get('/api/v1/openapi.json', (_req: Request, res: Response): void => {
+  res.json({
+    openapi: '3.0.3',
+    info: {
+      title: 'TeleCloud REST API Engine',
+      version: '2.2.22',
+      description: 'High-speed cloud storage engine powered by Telegram MTProto, multi-workspace isolation, direct URL generation, and byte-range video streaming.',
+      contact: {
+        name: 'TeleCloud Developer Support',
+        email: 'support@telecloud.app',
+        url: 'https://telecloud.app/docs'
+      }
+    },
+    servers: [
+      {
+        url: '{protocol}://{host}',
+        description: 'Current Environment Host',
+        variables: {
+          protocol: { default: 'https', enum: ['http', 'https'] },
+          host: { default: 'localhost:3000' }
+        }
+      }
+    ],
+    components: {
+      securitySchemes: {
+        ApiKeyHeader: {
+          type: 'apiKey',
+          in: 'header',
+          name: 'X-API-Key',
+          description: 'User API Key starting with tc_'
+        },
+        BearerAuth: {
+          type: 'http',
+          scheme: 'bearer',
+          bearerFormat: 'API Key',
+          description: 'Authorization header using Bearer token'
+        }
+      }
+    },
+    security: [
+      { ApiKeyHeader: [] },
+      { BearerAuth: [] }
+    ],
+    paths: {
+      '/api/v1/upload': {
+        post: {
+          summary: 'Upload File to Cloud Vault',
+          description: 'Uploads a file directly into the isolated Telegram storage channel attached to your workspace.',
+          requestBody: {
+            required: true,
+            content: {
+              'multipart/form-data': {
+                schema: {
+                  type: 'object',
+                  properties: {
+                    file: { type: 'string', format: 'binary', description: 'File binary payload' },
+                    storage_chat: { type: 'string', example: 'me', description: 'Destination storage channel or "me"' },
+                    caption: { type: 'string', description: 'Optional text note or tags' }
+                  },
+                  required: ['file']
+                }
+              }
+            }
+          },
+          responses: {
+            '200': { description: 'File uploaded successfully' },
+            '401': { description: 'Unauthorized / Missing API Key' }
+          }
+        }
+      },
+      '/api/v1/files': {
+        get: {
+          summary: 'List Vault Files',
+          description: 'Retrieves files stored in the active workspace with filtering, search, and pagination.',
+          parameters: [
+            { name: 'search', in: 'query', schema: { type: 'string' } },
+            { name: 'workspace_id', in: 'query', schema: { type: 'integer' } },
+            { name: 'mime_type', in: 'query', schema: { type: 'string' } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } }
+          ],
+          responses: {
+            '200': { description: 'List of files retrieved' }
+          }
+        }
+      },
+      '/api/v1/files/{id}': {
+        delete: {
+          summary: 'Delete File',
+          description: 'Permanently deletes a file record and removes the message from Telegram.',
+          parameters: [
+            { name: 'id', in: 'path', required: true, schema: { type: 'string' } }
+          ],
+          responses: {
+            '200': { description: 'File deleted' }
+          }
+        }
+      },
+      '/f/{slug}/{filename}': {
+        get: {
+          summary: 'Direct File Download / Access',
+          description: 'Direct high-speed stream download via unique file slug.',
+          parameters: [
+            { name: 'slug', in: 'path', required: true, schema: { type: 'string' } },
+            { name: 'filename', in: 'path', required: false, schema: { type: 'string' } }
+          ],
+          responses: {
+            '200': { description: 'Binary file payload' }
+          }
+        }
+      },
+      '/stream/{message_id}': {
+        get: {
+          summary: 'Stream Audio / Video',
+          description: 'Byte-range streaming endpoint with HTTP 206 Partial Content support.',
+          parameters: [
+            { name: 'message_id', in: 'path', required: true, schema: { type: 'integer' } }
+          ],
+          responses: {
+            '206': { description: 'Partial Content streaming payload' }
+          }
+        }
+      },
+      '/api/v1/workspaces': {
+        get: {
+          summary: 'List Workspaces',
+          description: 'Returns all storage workspaces owned by the user.',
+          responses: {
+            '200': { description: 'List of workspaces' }
+          }
+        },
+        post: {
+          summary: 'Create Workspace',
+          description: 'Creates a new isolated workspace with custom channel target.',
+          responses: {
+            '200': { description: 'Workspace created' }
+          }
+        }
+      },
+      '/api/v1/stats': {
+        get: {
+          summary: 'Storage & Analytics Stats',
+          description: 'Retrieves total storage used, file counts, and breakdown.',
+          responses: {
+            '200': { description: 'User storage statistics' }
+          }
+        }
+      }
+    }
+  });
+});
+
+// Public Postman Collection v2.1 Endpoint
+app.get('/api/v1/postman.json', (_req: Request, res: Response): void => {
+  res.json({
+    info: {
+      name: 'TeleCloud REST API v2.2',
+      _postman_id: 'telecloud-api-collection-v2',
+      description: 'Official Postman Collection for TeleCloud REST API Engine. Contains full request endpoints, headers, and parameter defaults.',
+      schema: 'https://schema.getpostman.com/json/collection/v2.1.0/collection.json'
+    },
+    variable: [
+      { key: 'baseUrl', value: 'https://telecloud.app', type: 'string' },
+      { key: 'apiKey', value: 'tc_your_api_key_here', type: 'string' }
+    ],
+    item: [
+      {
+        name: 'Authentication',
+        item: [
+          {
+            name: 'Verify API Key Integrity',
+            request: {
+              method: 'GET',
+              header: [{ key: 'X-API-Key', value: '{{apiKey}}', type: 'text' }],
+              url: { raw: '{{baseUrl}}/api/v1/verify', host: ['{{baseUrl}}'], path: ['api', 'v1', 'verify'] }
+            }
+          }
+        ]
+      },
+      {
+        name: 'Files & Storage',
+        item: [
+          {
+            name: 'Upload File to Storage Vault',
+            request: {
+              method: 'POST',
+              header: [{ key: 'X-API-Key', value: '{{apiKey}}', type: 'text' }],
+              body: {
+                mode: 'formdata',
+                formdata: [
+                  { key: 'file', type: 'file', src: [] },
+                  { key: 'storage_chat', value: 'me', type: 'text' },
+                  { key: 'caption', value: 'Uploaded via API', type: 'text' }
+                ]
+              },
+              url: { raw: '{{baseUrl}}/api/v1/upload', host: ['{{baseUrl}}'], path: ['api', 'v1', 'upload'] }
+            }
+          },
+          {
+            name: 'List Vault Files',
+            request: {
+              method: 'GET',
+              header: [{ key: 'X-API-Key', value: '{{apiKey}}', type: 'text' }],
+              url: { raw: '{{baseUrl}}/api/v1/files?limit=50', host: ['{{baseUrl}}'], path: ['api', 'v1', 'files'], query: [{ key: 'limit', value: '50' }] }
+            }
+          },
+          {
+            name: 'Delete File',
+            request: {
+              method: 'DELETE',
+              header: [{ key: 'X-API-Key', value: '{{apiKey}}', type: 'text' }],
+              url: { raw: '{{baseUrl}}/api/v1/files/101', host: ['{{baseUrl}}'], path: ['api', 'v1', 'files', '101'] }
+            }
+          }
+        ]
+      },
+      {
+        name: 'CDN & Streaming',
+        item: [
+          {
+            name: 'Direct File Download',
+            request: {
+              method: 'GET',
+              url: { raw: '{{baseUrl}}/f/sample-slug/sample.mp4', host: ['{{baseUrl}}'], path: ['f', 'sample-slug', 'sample.mp4'] }
+            }
+          },
+          {
+            name: 'Byte-Range Video Stream',
+            request: {
+              method: 'GET',
+              header: [{ key: 'Range', value: 'bytes=0-1048575', type: 'text' }],
+              url: { raw: '{{baseUrl}}/stream/101/video.mp4', host: ['{{baseUrl}}'], path: ['stream', '101', 'video.mp4'] }
+            }
+          }
+        ]
+      },
+      {
+        name: 'Workspaces & Stats',
+        item: [
+          {
+            name: 'List Workspaces',
+            request: {
+              method: 'GET',
+              header: [{ key: 'X-API-Key', value: '{{apiKey}}', type: 'text' }],
+              url: { raw: '{{baseUrl}}/api/v1/workspaces', host: ['{{baseUrl}}'], path: ['api', 'v1', 'workspaces'] }
+            }
+          },
+          {
+            name: 'Get Storage Stats',
+            request: {
+              method: 'GET',
+              header: [{ key: 'X-API-Key', value: '{{apiKey}}', type: 'text' }],
+              url: { raw: '{{baseUrl}}/api/v1/stats', host: ['{{baseUrl}}'], path: ['api', 'v1', 'stats'] }
+            }
+          }
+        ]
+      }
+    ]
   });
 });
 

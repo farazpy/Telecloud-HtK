@@ -1,7 +1,7 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { createRoot } from 'react-dom/client';
-import App from './App.tsx';
-import './index.css';
+import React, { Component, ErrorInfo, ReactNode } from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App.tsx";
+import "./index.css";
 
 // Resilient Error Boundary to prevent DOM translation/extension crashes
 interface Props {
@@ -24,17 +24,20 @@ class ErrorBoundary extends Component<Props, State> {
   }
 
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.warn('[TeleCloud] Captured error in boundary:', error, errorInfo);
+    console.warn("[TeleCloud] Captured error in boundary:", error, errorInfo);
   }
 
   public render() {
     if (this.state.hasError) {
       return (
-        <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center p-4">
-          <div className="max-w-md w-full p-6 rounded-2xl bg-slate-900 border border-slate-800 text-center space-y-4 shadow-2xl">
-            <h2 className="text-base font-bold text-sky-400">Application Recovered</h2>
+        <div className="min-h-screen bg-black text-white flex items-center justify-center p-4">
+          <div className="max-w-md w-full p-6 rounded-2xl bg-[#050505] border border-[#111111] text-center space-y-4 ">
+            <h2 className="text-base font-bold text-sky-400">
+              Application Recovered
+            </h2>
             <p className="text-xs text-slate-400">
-              An unexpected browser extension or translation syntax event was caught.
+              An unexpected browser extension or translation syntax event was
+              caught.
             </p>
             <button
               type="button"
@@ -54,11 +57,11 @@ class ErrorBoundary extends Component<Props, State> {
   }
 }
 
-const rootEl = document.getElementById('root');
+const rootEl = document.getElementById("root");
 if (rootEl) {
   createRoot(rootEl).render(
     <ErrorBoundary>
       <App />
-    </ErrorBoundary>
+    </ErrorBoundary>,
   );
 }
